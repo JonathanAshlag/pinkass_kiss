@@ -3,11 +3,11 @@
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Union
 
 from app.db import get_db
 from app.models.page import Page, PageCreate, PageUpdate, PageStatus, TrustTier, HistoryEntry
-from app.models.user import User
+from app.models.user import User, PermissionLevel
 from app.services.permissions import can_view_page, get_visible_page_ids
 
 
@@ -30,6 +30,7 @@ async def create_page(data: PageCreate, user: User) -> Page:
     db = get_db()
     page = Page(
         title=data.title,
+        description=data.description,
         parent_id=data.parent_id,
         content=data.content,
         references=data.references,
@@ -66,6 +67,8 @@ async def update_page(page_id: str, data: PageUpdate, user: User) -> Optional[Pa
     update_fields: dict = {}
     if data.title is not None:
         update_fields["title"] = data.title
+    if data.description is not None:
+        update_fields["description"] = data.description
     if data.parent_id is not None:
         update_fields["parent_id"] = data.parent_id
     if data.content is not None:
@@ -110,22 +113,69 @@ async def delete_page(page_id: str, user: User) -> bool:
     return result.modified_count > 0
 
 
-async def search_pages(query: str, user: User) -> list[Page]:
-    """Full-text search filtered by user permissions."""
+_TIER_RANK = {"verified": 3, "source_checked": 2, "unverified": 1}
+
+
+async def find_pages(
+    query: str,
+    user: Optional[User] = None,
+    ranked: bool = False,
+    statuses: Optional[list] = None,
+    limit: int = 10,
+    projection: Optional[dict] = None,
+) -> list[Union[dict, Page]]:
+    """Unified page text-search with optional permission filtering, ranking, and projection.
+
+    - user=None: no permission filter (system/internal use)
+    - ranked=True: sort by trust_tier desc then inbound_link_count desc
+    - statuses=None: defaults to published only
+    - projection=None: returns list[Page]; projection given returns list[dict]
+    """
     db = get_db()
-    visible_ids = await get_visible_page_ids(user)
-    cursor = db.pages.find(
-        {
-            "$text": {"$search": query},
-            "status": PageStatus.published.value,
-            "page_id": {"$in": list(visible_ids)},
-        }
-    )
-    pages = []
+
+    mongo_filter: dict = {}
+    if statuses is not None:
+        mongo_filter["status"] = {"$in": [s.value for s in statuses]}
+    else:
+        mongo_filter["status"] = PageStatus.published.value
+
+    if user is not None and user.permission_level != PermissionLevel.admin:
+        visible_ids = await get_visible_page_ids(user)
+        mongo_filter["page_id"] = {"$in": list(visible_ids)}
+
+    try:
+        text_filter = {"$text": {"$search": query}, **mongo_filter}
+        cursor = (
+            db.pages.find(text_filter, projection).limit(limit)
+            if projection
+            else db.pages.find(text_filter).limit(limit)
+        )
+    except Exception:
+        cursor = (
+            db.pages.find(mongo_filter, projection).limit(limit)
+            if projection
+            else db.pages.find(mongo_filter).limit(limit)
+        )
+
+    results = []
     async for doc in cursor:
         doc.pop("_id", None)
-        pages.append(Page(**doc))
-    return pages
+        results.append(doc)
+
+    if ranked:
+        results.sort(
+            key=lambda d: (_TIER_RANK.get(d.get("trust_tier", "unverified"), 0), d.get("inbound_link_count", 0)),
+            reverse=True,
+        )
+
+    if projection is not None:
+        return results
+    return [Page(**doc) for doc in results]
+
+
+async def search_pages(query: str, user: User) -> list[Page]:
+    """Full-text search filtered by user permissions."""
+    return await find_pages(query, user=user)
 
 
 async def get_page_tree(user: User) -> list[dict]:

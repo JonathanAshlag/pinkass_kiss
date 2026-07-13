@@ -45,6 +45,7 @@ class HistoryEntry(BaseModel):
 class Page(BaseModel):
     page_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     title: str
+    description: str
     parent_id: Optional[str] = None
     references: list[Reference] = Field(default_factory=list)
     content: str = ""
@@ -63,6 +64,7 @@ class Page(BaseModel):
 
 class PageCreate(BaseModel):
     title: str
+    description: str
     parent_id: Optional[str] = None
     content: str = ""
     references: list[Reference] = Field(default_factory=list)
@@ -71,6 +73,7 @@ class PageCreate(BaseModel):
 
 class PageUpdate(BaseModel):
     title: Optional[str] = None
+    description: Optional[str] = None
     parent_id: Optional[str] = None
     content: Optional[str] = None
     references: Optional[list[Reference]] = None

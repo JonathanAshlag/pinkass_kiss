@@ -9,7 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.config import settings
 from app.db import get_db
 from app.models.page import HistoryEntry, PageStatus, TrustTier
-from app.models.request import ApprovalRequest, RequestStatus, RequestType, RequestHistoryEntry
+from app.models.request import ApprovalRequest, RequestStatus, RequestType, RequestHistoryEntry, ReviewPayload
 from app.services.pages import compute_content_hash
 from app.services.users import get_user
 
@@ -48,7 +48,7 @@ async def check_expired_pages() -> int:
             type=RequestType.review,
             page_id=page_id,
             requested_by=created_by,
-            proposed_content={"title": doc.get("title"), "content": doc.get("content")},
+            proposed_content=ReviewPayload(title=doc.get("title"), content=doc.get("content")),
             workflow_id=user.workflow_id,
             current_step=0,
             status=RequestStatus.pending,
@@ -109,11 +109,11 @@ async def check_verification_drift() -> int:
             type=RequestType.review,
             page_id=page_id,
             requested_by=doc["created_by"],
-            proposed_content={
-                "title": doc.get("title"),
-                "content": doc.get("content"),
-                "trust_tier": TrustTier.verified.value,
-            },
+            proposed_content=ReviewPayload(
+                title=doc.get("title"),
+                content=doc.get("content"),
+                trust_tier=TrustTier.verified.value,
+            ),
             workflow_id=user.workflow_id,
             current_step=0,
             status=RequestStatus.pending,

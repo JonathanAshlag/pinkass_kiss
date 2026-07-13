@@ -8,7 +8,8 @@ from app.db import get_db
 from app.models.page import HistoryEntry, PageStatus, TrustTier
 from app.services.pages import compute_content_hash
 from app.models.request import (
-    ApprovalRequest, RequestStatus, RequestType, RequestHistoryEntry
+    ApprovalRequest, RequestStatus, RequestType, RequestHistoryEntry,
+    EditPayload, ReviewPayload, PageMutationPayload,
 )
 from app.models.user import User
 from app.services.workflows import get_workflow
@@ -20,7 +21,7 @@ async def create_request(
     req_type: RequestType,
     page_id: str,
     user: User,
-    proposed_content: Optional[dict] = None,
+    proposed_content: Optional[PageMutationPayload] = None,
 ) -> ApprovalRequest:
     """Create a new approval request routed through the user's workflow."""
     db = get_db()
@@ -172,20 +173,21 @@ async def _apply_approved_request(req: ApprovalRequest, approver_id: str, commen
         comment=comment,
     )
 
-    if req.type == RequestType.create or req.type == RequestType.review:
+    if req.type in (RequestType.create, RequestType.review):
         update: dict = {"status": PageStatus.published.value, "updated_at": datetime.now(timezone.utc).isoformat()}
         if req.proposed_content:
-            if "title" in req.proposed_content:
-                update["title"] = req.proposed_content["title"]
-            if "content" in req.proposed_content:
-                update["content"] = req.proposed_content["content"]
-        if req.type == RequestType.review and req.proposed_content and req.proposed_content.get("trust_tier") == TrustTier.verified.value:
-            page_doc = await db.pages.find_one({"page_id": req.page_id})
-            final_content = update.get("content") or (page_doc.get("content", "") if page_doc else "")
-            update["trust_tier"] = TrustTier.verified.value
-            update["verified_content_hash"] = compute_content_hash(final_content)
-            update["verified_at"] = datetime.now(timezone.utc).isoformat()
-            update["verified_by"] = approver_id
+            pc = req.proposed_content
+            if hasattr(pc, "title") and pc.title:
+                update["title"] = pc.title
+            if hasattr(pc, "content") and pc.content:
+                update["content"] = pc.content
+            if req.type == RequestType.review and isinstance(pc, ReviewPayload) and pc.trust_tier == TrustTier.verified.value:
+                page_doc = await db.pages.find_one({"page_id": req.page_id})
+                final_content = update.get("content") or (page_doc.get("content", "") if page_doc else "")
+                update["trust_tier"] = TrustTier.verified.value
+                update["verified_content_hash"] = compute_content_hash(final_content)
+                update["verified_at"] = datetime.now(timezone.utc).isoformat()
+                update["verified_by"] = approver_id
         await db.pages.update_one(
             {"page_id": req.page_id},
             {
@@ -195,12 +197,14 @@ async def _apply_approved_request(req: ApprovalRequest, approver_id: str, commen
         )
     elif req.type == RequestType.edit:
         update = {"status": PageStatus.published.value, "updated_at": datetime.now(timezone.utc).isoformat()}
-        if req.proposed_content:
-            for key in ("title", "content", "parent_id", "next_approval_date"):
-                if key in req.proposed_content:
-                    update[key] = req.proposed_content[key]
-            if "references" in req.proposed_content:
-                update["references"] = req.proposed_content["references"]
+        if req.proposed_content and isinstance(req.proposed_content, EditPayload):
+            ep = req.proposed_content
+            for key in ("title", "description", "content", "parent_id", "next_approval_date"):
+                val = getattr(ep, key, None)
+                if val is not None:
+                    update[key] = val
+            if ep.references is not None:
+                update["references"] = ep.references
         await db.pages.update_one(
             {"page_id": req.page_id},
             {

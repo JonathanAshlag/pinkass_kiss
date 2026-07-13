@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Annotated, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -33,12 +33,46 @@ class Decision(BaseModel):
     comment: Optional[str] = None
 
 
+class CreatePayload(BaseModel):
+    type: Literal["create"] = "create"
+    title: str
+    description: str = ""
+    content: str = ""
+
+
+class EditPayload(BaseModel):
+    type: Literal["edit"] = "edit"
+    title: Optional[str] = None
+    description: Optional[str] = None
+    content: Optional[str] = None
+    parent_id: Optional[str] = None
+    references: Optional[list] = None
+    next_approval_date: Optional[str] = None
+
+
+class DeletePayload(BaseModel):
+    type: Literal["delete"] = "delete"
+
+
+class ReviewPayload(BaseModel):
+    type: Literal["review"] = "review"
+    title: Optional[str] = None
+    content: Optional[str] = None
+    trust_tier: Optional[str] = None
+
+
+PageMutationPayload = Annotated[
+    Union[CreatePayload, EditPayload, DeletePayload, ReviewPayload],
+    Field(discriminator="type"),
+]
+
+
 class ApprovalRequest(BaseModel):
     request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     type: RequestType
     page_id: str
     requested_by: str
-    proposed_content: Optional[dict] = None
+    proposed_content: Optional[PageMutationPayload] = None
     workflow_id: str
     current_step: int = 0
     status: RequestStatus = RequestStatus.pending

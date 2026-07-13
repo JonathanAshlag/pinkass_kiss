@@ -7,10 +7,8 @@ from typing import Optional
 from openai import AsyncOpenAI
 
 from app.config import settings
-from app.db import get_db
-from app.models.page import PageStatus
 from app.models.user import User
-from app.services.permissions import get_visible_page_ids
+from app.services.pages import find_pages
 
 logger = logging.getLogger("pinkas.llm")
 
@@ -40,45 +38,6 @@ def _get_client() -> AsyncOpenAI:
         base_url=settings.openai_base_url,
         api_key=settings.openai_api_key,
     )
-
-
-async def _retrieve_pages(query: str, user: User) -> list[dict]:
-    """Search pages with permission filtering for the tool call."""
-    db = get_db()
-    visible_ids = await get_visible_page_ids(user)
-
-    projection = {"page_id": 1, "title": 1, "content": 1, "trust_tier": 1, "inbound_link_count": 1, "_id": 0}
-    try:
-        cursor = db.pages.find(
-            {
-                "$text": {"$search": query},
-                "status": PageStatus.published.value,
-                "page_id": {"$in": list(visible_ids)},
-            },
-            projection,
-        ).limit(10)
-    except Exception:
-        cursor = db.pages.find(
-            {
-                "status": PageStatus.published.value,
-                "page_id": {"$in": list(visible_ids)},
-            },
-            projection,
-        ).limit(10)
-
-    results = []
-    async for doc in cursor:
-        results.append({
-            "page_id": doc["page_id"],
-            "title": doc["title"],
-            "content": doc.get("content", "")[:500],
-            "trust_tier": doc.get("trust_tier", "unverified"),
-            "inbound_link_count": doc.get("inbound_link_count", 0),
-        })
-
-    tier_rank = {"verified": 3, "source_checked": 2, "unverified": 1}
-    results.sort(key=lambda p: (tier_rank.get(p["trust_tier"], 0), p["inbound_link_count"]), reverse=True)
-    return results
 
 
 async def ask_with_retrieval(
@@ -127,7 +86,15 @@ async def ask_with_retrieval(
             for tool_call in choice.message.tool_calls:
                 if tool_call.function.name == "retrieve":
                     args = json.loads(tool_call.function.arguments)
-                    results = await _retrieve_pages(args["query"], user)
+                    results = await find_pages(
+                        args["query"],
+                        user=user,
+                        ranked=True,
+                        limit=10,
+                        projection={"page_id": 1, "title": 1, "content": 1, "trust_tier": 1, "inbound_link_count": 1, "_id": 0},
+                    )
+                    for r in results:
+                        r["content"] = r.get("content", "")[:500]
                     for r in results:
                         if r["page_id"] not in cited_pages:
                             cited_pages.append(r["page_id"])
@@ -143,42 +110,146 @@ async def ask_with_retrieval(
     return {"answer": "Maximum iterations reached.", "cited_pages": cited_pages}
 
 
-async def produce_pages(text: str, filename: str) -> list[dict]:
-    """Use LLM to split extracted text into pages.
+def _parse_json_response(raw: str) -> str:
+    """Strip markdown code fences from an LLM JSON response."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+    return raw.strip()
 
-    Returns list of {"title": str, "content": str, "parent_title": str|None}
-    """
+
+async def _call_llm_json(messages: list[dict], default: object, name: str = "llm") -> object:
+    """Call the LLM and parse a JSON response. Returns `default` on any error."""
     client = _get_client()
-
-    prompt = f"""You are processing a document for an organizational knowledge wiki.
-The document is named: {filename}
-
-Extract distinct entities/topics from the following text and create separate wiki pages for each.
-For each page provide:
-- title: a clear title for the entity/topic
-- content: the full content in Markdown format
-- parent_title: suggested parent page title for hierarchy (null if it should be a root page)
-
-Return a JSON array of objects with these fields. Only return valid JSON, no other text.
-
-Document text:
-{text[:8000]}"""
-
     try:
         response = await client.chat.completions.create(
             model=settings.openai_model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
         )
-        content = response.choices[0].message.content or "[]"
-        content = content.strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-        pages = json.loads(content)
-        if not isinstance(pages, list):
-            pages = [pages]
-        return pages
+        raw = _parse_json_response(response.choices[0].message.content or "")
+        return json.loads(raw)
     except Exception as e:
-        logger.error(f"LLM produce error: {e}")
-        return [{"title": filename, "content": text[:5000], "parent_title": None}]
+        logger.error(f"LLM {name} error: {e}")
+        return default
+
+
+async def extract_topic_candidates(text: str, filename: str) -> list[dict]:
+    """Phase 1: Extract topic titles and descriptions from a document.
+
+    Returns list of {"title": str, "description": str}
+    """
+    result = await _call_llm_json(
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    'You are a knowledge base curator for an organizational wiki called "Pinkas" (פנקס כיס). '
+                    "Identify the distinct wiki-worthy topics in a source document."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Document: {filename}\n\n"
+                    "For each distinct topic in the document, return:\n"
+                    "- title: concise wiki-style title\n"
+                    "- description: one sentence defining this topic (used for search and dedup)\n\n"
+                    "Return a JSON array only. No other text.\n\n"
+                    f"Document text:\n{text}"
+                ),
+            },
+        ],
+        default=[{"title": filename, "description": f"Content from {filename}"}],
+        name="extract_topic_candidates",
+    )
+    candidates = result if isinstance(result, list) else [result]
+    return candidates
+
+
+async def judge_duplicate(candidate: dict, search_results: list[dict]) -> dict:
+    """Phase 2: Determine whether a candidate topic matches an existing page.
+
+    Returns {"is_duplicate": bool, "matched_page_id": str|None, "confidence": "high"|"medium"|"low"}
+    """
+    pages_text = "\n".join(
+        f"- [{r['page_id']}] {r['title']}: {r.get('description', '')}\n  Content: {r.get('content', '')}"
+        for r in search_results
+    )
+    return await _call_llm_json(
+        messages=[
+            {"role": "system", "content": "You are a knowledge deduplication specialist."},
+            {
+                "role": "user",
+                "content": (
+                    f"Candidate:\n"
+                    f"  Title: {candidate['title']}\n"
+                    f"  Description: {candidate.get('description', '')}\n\n"
+                    f"Existing pages:\n{pages_text}\n\n"
+                    "Is the candidate the same concept as any existing page?\n"
+                    'Return JSON only: {"is_duplicate": bool, "matched_page_id": "id or null", "confidence": "high|medium|low"}'
+                ),
+            },
+        ],
+        default={"is_duplicate": False, "matched_page_id": None, "confidence": "low"},
+        name="judge_duplicate",
+    )
+
+
+async def generate_page_content(title: str, description: str, filename: str, text: str) -> dict:
+    """Phase 3A: Generate full wiki page content for a confirmed-new topic.
+
+    Returns {"content": str}
+    """
+    return await _call_llm_json(
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a wiki editor writing a new page for an organizational knowledge base.",
+            },
+            {
+                "role": "user",
+                "content": (
+                    f'Write a complete wiki page for the topic "{title}" ({description}).\n'
+                    f"Source document: {filename}\n\n"
+                    "Base your content only on what the document says about this topic.\n"
+                    'Return JSON only: {"content": "full markdown content"}\n\n'
+                    f"Document text:\n{text}"
+                ),
+            },
+        ],
+        default={"content": text},
+        name="generate_page_content",
+    )
+
+
+async def merge_content(existing_title: str, existing_content: str, candidate_description: str, filename: str, text: str) -> dict:
+    """Phase 3B: Check if a source document adds new information to an existing page.
+
+    Returns {"has_new_info": bool, "merged_content": str|None, "summary_of_additions": str|None}
+    """
+    return await _call_llm_json(
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a wiki editor. Determine if a source document adds new information "
+                    "to an existing wiki page, and if so produce updated content."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f'Existing page "{existing_title}":\n{existing_content}\n\n'
+                    f'New source "{filename}" covers this topic as:\n'
+                    f"  Description: {candidate_description}\n\n"
+                    f"Document text:\n{text}\n\n"
+                    "Does the document add meaningful information not already in the existing page?\n"
+                    'Return JSON only: {"has_new_info": bool, "merged_content": "full updated markdown or null", "summary_of_additions": "brief or null"}'
+                ),
+            },
+        ],
+        default={"has_new_info": False, "merged_content": None, "summary_of_additions": None},
+        name="merge_content",
+    )

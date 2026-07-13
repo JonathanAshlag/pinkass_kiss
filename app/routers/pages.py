@@ -1,18 +1,16 @@
 """Page endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import Optional
 
 from app.models.page import Page, PageCreate, PageUpdate, PageStatus
 from app.models.request import RequestType
 from app.models.user import User
 from app.routers.deps import get_current_user, require_editor
+from app.services.mutations import apply_page_mutation
 from app.services.pages import (
-    create_page, get_page, update_page, delete_page,
-    search_pages, get_page_tree, get_page_history, is_trust_stale,
+    get_page, search_pages, get_page_tree, get_page_history, is_trust_stale,
 )
 from app.services.permissions import can_view_page
-from app.services.requests import create_request
 
 router = APIRouter(prefix="/pages", tags=["pages"])
 
@@ -20,18 +18,7 @@ router = APIRouter(prefix="/pages", tags=["pages"])
 @router.post("", response_model=dict)
 async def create_page_endpoint(data: PageCreate, user: User = Depends(require_editor)):
     """Create a new page. Routes through workflow if user has one."""
-    page = await create_page(data, user)
-
-    if user.workflow_id:
-        req = await create_request(
-            req_type=RequestType.create,
-            page_id=page.page_id,
-            user=user,
-            proposed_content={"title": data.title, "content": data.content},
-        )
-        return {"page": page.model_dump(mode="json"), "request_id": req.request_id, "status": "pending_approval"}
-
-    return {"page": page.model_dump(mode="json"), "status": "published"}
+    return await apply_page_mutation(RequestType.create, user, data=data)
 
 
 @router.get("/tree")
@@ -74,19 +61,7 @@ async def update_page_endpoint(page_id: str, data: PageUpdate, user: User = Depe
     page = await get_page(page_id)
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
-
-    if user.workflow_id:
-        proposed = data.model_dump(mode="json", exclude_none=True)
-        req = await create_request(
-            req_type=RequestType.edit,
-            page_id=page_id,
-            user=user,
-            proposed_content=proposed,
-        )
-        return {"request_id": req.request_id, "status": "pending_approval"}
-
-    updated = await update_page(page_id, data, user)
-    return {"page": updated.model_dump(mode="json"), "status": "published"}
+    return await apply_page_mutation(RequestType.edit, user, data=data, page_id=page_id)
 
 
 @router.delete("/{page_id}", response_model=dict)
@@ -95,14 +70,4 @@ async def delete_page_endpoint(page_id: str, user: User = Depends(require_editor
     page = await get_page(page_id)
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
-
-    if user.workflow_id:
-        req = await create_request(
-            req_type=RequestType.delete,
-            page_id=page_id,
-            user=user,
-        )
-        return {"request_id": req.request_id, "status": "pending_approval"}
-
-    await delete_page(page_id, user)
-    return {"status": "deleted"}
+    return await apply_page_mutation(RequestType.delete, user, page_id=page_id)

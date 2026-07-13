@@ -16,6 +16,7 @@ def render_create(user_id: str):
         return
 
     title = st.text_input(UI["title_field"])
+    description = st.text_input(UI["description_field"])
     parent_id = st.text_input(UI["parent_page"], placeholder=UI["root_page"])
     content = st.text_area(UI["content_field"], height=300)
     approval_date = st.date_input(
@@ -28,9 +29,13 @@ def render_create(user_id: str):
         if not title:
             st.error("יש להזין כותרת")
             return
+        if not description:
+            st.error("יש להזין תיאור קצר")
+            return
 
         data = {
             "title": title,
+            "description": description,
             "content": content,
             "parent_id": parent_id if parent_id else None,
         }
@@ -60,6 +65,7 @@ def _render_edit(user_id: str):
     st.subheader(f"{UI['edit_page']}: {page.get('title', '')}")
 
     title = st.text_input(UI["title_field"], value=page.get("title", ""))
+    description = st.text_input(UI["description_field"], value=page.get("description", "") or "")
     parent_id = st.text_input(UI["parent_page"], value=page.get("parent_id", "") or "")
     content = st.text_area(UI["content_field"], value=page.get("content", ""), height=300)
 
@@ -82,6 +88,8 @@ def _render_edit(user_id: str):
             data = {}
             if title != page.get("title"):
                 data["title"] = title
+            if description != (page.get("description") or ""):
+                data["description"] = description
             if content != page.get("content"):
                 data["content"] = content
             if parent_id != (page.get("parent_id") or ""):

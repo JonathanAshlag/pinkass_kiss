@@ -43,6 +43,7 @@ UI = {
     "edit_page": "עריכת דף",
     "delete_page": "מחיקת דף",
     "title_field": "כותרת",
+    "description_field": "תיאור קצר",
     "content_field": "תוכן (Markdown)",
     "approval_date": "תאריך אישור הבא",
     "save_button": "שמור",

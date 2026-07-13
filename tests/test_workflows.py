@@ -5,7 +5,7 @@ import pytest_asyncio
 
 from app.models.user import User, PermissionLevel
 from app.models.page import PageCreate, PageStatus
-from app.models.request import RequestType, RequestStatus
+from app.models.request import RequestType, RequestStatus, CreatePayload
 from app.services.pages import create_page, get_page
 from app.services.workflows import create_workflow
 from app.services.requests import create_request, decide_request
@@ -50,7 +50,7 @@ async def test_no_workflow_auto_publish(mock_db, workflow_setup):
     """Editor without workflow publishes directly."""
     free_editor = workflow_setup["free_editor"]
     page = await create_page(
-        PageCreate(title="Direct Page", content="Content"),
+        PageCreate(title="Direct Page", description="A direct page", content="Content"),
         free_editor
     )
     assert page.status == PageStatus.published
@@ -61,7 +61,7 @@ async def test_workflow_creates_draft(mock_db, workflow_setup):
     """Editor with workflow creates draft, not published."""
     editor = workflow_setup["editor"]
     page = await create_page(
-        PageCreate(title="Draft Page", content="Content"),
+        PageCreate(title="Draft Page", description="A draft page", content="Content"),
         editor
     )
     assert page.status == PageStatus.draft
@@ -71,16 +71,15 @@ async def test_workflow_creates_draft(mock_db, workflow_setup):
 async def test_full_approval_chain(mock_db, workflow_setup):
     """Two approvals in sequence publish the page."""
     editor = workflow_setup["editor"]
-    wf = workflow_setup["workflow"]
 
     page = await create_page(
-        PageCreate(title="Chain Page", content="Hello"),
+        PageCreate(title="Chain Page", description="A chain page", content="Hello"),
         editor
     )
 
     req = await create_request(
         RequestType.create, page.page_id, editor,
-        proposed_content={"title": "Chain Page", "content": "Hello"},
+        proposed_content=CreatePayload(title="Chain Page", description="A chain page", content="Hello"),
     )
 
     # Step 1: approver1 approves
@@ -101,16 +100,15 @@ async def test_full_approval_chain(mock_db, workflow_setup):
 async def test_mid_chain_rejection(mock_db, workflow_setup):
     """Rejection at step 1 rejects the entire request."""
     editor = workflow_setup["editor"]
-    wf = workflow_setup["workflow"]
 
     page = await create_page(
-        PageCreate(title="Reject Page", content="Bad content"),
+        PageCreate(title="Reject Page", description="A reject page", content="Bad content"),
         editor
     )
 
     req = await create_request(
         RequestType.create, page.page_id, editor,
-        proposed_content={"title": "Reject Page", "content": "Bad content"},
+        proposed_content=CreatePayload(title="Reject Page", description="A reject page", content="Bad content"),
     )
 
     # Step 1: approver1 rejects
@@ -132,13 +130,13 @@ async def test_wrong_approver_cannot_decide(mock_db, workflow_setup):
     editor = workflow_setup["editor"]
 
     page = await create_page(
-        PageCreate(title="Auth Page", content="Content"),
+        PageCreate(title="Auth Page", description="An auth page", content="Content"),
         editor
     )
 
     req = await create_request(
         RequestType.create, page.page_id, editor,
-        proposed_content={"title": "Auth Page", "content": "Content"},
+        proposed_content=CreatePayload(title="Auth Page", description="An auth page", content="Content"),
     )
 
     # approver2 tries to decide at step 0 (should fail)

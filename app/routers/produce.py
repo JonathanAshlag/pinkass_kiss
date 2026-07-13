@@ -1,19 +1,15 @@
 """Document ingestion endpoint."""
 
 import logging
-from datetime import datetime, timezone
 from io import BytesIO
 
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException
 
 from app.db import get_db, get_gridfs
-from app.models.page import PageCreate, Reference, ReferenceType, TrustTier
-from app.models.request import RequestType
-from app.models.user import User, PermissionLevel
+from app.models.page import TrustTier
+from app.models.user import User
 from app.routers.deps import require_editor
-from app.services.pages import create_page, compute_content_hash
-from app.services.requests import create_request
-from app.llm.client import produce_pages
+from app.llm.pipeline import run_ingestion_pipeline
 
 logger = logging.getLogger("pinkas.produce")
 
@@ -84,56 +80,23 @@ async def produce(
             "filename": filename,
             "content_type": content_type,
             "uploaded_by": user.user_id,
-            "extracted_text": extracted[:10000],
+            "extracted_text": extracted,
             "generated_page_ids": [],
         })
 
-        # Use LLM to split into pages
-        page_defs = await produce_pages(extracted, filename)
+        # Run structured ingestion pipeline
+        pipeline_results = await run_ingestion_pipeline(
+            text=extracted,
+            filename=filename,
+            file_id_str=file_id_str,
+            user=user,
+            initial_trust_tier=initial_trust_tier,
+        )
 
-        generated_page_ids = []
-        for page_def in page_defs:
-            title = page_def.get("title", filename)
-            page_content = page_def.get("content", extracted[:2000])
+        generated_page_ids = [r["page_id"] for r in pipeline_results]
+        results.extend(pipeline_results)
 
-            page_data = PageCreate(
-                title=title,
-                content=page_content,
-                references=[Reference(type=ReferenceType.file, file_id=file_id_str)],
-            )
-
-            page = await create_page(page_data, user)
-            generated_page_ids.append(page.page_id)
-
-            if user.workflow_id:
-                await create_request(
-                    req_type=RequestType.create,
-                    page_id=page.page_id,
-                    user=user,
-                    proposed_content={"title": title, "content": page_content},
-                )
-
-            if (
-                user.permission_level == PermissionLevel.admin
-                and initial_trust_tier == TrustTier.verified.value
-            ):
-                await db.pages.update_one(
-                    {"page_id": page.page_id},
-                    {"$set": {
-                        "trust_tier": TrustTier.verified.value,
-                        "verified_content_hash": compute_content_hash(page.content),
-                        "verified_at": datetime.now(timezone.utc).isoformat(),
-                        "verified_by": user.user_id,
-                    }},
-                )
-
-            results.append({
-                "page_id": page.page_id,
-                "title": title,
-                "status": "pending_approval" if user.workflow_id else "published",
-            })
-
-        # Update source file with generated page ids
+        # Update source file with generated/linked page ids
         await db.source_files.update_one(
             {"file_id": file_id_str},
             {"$set": {"generated_page_ids": generated_page_ids}}
