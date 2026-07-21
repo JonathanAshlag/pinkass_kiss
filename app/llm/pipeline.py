@@ -46,10 +46,11 @@ async def run_ingestion_pipeline(
         if not title:
             continue
 
-        # Phase 2: search all non-deleted pages (no permission filter — ingestion is system-level)
+        # Phase 2: search within the uploading user's permissions
         search_results = await find_page_docs(
             f"{title} {description}",
             projection={"page_id": 1, "title": 1, "description": 1, "content": 1, "_id": 0},
+            user=user,
             statuses=[s for s in PageStatus if s != PageStatus.deleted],
             limit=5,
         )

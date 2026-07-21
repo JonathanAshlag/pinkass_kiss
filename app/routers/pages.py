@@ -58,6 +58,8 @@ async def get_history(page_id: str, user: User = Depends(get_current_user)):
 @router.put("/{page_id}", response_model=dict)
 async def update_page_endpoint(page_id: str, data: PageUpdate, user: User = Depends(require_editor)):
     """Edit a page. Routes through workflow if user has one."""
+    if not await can_view_page(user, page_id):
+        raise HTTPException(status_code=403, detail="No permission to view this page")
     page = await get_page(page_id)
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
@@ -67,6 +69,8 @@ async def update_page_endpoint(page_id: str, data: PageUpdate, user: User = Depe
 @router.delete("/{page_id}", response_model=dict)
 async def delete_page_endpoint(page_id: str, user: User = Depends(require_editor)):
     """Delete a page. Routes through workflow if user has one."""
+    if not await can_view_page(user, page_id):
+        raise HTTPException(status_code=403, detail="No permission to view this page")
     page = await get_page(page_id)
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")

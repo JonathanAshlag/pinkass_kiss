@@ -89,7 +89,6 @@ UI = {
     "workflow_steps": "שלבי אישור (מזהי משתמשים, מופרדים בפסיקים)",
     "create_user": "יצירת משתמש",
     "assign_workflow": "שיוך תהליך עבודה",
-    "page_permissions_field": "הרשאות דפים (מזהי דפים, מופרדים בפסיקים)",
 
     # Status values
     "status_draft": "טיוטה",

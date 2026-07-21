@@ -6,9 +6,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.db import get_db
-from app.models.page import Page, PageCreate, PageUpdate, PageStatus, TrustTier, HistoryEntry, Reference
-from app.models.user import User, PermissionLevel
-from app.services.permissions import can_view_page, get_visible_page_ids
+from app.models.page import Page, PageCreate, PageUpdate, PageStatus, TrustTier, HistoryEntry, Reference, ClassificationTriangle
+from app.models.user import User
+from app.services.classification import get_user_triangles, user_satisfies_classification
 
 
 def compute_content_hash(content: str) -> str:
@@ -34,6 +34,7 @@ async def create_page(data: PageCreate, user: User) -> Page:
         parent_id=data.parent_id,
         content=data.content,
         references=data.references,
+        classification=data.classification,
         next_approval_date=data.next_approval_date,
         status=PageStatus.published if not user.workflow_id else PageStatus.draft,
         created_by=user.user_id,
@@ -75,6 +76,8 @@ async def update_page(page_id: str, data: PageUpdate, user: User) -> Optional[Pa
         update_fields["content"] = data.content
     if data.references is not None:
         update_fields["references"] = [r.model_dump(mode="json") for r in data.references]
+    if data.classification is not None:
+        update_fields["classification"] = [c.model_dump(mode="json") for c in data.classification]
     if data.next_approval_date is not None:
         update_fields["next_approval_date"] = data.next_approval_date.isoformat()
 
@@ -118,7 +121,7 @@ _TIER_RANK = {"verified": 3, "source_checked": 2, "unverified": 1}
 
 async def _find_raw_docs(
     query: str,
-    user: Optional[User] = None,
+    user: User,
     ranked: bool = False,
     statuses: Optional[list] = None,
     limit: int = 10,
@@ -131,26 +134,48 @@ async def _find_raw_docs(
         mongo_filter["status"] = {"$in": [s.value for s in statuses]}
     else:
         mongo_filter["status"] = PageStatus.published.value
-    if user is not None and user.permission_level != PermissionLevel.admin:
-        visible_ids = await get_visible_page_ids(user)
-        mongo_filter["page_id"] = {"$in": list(visible_ids)}
+
+    # Ensure classification field is fetched for filtering even if not in caller's projection
+    effective_projection = projection
+    strip_classification = False
+    if projection is not None and "classification" not in projection:
+        effective_projection = {**projection, "classification": 1}
+        strip_classification = True
+
+    results = []
     try:
         text_filter = {"$text": {"$search": query}, **mongo_filter}
         cursor = (
-            db.pages.find(text_filter, projection).limit(limit)
-            if projection
+            db.pages.find(text_filter, effective_projection).limit(limit)
+            if effective_projection
             else db.pages.find(text_filter).limit(limit)
         )
+        async for doc in cursor:
+            doc.pop("_id", None)
+            results.append(doc)
     except Exception:
         cursor = (
-            db.pages.find(mongo_filter, projection).limit(limit)
-            if projection
+            db.pages.find(mongo_filter, effective_projection).limit(limit)
+            if effective_projection
             else db.pages.find(mongo_filter).limit(limit)
         )
-    results = []
-    async for doc in cursor:
-        doc.pop("_id", None)
-        results.append(doc)
+        async for doc in cursor:
+            doc.pop("_id", None)
+            results.append(doc)
+
+    # Post-filter by classification triangles
+    user_triangles = await get_user_triangles(user.user_id)
+    results = [
+        doc for doc in results
+        if user_satisfies_classification(
+            user_triangles,
+            [ClassificationTriangle(**t) for t in doc.get("classification", [])],
+        )
+    ]
+    if strip_classification:
+        for doc in results:
+            doc.pop("classification", None)
+
     if ranked:
         results.sort(
             key=lambda d: (_TIER_RANK.get(d.get("trust_tier", "unverified"), 0), d.get("inbound_link_count", 0)),
@@ -161,12 +186,12 @@ async def _find_raw_docs(
 
 async def find_pages(
     query: str,
-    user: Optional[User] = None,
+    user: User,
     ranked: bool = False,
     statuses: Optional[list] = None,
     limit: int = 10,
 ) -> list[Page]:
-    """Full-text page search with optional permission filtering and ranking."""
+    """Full-text page search with permission and classification filtering."""
     docs = await _find_raw_docs(query, user=user, ranked=ranked, statuses=statuses, limit=limit)
     return [Page(**doc) for doc in docs]
 
@@ -174,12 +199,12 @@ async def find_pages(
 async def find_page_docs(
     query: str,
     projection: dict,
-    user: Optional[User] = None,
+    user: User,
     ranked: bool = False,
     statuses: Optional[list] = None,
     limit: int = 10,
 ) -> list[dict]:
-    """Full-text page search returning projected dicts for internal/pipeline use."""
+    """Full-text page search returning projected dicts."""
     return await _find_raw_docs(query, user=user, ranked=ranked, statuses=statuses, limit=limit, projection=projection)
 
 
@@ -200,14 +225,17 @@ async def search_pages(query: str, user: User) -> list[Page]:
 async def get_page_tree(user: User) -> list[dict]:
     """Get the page hierarchy visible to the user."""
     db = get_db()
-    visible_ids = await get_visible_page_ids(user)
     cursor = db.pages.find(
-        {"page_id": {"$in": list(visible_ids)}, "status": {"$ne": "deleted"}},
-        {"page_id": 1, "title": 1, "parent_id": 1, "status": 1}
+        {"status": {"$ne": "deleted"}},
+        {"page_id": 1, "title": 1, "parent_id": 1, "status": 1, "classification": 1}
     )
+    user_triangles = await get_user_triangles(user.user_id)
     pages = []
     async for doc in cursor:
         doc.pop("_id", None)
+        page_classification = [ClassificationTriangle(**t) for t in doc.pop("classification", [])]
+        if not user_satisfies_classification(user_triangles, page_classification):
+            continue
         pages.append(doc)
     return pages
 

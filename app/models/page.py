@@ -22,6 +22,11 @@ class TrustTier(str, Enum):
     verified = "verified"
 
 
+class ClassificationTriangle(BaseModel):
+    id: str
+    level: int = Field(ge=1, le=4)
+
+
 class ReferenceType(str, Enum):
     file = "file"
     page = "page"
@@ -56,6 +61,7 @@ class Page(BaseModel):
     verified_content_hash: Optional[str] = None  # sha256(content) at time of last tier promotion
     verified_at: Optional[datetime] = None
     verified_by: Optional[str] = None            # user_id or "system"
+    classification: list[ClassificationTriangle] = Field(default_factory=list)
     inbound_link_count: int = 0                  # cached by scheduler; not user-editable
     created_by: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -68,6 +74,7 @@ class PageCreate(BaseModel):
     parent_id: Optional[str] = None
     content: str = ""
     references: list[Reference] = Field(default_factory=list)
+    classification: list[ClassificationTriangle] = Field(default_factory=list)
     next_approval_date: Optional[date] = None
 
 
@@ -77,4 +84,5 @@ class PageUpdate(BaseModel):
     parent_id: Optional[str] = None
     content: Optional[str] = None
     references: Optional[list[Reference]] = None
+    classification: Optional[list[ClassificationTriangle]] = None
     next_approval_date: Optional[date] = None

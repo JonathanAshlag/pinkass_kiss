@@ -18,18 +18,15 @@ class User(BaseModel):
     name: str
     permission_level: PermissionLevel = PermissionLevel.read_only
     workflow_id: Optional[str] = None
-    page_permissions: list[str] = Field(default_factory=list)
 
 
 class UserCreate(BaseModel):
     name: str
     permission_level: PermissionLevel = PermissionLevel.read_only
     workflow_id: Optional[str] = None
-    page_permissions: list[str] = Field(default_factory=list)
 
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
     permission_level: Optional[PermissionLevel] = None
     workflow_id: Optional[str] = None
-    page_permissions: Optional[list[str]] = None

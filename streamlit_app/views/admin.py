@@ -97,16 +97,13 @@ def _render_users(user_id: str):
         name = st.text_input(UI["user_name"])
         level = st.selectbox(UI["permission_level"], ["read_only", "editor", "admin"])
         workflow_id = st.text_input(UI["assign_workflow"], placeholder="השאר ריק אם אין")
-        page_perms_str = st.text_input(UI["page_permissions_field"])
         submitted = st.form_submit_button(UI["save_button"])
 
         if submitted and name:
-            page_perms = [p.strip() for p in page_perms_str.split(",") if p.strip()]
             result = api_post("/users", user_id=user_id, json_data={
                 "name": name,
                 "permission_level": level,
                 "workflow_id": workflow_id if workflow_id else None,
-                "page_permissions": page_perms,
             })
             if result and "error" not in result:
                 st.success(UI["success"])
@@ -123,7 +120,6 @@ def _render_users(user_id: str):
             with st.expander(f"👤 {u.get('name', '')} ({u.get('permission_level', '')})"):
                 st.markdown(f"**מזהה:** `{u['user_id']}`")
                 st.markdown(f"**תהליך עבודה:** `{u.get('workflow_id', 'ללא')}`")
-                st.markdown(f"**הרשאות דפים:** {', '.join(u.get('page_permissions', [])) or 'ללא'}")
 
                 # Update form
                 new_level = st.selectbox(
@@ -137,11 +133,6 @@ def _render_users(user_id: str):
                     value=u.get("workflow_id", "") or "",
                     key=f"uwf_{u['user_id']}"
                 )
-                new_perms = st.text_input(
-                    "הרשאות דפים",
-                    value=", ".join(u.get("page_permissions", [])),
-                    key=f"uperms_{u['user_id']}"
-                )
 
                 col1, col2 = st.columns(2)
                 with col1:
@@ -151,9 +142,6 @@ def _render_users(user_id: str):
                             update_data["permission_level"] = new_level
                         if new_wf != (u.get("workflow_id") or ""):
                             update_data["workflow_id"] = new_wf if new_wf else None
-                        perms = [p.strip() for p in new_perms.split(",") if p.strip()]
-                        if perms != u.get("page_permissions", []):
-                            update_data["page_permissions"] = perms
                         if update_data:
                             api_put(f"/users/{u['user_id']}", user_id=user_id, json_data=update_data)
                             st.rerun()

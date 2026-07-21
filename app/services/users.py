@@ -16,7 +16,6 @@ async def create_user(data: UserCreate) -> User:
         name=data.name,
         permission_level=data.permission_level,
         workflow_id=data.workflow_id,
-        page_permissions=data.page_permissions,
     )
     await db.users.insert_one(user.model_dump(mode="json"))
     return user
@@ -53,8 +52,6 @@ async def update_user(user_id: str, data: UserUpdate) -> Optional[User]:
         update_fields["permission_level"] = data.permission_level.value
     if data.workflow_id is not None:
         update_fields["workflow_id"] = data.workflow_id
-    if data.page_permissions is not None:
-        update_fields["page_permissions"] = data.page_permissions
 
     if update_fields:
         await db.users.update_one(

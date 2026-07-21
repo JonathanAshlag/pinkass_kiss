@@ -25,28 +25,24 @@ USERS = [
         "name": "מנהל מערכת",
         "permission_level": "admin",
         "workflow_id": None,
-        "page_permissions": [],
     },
     {
         "user_id": "editor1",
         "name": "עורך עם תהליך",
         "permission_level": "editor",
         "workflow_id": WORKFLOW_ID,
-        "page_permissions": ["animals"],
     },
     {
         "user_id": "editor2",
         "name": "עורך חופשי",
         "permission_level": "editor",
         "workflow_id": None,
-        "page_permissions": ["animals", "plants"],
     },
     {
         "user_id": "reader1",
         "name": "קורא בלבד",
         "permission_level": "read_only",
         "workflow_id": None,
-        "page_permissions": ["animals"],
     },
 ]
 

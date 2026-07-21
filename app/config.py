@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     openai_model: str = "local-model"
     scheduler_hour: int = 3
     scheduler_minute: int = 0
+    classification_api_url: str = ""
     api_host: str = "0.0.0.0"
     api_port: int = 8080
 

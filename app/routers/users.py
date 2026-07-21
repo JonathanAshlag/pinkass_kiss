@@ -9,7 +9,6 @@ from app.routers.deps import require_admin, get_current_user
 from app.services.users import (
     create_user, get_user, list_users, update_user, delete_user, assign_workflow,
 )
-from app.services.permissions import get_visible_page_ids
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -76,11 +75,3 @@ async def assign_workflow_endpoint(
     return user.model_dump(mode="json")
 
 
-@router.get("/{user_id}/visible-pages")
-async def get_visible_pages(user_id: str, admin: User = Depends(require_admin)):
-    """Get all page IDs visible to a user."""
-    user = await get_user(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    visible = await get_visible_page_ids(user)
-    return {"user_id": user_id, "visible_page_ids": list(visible)}

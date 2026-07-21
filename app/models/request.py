@@ -38,6 +38,7 @@ class CreatePayload(BaseModel):
     title: str
     description: str = ""
     content: str = ""
+    classification: Optional[list] = None
 
 
 class EditPayload(BaseModel):
@@ -47,6 +48,7 @@ class EditPayload(BaseModel):
     content: Optional[str] = None
     parent_id: Optional[str] = None
     references: Optional[list] = None
+    classification: Optional[list] = None
     next_approval_date: Optional[str] = None
 
 
