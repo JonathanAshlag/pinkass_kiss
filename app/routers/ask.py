@@ -6,7 +6,7 @@ from typing import Union
 
 from app.models.user import User
 from app.routers.deps import get_current_user
-from app.llm.client import ask_with_retrieval
+from app.llm.retrieval import ask_with_retrieval
 
 router = APIRouter(tags=["ask"])
 

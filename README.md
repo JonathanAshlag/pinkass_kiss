@@ -183,7 +183,7 @@ sudo systemctl start pinkas-api pinkas-ui
 
 3. **Login** to the Streamlit UI as `admin1`
 
-4. **Create a page:** Navigate to "יצירת דף", enter a title and content, save. As admin with no workflow, it publishes immediately.
+4. **Create a page:** Navigate to "יצירת דף", enter a title, a short description, and content. Optionally set a future `next_approval_date`. As admin with no workflow, it publishes immediately.
 
 5. **Test approval flow:** Login as `editor1` (has a workflow). Create a page — it will be pending approval. Login as `admin1`, go to "אישורים", approve the request.
 
@@ -191,7 +191,24 @@ sudo systemctl start pinkas-api pinkas-ui
 
 7. **Produce from a file:** Go to "העלאת מסמך", upload a PDF/DOCX/HTML/TXT file. The system extracts text and generates wiki pages. Admin users can pass `initial_trust_tier=verified` via the API to self-certify the upload.
 
-8. **Verify a page:** Submit a `review` approval request with `proposed_content.trust_tier = "verified"`. Once the workflow approves it, the page is stamped as human-verified and the content hash is recorded. Any subsequent edit triggers an automatic re-verification request the next morning.
+8. **Verify a page:** Submit a `review` approval request with `proposed_content.type = "review"` and `trust_tier = "verified"`. Once the workflow approves it, the page is stamped as human-verified, a SHA-256 content hash is recorded, and `verified_at`/`verified_by` are set. Any subsequent content change triggers an automatic re-verification request the next morning.
+
+## Approval Request Payloads
+
+Every `POST /approvals` request carries a `proposed_content` object discriminated by `type`:
+
+| `type` | Used for | Key fields |
+|--------|----------|------------|
+| `create` | New page pending approval | `title`, `description`, `content` |
+| `edit` | Content or metadata change | `title`, `description`, `content`, `parent_id`, `references`, `next_approval_date` |
+| `delete` | Soft-delete pending approval | *(no extra fields)* |
+| `review` | Periodic review or trust-tier promotion | `title`, `content`, `trust_tier` |
+
+All mutations (create/edit/delete) go through `apply_page_mutation()` in `app/services/mutations.py`. Users with a `workflow_id` are automatically routed to the approval queue; users without one have changes applied immediately.
+
+`apply_page_mutation` accepts an optional `trust_tier` parameter. When `trust_tier=verified` and the create mutation is published directly (no workflow), the seam promotes the page's trust tier inline — recording the content hash, `verified_at`, and `verified_by` — so the pipeline never needs to reach around the seam with raw DB writes.
+
+When an edit mutation is routed through a workflow, `apply_page_mutation` immediately persists any `references` on the `PageUpdate` regardless of approval state. Source provenance is always recorded; only content changes wait for approval.
 
 ## Trust Tier System
 
@@ -238,15 +255,20 @@ pinkas/
 │   │   ├── approvals.py   # Approval decisions
 │   │   └── deps.py        # Auth dependencies
 │   ├── services/          # Business logic
-│   │   ├── pages.py
+│   │   ├── mutations.py   # Workflow-routing dispatch (apply_page_mutation); absorbs trust-tier promotion and reference persistence
+│   │   ├── pages.py       # Page CRUD; find_pages → list[Page], find_page_docs(projection) → list[dict], set_page_references
 │   │   ├── workflows.py
 │   │   ├── users.py
-│   │   ├── requests.py
+│   │   ├── requests.py    # Approval request lifecycle + decision handling
 │   │   └── permissions.py
 │   ├── models/            # Pydantic v2 models
 │   ├── db/                # MongoDB + GridFS
-│   ├── llm/               # OpenAI-compatible client
-│   └── scheduler/         # APScheduler daily job
+│   ├── llm/               # LLM integration
+│   │   ├── client.py      # Generic plumbing (_get_client, _call_llm_json)
+│   │   ├── retrieval.py   # Q&A with tool-calling retrieval
+│   │   ├── ingestion.py   # Per-phase LLM calls (extract, dedup, generate, merge)
+│   │   └── pipeline.py    # 3-phase ingestion orchestration
+│   └── scheduler/         # APScheduler daily jobs
 ├── streamlit_app/         # Streamlit GUI (Hebrew RTL)
 │   ├── app.py             # Main app
 │   ├── strings.py         # Hebrew UI strings

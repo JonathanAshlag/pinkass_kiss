@@ -3,10 +3,10 @@
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Union
+from typing import Optional
 
 from app.db import get_db
-from app.models.page import Page, PageCreate, PageUpdate, PageStatus, TrustTier, HistoryEntry
+from app.models.page import Page, PageCreate, PageUpdate, PageStatus, TrustTier, HistoryEntry, Reference
 from app.models.user import User, PermissionLevel
 from app.services.permissions import can_view_page, get_visible_page_ids
 
@@ -116,33 +116,24 @@ async def delete_page(page_id: str, user: User) -> bool:
 _TIER_RANK = {"verified": 3, "source_checked": 2, "unverified": 1}
 
 
-async def find_pages(
+async def _find_raw_docs(
     query: str,
     user: Optional[User] = None,
     ranked: bool = False,
     statuses: Optional[list] = None,
     limit: int = 10,
     projection: Optional[dict] = None,
-) -> list[Union[dict, Page]]:
-    """Unified page text-search with optional permission filtering, ranking, and projection.
-
-    - user=None: no permission filter (system/internal use)
-    - ranked=True: sort by trust_tier desc then inbound_link_count desc
-    - statuses=None: defaults to published only
-    - projection=None: returns list[Page]; projection given returns list[dict]
-    """
+) -> list[dict]:
+    """Internal search helper. Callers use find_pages or find_page_docs."""
     db = get_db()
-
     mongo_filter: dict = {}
     if statuses is not None:
         mongo_filter["status"] = {"$in": [s.value for s in statuses]}
     else:
         mongo_filter["status"] = PageStatus.published.value
-
     if user is not None and user.permission_level != PermissionLevel.admin:
         visible_ids = await get_visible_page_ids(user)
         mongo_filter["page_id"] = {"$in": list(visible_ids)}
-
     try:
         text_filter = {"$text": {"$search": query}, **mongo_filter}
         cursor = (
@@ -156,21 +147,49 @@ async def find_pages(
             if projection
             else db.pages.find(mongo_filter).limit(limit)
         )
-
     results = []
     async for doc in cursor:
         doc.pop("_id", None)
         results.append(doc)
-
     if ranked:
         results.sort(
             key=lambda d: (_TIER_RANK.get(d.get("trust_tier", "unverified"), 0), d.get("inbound_link_count", 0)),
             reverse=True,
         )
+    return results
 
-    if projection is not None:
-        return results
-    return [Page(**doc) for doc in results]
+
+async def find_pages(
+    query: str,
+    user: Optional[User] = None,
+    ranked: bool = False,
+    statuses: Optional[list] = None,
+    limit: int = 10,
+) -> list[Page]:
+    """Full-text page search with optional permission filtering and ranking."""
+    docs = await _find_raw_docs(query, user=user, ranked=ranked, statuses=statuses, limit=limit)
+    return [Page(**doc) for doc in docs]
+
+
+async def find_page_docs(
+    query: str,
+    projection: dict,
+    user: Optional[User] = None,
+    ranked: bool = False,
+    statuses: Optional[list] = None,
+    limit: int = 10,
+) -> list[dict]:
+    """Full-text page search returning projected dicts for internal/pipeline use."""
+    return await _find_raw_docs(query, user=user, ranked=ranked, statuses=statuses, limit=limit, projection=projection)
+
+
+async def set_page_references(page_id: str, references: list[Reference]) -> None:
+    """Update a page's reference list directly (provenance, no workflow routing)."""
+    db = get_db()
+    await db.pages.update_one(
+        {"page_id": page_id},
+        {"$set": {"references": [r.model_dump(mode="json") for r in references]}},
+    )
 
 
 async def search_pages(query: str, user: User) -> list[Page]:

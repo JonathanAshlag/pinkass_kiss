@@ -1,10 +1,8 @@
 """Structured LLM ingestion pipeline: extract → dedup → create/merge."""
 
 import logging
-from datetime import datetime, timezone
 
-from app.db import get_db
-from app.llm.client import (
+from app.llm.ingestion import (
     extract_topic_candidates,
     generate_page_content,
     judge_duplicate,
@@ -16,7 +14,7 @@ from app.models.page import (
 from app.models.request import RequestType
 from app.models.user import User, PermissionLevel
 from app.services.mutations import apply_page_mutation
-from app.services.pages import find_pages, get_page, compute_content_hash
+from app.services.pages import find_page_docs, get_page, set_page_references
 
 logger = logging.getLogger("pinkas.pipeline")
 
@@ -35,7 +33,6 @@ async def run_ingestion_pipeline(
     Phase 3A: Generate full content and create new page.
     Phase 3B: Merge new info into existing page (or just link source).
     """
-    db = get_db()
     file_ref = Reference(type=ReferenceType.file, file_id=file_id_str)
     results = []
 
@@ -50,11 +47,11 @@ async def run_ingestion_pipeline(
             continue
 
         # Phase 2: search all non-deleted pages (no permission filter — ingestion is system-level)
-        search_results = await find_pages(
+        search_results = await find_page_docs(
             f"{title} {description}",
+            projection={"page_id": 1, "title": 1, "description": 1, "content": 1, "_id": 0},
             statuses=[s for s in PageStatus if s != PageStatus.deleted],
             limit=5,
-            projection={"page_id": 1, "title": 1, "description": 1, "content": 1, "_id": 0},
         )
 
         matched_page: Page | None = None
@@ -74,7 +71,6 @@ async def run_ingestion_pipeline(
             )
 
             updated_refs = list(matched_page.references) + [file_ref]
-            refs_json = [r.model_dump(mode="json") for r in updated_refs]
 
             if merge.get("has_new_info") and merge.get("merged_content"):
                 mutation_result = await apply_page_mutation(
@@ -83,19 +79,10 @@ async def run_ingestion_pipeline(
                     data=PageUpdate(content=merge["merged_content"], references=updated_refs),
                     page_id=matched_page.page_id,
                 )
-                # Always record the new source reference regardless of workflow routing
-                if mutation_result["status"] == "pending_approval":
-                    await db.pages.update_one(
-                        {"page_id": matched_page.page_id},
-                        {"$set": {"references": refs_json}},
-                    )
                 action_status = mutation_result["status"]
             else:
-                # No new info — just record the new source reference
-                await db.pages.update_one(
-                    {"page_id": matched_page.page_id},
-                    {"$set": {"references": refs_json}},
-                )
+                # No new info — record the new source reference only (no approval needed).
+                await set_page_references(matched_page.page_id, updated_refs)
                 action_status = "linked"
 
             results.append({
@@ -116,30 +103,18 @@ async def run_ingestion_pipeline(
             content=page_content,
             references=[file_ref],
         )
+        # Admin-verified trust tier promotion is handled inside the seam.
+        should_verify = (
+            user.permission_level == PermissionLevel.admin
+            and initial_trust_tier == TrustTier.verified.value
+        )
         mutation_result = await apply_page_mutation(
             RequestType.create,
             user,
             data=page_data,
+            trust_tier=TrustTier.verified if should_verify else None,
         )
         action_status = mutation_result["status"]
-
-        # Admin-verified trust tier promotion only applies to directly-published pages
-        if (
-            action_status == "published"
-            and user.permission_level == PermissionLevel.admin
-            and initial_trust_tier == TrustTier.verified.value
-        ):
-            page_id = (mutation_result.get("page") or {}).get("page_id")
-            if page_id:
-                await db.pages.update_one(
-                    {"page_id": page_id},
-                    {"$set": {
-                        "trust_tier": TrustTier.verified.value,
-                        "verified_content_hash": compute_content_hash(page_content),
-                        "verified_at": datetime.now(timezone.utc).isoformat(),
-                        "verified_by": user.user_id,
-                    }},
-                )
 
         results.append({
             "page_id": (mutation_result.get("page") or {}).get("page_id", ""),
