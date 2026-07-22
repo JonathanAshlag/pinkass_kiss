@@ -21,6 +21,7 @@ logger = logging.getLogger("pinkas.pipeline")
 
 async def run_ingestion_pipeline(
     text: str,
+    content_parts: list[dict],
     filename: str,
     file_id_str: str,
     user: User,
@@ -37,7 +38,7 @@ async def run_ingestion_pipeline(
     results = []
 
     # Phase 1
-    candidates = await extract_topic_candidates(text, filename)
+    candidates = await extract_topic_candidates(text, filename, content_parts)
     logger.info(f"Extracted {len(candidates)} topic candidates from {filename}")
 
     for candidate in candidates:
@@ -95,7 +96,7 @@ async def run_ingestion_pipeline(
             continue
 
         # Phase 3A — new topic
-        content_result = await generate_page_content(title, description, filename, text)
+        content_result = await generate_page_content(title, description, filename, text, content_parts)
         page_content = content_result.get("content", text)
 
         page_data = PageCreate(
