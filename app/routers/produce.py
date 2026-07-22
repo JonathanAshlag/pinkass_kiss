@@ -33,6 +33,37 @@ def _extract_text(content: bytes, content_type: str, filename: str) -> str:
         doc = Document(BytesIO(content))
         return "\n".join(p.text for p in doc.paragraphs)
 
+    elif content_type in (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ) or filename.endswith(".xlsx"):
+        from openpyxl import load_workbook
+        wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        lines = []
+        for sheet in wb.worksheets:
+            lines.append(f"## {sheet.title}")
+            for row in sheet.iter_rows(values_only=True):
+                cells = [str(c) if c is not None else "" for c in row]
+                if any(cells):
+                    lines.append("\t".join(cells))
+        wb.close()
+        return "\n".join(lines)
+
+    elif content_type in (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ) or filename.endswith(".pptx"):
+        from pptx import Presentation
+        prs = Presentation(BytesIO(content))
+        lines = []
+        for slide_num, slide in enumerate(prs.slides, 1):
+            lines.append(f"## Slide {slide_num}")
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for paragraph in shape.text_frame.paragraphs:
+                        text = paragraph.text.strip()
+                        if text:
+                            lines.append(text)
+        return "\n".join(lines)
+
     elif content_type == "text/html" or filename.endswith(".html") or filename.endswith(".htm"):
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(content, "lxml")
