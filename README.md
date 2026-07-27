@@ -49,6 +49,7 @@ cp .env.example .env
 | `OPENAI_MODEL` | Model name to use | `local-model` |
 | `SCHEDULER_HOUR` | Hour (0-23) for daily expiry check | `3` |
 | `SCHEDULER_MINUTE` | Minute (0-59) for daily expiry check | `0` |
+| `CLASSIFICATION_API_URL` | External classification API endpoint (optional; feature disabled if empty) | *(empty)* |
 | `API_HOST` | FastAPI bind address | `0.0.0.0` |
 | `API_PORT` | FastAPI port | `8080` |
 | `PINKAS_API_URL` | API URL for the Streamlit GUI | `http://localhost:8080` |
@@ -189,7 +190,7 @@ sudo systemctl start pinkas-api pinkas-ui
 
 6. **Ask a question:** Go to "שאל שאלה", type a question about the wiki content. The LLM searches and composes an answer, preferring verified pages and noting when it relies on unverified content.
 
-7. **Produce from a file:** Go to "העלאת מסמך", upload a PDF/DOCX/HTML/TXT file. The system extracts text and generates wiki pages. Admin users can pass `initial_trust_tier=verified` via the API to self-certify the upload.
+7. **Produce from a file:** Go to "העלאת מסמך", upload a PDF, DOCX, XLSX, PPTX, HTML, or TXT file. The system extracts text and any embedded images (up to 20 per document) and generates wiki pages using multimodal LLM calls. Admin users can pass `initial_trust_tier=verified` via the API to self-certify the upload.
 
 8. **Verify a page:** Submit a `review` approval request with `proposed_content.type = "review"` and `trust_tier = "verified"`. Once the workflow approves it, the page is stamped as human-verified, a SHA-256 content hash is recorded, and `verified_at`/`verified_by` are set. Any subsequent content change triggers an automatic re-verification request the next morning.
 
@@ -231,6 +232,34 @@ Every page carries a `trust_tier` field that signals how thoroughly its content 
 - `check_verification_drift` — re-verification requests for verified pages whose content has changed
 - `update_inbound_link_counts` — refreshes inbound link counts across all published pages
 
+## Classification Triangle Access Control
+
+Pages can carry a `classification` field — a list of `ClassificationTriangle` objects, each with an `id` and a `level` (1–4). A user may only read or edit a classified page if their own triangles (fetched from an external API) satisfy **every** triangle on the page at an equal or higher level.
+
+**Behaviour:**
+- If `CLASSIFICATION_API_URL` is not configured the feature is disabled and all pages are accessible.
+- If the classification API call fails the system **fails closed**: the user is treated as having no triangles and cannot access any classified page.
+- Unclassified pages (`classification: []`) are always accessible to users with the normal page-level permissions.
+
+**Setting classifications on a page:**
+
+Pass `classification` in the `PageCreate` or `PageUpdate` body:
+
+```json
+{
+  "classification": [
+    {"id": "alpha", "level": 2},
+    {"id": "beta",  "level": 3}
+  ]
+}
+```
+
+The classification API must expose `GET {CLASSIFICATION_API_URL}/users/{user_id}/classifications` and return:
+
+```json
+{"triangles": [{"id": "alpha", "level": 3}, {"id": "beta", "level": 4}]}
+```
+
 ## Running Tests
 
 ```bash
@@ -249,24 +278,25 @@ pinkas/
 │   ├── routers/           # REST endpoints
 │   │   ├── pages.py       # Page CRUD
 │   │   ├── ask.py         # Q&A endpoint
-│   │   ├── produce.py     # Document ingestion
+│   │   ├── produce.py     # Document ingestion (PDF/DOCX/XLSX/PPTX/HTML/TXT; multimodal extraction)
 │   │   ├── workflows.py   # Workflow management
 │   │   ├── users.py       # User management
 │   │   ├── approvals.py   # Approval decisions
 │   │   └── deps.py        # Auth dependencies
 │   ├── services/          # Business logic
-│   │   ├── mutations.py   # Workflow-routing dispatch (apply_page_mutation); absorbs trust-tier promotion and reference persistence
-│   │   ├── pages.py       # Page CRUD; find_pages → list[Page], find_page_docs(projection) → list[dict], set_page_references
+│   │   ├── mutations.py      # Workflow-routing dispatch (apply_page_mutation); absorbs trust-tier promotion and reference persistence
+│   │   ├── pages.py          # Page CRUD; find_pages → list[Page], find_page_docs(projection) → list[dict], set_page_references
+│   │   ├── classification.py # Classification triangle access control (external API + user_satisfies_classification)
 │   │   ├── workflows.py
 │   │   ├── users.py
-│   │   ├── requests.py    # Approval request lifecycle + decision handling
+│   │   ├── requests.py       # Approval request lifecycle + decision handling
 │   │   └── permissions.py
 │   ├── models/            # Pydantic v2 models
 │   ├── db/                # MongoDB + GridFS
 │   ├── llm/               # LLM integration
 │   │   ├── client.py      # Generic plumbing (_get_client, _call_llm_json)
 │   │   ├── retrieval.py   # Q&A with tool-calling retrieval
-│   │   ├── ingestion.py   # Per-phase LLM calls (extract, dedup, generate, merge)
+│   │   ├── ingestion.py   # Per-phase LLM calls (extract, dedup, generate, merge); multimodal image parts forwarded where supported
 │   │   └── pipeline.py    # 3-phase ingestion orchestration
 │   └── scheduler/         # APScheduler daily jobs
 ├── streamlit_app/         # Streamlit GUI (Hebrew RTL)
