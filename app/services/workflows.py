@@ -1,19 +1,16 @@
 """Workflow CRUD service."""
 
 import logging
-from datetime import datetime
 from typing import Optional
 
-from app.db import get_db
-from app.models.workflow import Workflow, WorkflowCreate, WorkflowUpdate
 from app.models.page import HistoryEntry
+from app.models.workflow import Workflow, WorkflowCreate, WorkflowUpdate
+from app.storage.base import WorkflowRepository
 
 logger = logging.getLogger("pinkas.workflows")
 
 
-async def create_workflow(data: WorkflowCreate, user_id: str) -> Workflow:
-    """Create a new workflow."""
-    db = get_db()
+async def create_workflow(data: WorkflowCreate, user_id: str, repo: WorkflowRepository) -> Workflow:
     wf = Workflow(
         name=data.name,
         description=data.description,
@@ -24,34 +21,21 @@ async def create_workflow(data: WorkflowCreate, user_id: str) -> Workflow:
         action="create",
         snapshot=f"Created workflow: {data.name}",
     ))
-    await db.workflows.insert_one(wf.model_dump(mode="json"))
+    await repo.create(wf)
     return wf
 
 
-async def get_workflow(workflow_id: str) -> Optional[Workflow]:
-    """Get a workflow by ID."""
-    db = get_db()
-    doc = await db.workflows.find_one({"workflow_id": workflow_id})
-    if doc:
-        doc.pop("_id", None)
-        return Workflow(**doc)
-    return None
+async def get_workflow(workflow_id: str, repo: WorkflowRepository) -> Optional[Workflow]:
+    return await repo.get(workflow_id)
 
 
-async def list_workflows() -> list[Workflow]:
-    """List all workflows."""
-    db = get_db()
-    workflows = []
-    cursor = db.workflows.find()
-    async for doc in cursor:
-        doc.pop("_id", None)
-        workflows.append(Workflow(**doc))
-    return workflows
+async def list_workflows(repo: WorkflowRepository) -> list[Workflow]:
+    return await repo.list_all()
 
 
-async def update_workflow(workflow_id: str, data: WorkflowUpdate, user_id: str) -> Optional[Workflow]:
-    """Update a workflow."""
-    db = get_db()
+async def update_workflow(
+    workflow_id: str, data: WorkflowUpdate, user_id: str, repo: WorkflowRepository
+) -> Optional[Workflow]:
     update_fields: dict = {}
     if data.name is not None:
         update_fields["name"] = data.name
@@ -65,35 +49,17 @@ async def update_workflow(workflow_id: str, data: WorkflowUpdate, user_id: str) 
         action="edit",
         diff=str(update_fields),
     )
-
-    await db.workflows.update_one(
-        {"workflow_id": workflow_id},
-        {
-            "$set": update_fields,
-            "$push": {"history": history_entry.model_dump(mode="json")},
-        }
-    )
-    return await get_workflow(workflow_id)
+    await repo.update_with_history(workflow_id, update_fields, history_entry)
+    return await repo.get(workflow_id)
 
 
-async def delete_workflow(workflow_id: str, user_id: str) -> bool:
-    """Delete a workflow."""
-    db = get_db()
-    history_entry = HistoryEntry(
-        user_id=user_id,
-        action="delete",
-    )
-    await db.workflows.update_one(
-        {"workflow_id": workflow_id},
-        {"$push": {"history": history_entry.model_dump(mode="json")}}
-    )
-    result = await db.workflows.delete_one({"workflow_id": workflow_id})
-    return result.deleted_count > 0
+async def delete_workflow(workflow_id: str, user_id: str, repo: WorkflowRepository) -> bool:
+    history_entry = HistoryEntry(user_id=user_id, action="delete")
+    return await repo.delete_with_history(workflow_id, history_entry)
 
 
-async def get_workflow_history(workflow_id: str) -> list[dict]:
-    """Get change log for a workflow."""
-    wf = await get_workflow(workflow_id)
+async def get_workflow_history(workflow_id: str, repo: WorkflowRepository) -> list[dict]:
+    wf = await repo.get(workflow_id)
     if not wf:
         return []
     return [h.model_dump(mode="json") for h in wf.history]

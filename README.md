@@ -5,7 +5,8 @@ A self-hosted, offline-capable organizational knowledge wiki with hierarchical p
 ## Prerequisites
 
 - **Python** 3.11+
-- **MongoDB** 6.0+ (7.x recommended)
+- **MongoDB** 6.0+ (7.x recommended) — always required for file storage (GridFS)
+- **PostgreSQL** 14+ (optional — see [Storage Backend](#storage-backend))
 - A local **OpenAI-compatible LLM server** (vLLM, Ollama, LM Studio, etc.) for Q&A and document processing features
 
 ## Installation
@@ -44,6 +45,8 @@ cp .env.example .env
 |----------|-------------|---------|
 | `MONGO_URI` | MongoDB connection string | `mongodb://localhost:27017` |
 | `MONGO_DB` | Database name | `pinkas` |
+| `DB_BACKEND` | Storage backend: `mongodb` or `postgres` | `mongodb` |
+| `POSTGRES_URI` | PostgreSQL connection string (when `DB_BACKEND=postgres`) | `postgresql+asyncpg://localhost/pinkas` |
 | `OPENAI_BASE_URL` | LLM API base URL (OpenAI-compatible) | `http://localhost:8000/v1` |
 | `OPENAI_API_KEY` | API key for the LLM server | `not-needed` |
 | `OPENAI_MODEL` | Model name to use | `local-model` |
@@ -71,31 +74,43 @@ OPENAI_BASE_URL=http://localhost:1234/v1
 
 Set `OPENAI_MODEL` to the model name your server expects.
 
-## Database Setup
+## Storage Backend
 
-### Create indexes
+Pinkas supports two storage backends selected at startup via `DB_BACKEND`. MongoDB is always required for file uploads (GridFS); only page/user/workflow/request data moves to Postgres.
+
+### MongoDB (default)
 
 ```bash
-python init_db.py
+DB_BACKEND=mongodb  # or omit — mongodb is the default
 ```
 
-This creates:
-- Text index on `pages.title` + `pages.content` (full-text search)
-- Index on `pages.parent_id` (tree queries)
-- Index on `pages.next_approval_date` (expiry job)
-- Index on `pages.status`
-- Index on `pages.trust_tier` (verification queries)
-- Compound index on `pages.(trust_tier, inbound_link_count)` (ranked retrieval)
-- Unique indexes on `page_id`, `user_id`, `workflow_id`, `request_id`
-- Index on `requests.status` and `requests.requested_by`
+Initialize indexes and seed demo data:
 
-### Seed demo data
+```bash
+python init_db.py   # creates indexes
+python seed_db.py   # creates sample users, workflow, and page hierarchy
+```
+
+### PostgreSQL
+
+```bash
+DB_BACKEND=postgres
+POSTGRES_URI=postgresql+asyncpg://user:password@localhost/pinkas
+```
+
+Run the Alembic migration to create tables:
+
+```bash
+alembic upgrade head
+```
+
+Seed demo data (uses the same script — reads `DB_BACKEND` from `.env`):
 
 ```bash
 python seed_db.py
 ```
 
-Creates sample users, a workflow, and a page hierarchy (Animals → Dog/Cat/Sheep).
+The PostgreSQL schema normalizes page history into a `page_revisions` table and page references into a `page_refs` table (for efficient backlink queries). Classification and metadata are stored as JSONB. Full-text search uses a generated `tsvector` column with a GIN index.
 
 ## Running
 
@@ -266,52 +281,75 @@ The classification API must expose `GET {CLASSIFICATION_API_URL}/users/{user_id}
 pytest tests/ -v
 ```
 
-Tests use `mongomock-motor` — no running MongoDB instance required.
+Each test runs twice — once against MongoDB (`mongomock-motor`, no real MongoDB needed) and once against PostgreSQL (`aiosqlite` in-memory, no real Postgres needed). Scheduler tests run MongoDB-only since they test the full background-job path.
 
 ## Architecture
 
 ```
 pinkas/
-├── app/                    # FastAPI backend
-│   ├── main.py            # App entry point + lifespan
-│   ├── config.py          # Settings from environment
-│   ├── routers/           # REST endpoints
-│   │   ├── pages.py       # Page CRUD
-│   │   ├── ask.py         # Q&A endpoint
-│   │   ├── produce.py     # Document ingestion (PDF/DOCX/XLSX/PPTX/HTML/TXT; multimodal extraction)
-│   │   ├── workflows.py   # Workflow management
-│   │   ├── users.py       # User management
-│   │   ├── approvals.py   # Approval decisions
-│   │   └── deps.py        # Auth dependencies
-│   ├── services/          # Business logic
-│   │   ├── mutations.py      # Workflow-routing dispatch (apply_page_mutation); absorbs trust-tier promotion and reference persistence
-│   │   ├── pages.py          # Page CRUD; find_pages → list[Page], find_page_docs(projection) → list[dict], set_page_references
-│   │   ├── classification.py # Classification triangle access control (external API + user_satisfies_classification)
+├── app/
+│   ├── main.py                  # App entry point + lifespan (initialises connections)
+│   ├── config.py                # Settings from environment (pydantic-settings)
+│   ├── container.py             # Composition root — selects MongoDB or Postgres implementation
+│   │                            # at startup; exports Annotated repo aliases for routers
+│   ├── routers/                 # REST endpoints
+│   │   ├── pages.py
+│   │   ├── ask.py               # Q&A
+│   │   ├── produce.py           # Document ingestion (PDF/DOCX/XLSX/PPTX/HTML/TXT)
 │   │   ├── workflows.py
 │   │   ├── users.py
-│   │   ├── requests.py       # Approval request lifecycle + decision handling
+│   │   ├── approvals.py
+│   │   └── deps.py              # Auth dependencies
+│   ├── services/                # Business logic (backend-agnostic)
+│   │   ├── mutations.py         # Central mutation seam — routes creates/edits/deletes
+│   │   │                        # through workflows; handles trust promotion and reference persistence
+│   │   ├── pages.py
+│   │   ├── classification.py    # Triangle access control + external API client
+│   │   ├── workflows.py
+│   │   ├── users.py
+│   │   ├── requests.py          # Approval request lifecycle + decision handling
 │   │   └── permissions.py
-│   ├── models/            # Pydantic v2 models
-│   ├── db/                # MongoDB + GridFS
-│   ├── llm/               # LLM integration
-│   │   ├── client.py      # Generic plumbing (_get_client, _call_llm_json)
-│   │   ├── retrieval.py   # Q&A with tool-calling retrieval
-│   │   ├── ingestion.py   # Per-phase LLM calls (extract, dedup, generate, merge); multimodal image parts forwarded where supported
-│   │   └── pipeline.py    # 3-phase ingestion orchestration
-│   └── scheduler/         # APScheduler daily jobs
-├── streamlit_app/         # Streamlit GUI (Hebrew RTL)
-│   ├── app.py             # Main app
-│   ├── strings.py         # Hebrew UI strings
-│   ├── helpers.py         # API client + RTL helper
-│   └── pages/             # GUI pages
-├── tests/                 # pytest suite
-├── init_db.py             # Create MongoDB indexes
-├── seed_db.py             # Seed demo data
+│   ├── models/                  # Pydantic v2 domain models
+│   ├── storage/                 # Data access layer
+│   │   ├── base.py              # Abstract base classes (PageRepository, UserRepository, …)
+│   │   ├── mongo/               # Motor implementations
+│   │   └── postgres/            # SQLAlchemy 2.0 async implementations
+│   ├── infrastructure/          # Connection management and schema
+│   │   ├── mongo.py             # Motor client singleton + GridFS
+│   │   └── postgres/
+│   │       ├── engine.py        # SQLAlchemy engine + session factory
+│   │       ├── models.py        # ORM table definitions
+│   │       └── migrations/      # Alembic migrations
+│   ├── llm/                     # LLM integration
+│   │   ├── client.py            # OpenAI-compatible client setup
+│   │   ├── retrieval.py         # Q&A with tool-calling retrieval loop
+│   │   ├── ingestion.py         # Per-phase LLM calls (extract → dedup → generate/merge)
+│   │   └── pipeline.py          # 3-phase ingestion orchestrator
+│   └── scheduler/               # APScheduler daily jobs
+│       └── jobs.py              # check_expired_pages, check_verification_drift,
+│                                # update_inbound_link_counts
+├── streamlit_app/               # Streamlit GUI (Hebrew RTL)
+│   ├── app.py
+│   ├── strings.py               # Hebrew UI strings
+│   ├── helpers.py               # API client + RTL helpers
+│   └── pages/
+├── tests/                       # pytest suite (each test runs against both backends)
+├── init_db.py                   # Create MongoDB indexes
+├── seed_db.py                   # Seed demo data
+├── alembic.ini                  # Points to app/infrastructure/postgres/migrations/
 ├── requirements.txt
 ├── .env.example
 ├── docker-compose.yml
 └── README.md
 ```
+
+### Storage layer design
+
+`storage/base.py` defines abstract base classes (`PageRepository`, `UserRepository`, etc.) that all implementations must satisfy. `container.py` is the only file that reads `DB_BACKEND` — it selects the concrete implementation at startup and exposes it to routers via FastAPI's `Depends()` mechanism. All service and router code is backend-agnostic.
+
+MongoDB always runs alongside Postgres (GridFS for file blobs). Schema design rationale:
+- **Normalized:** page history (`page_revisions`) and page references (`page_refs`) — queried, filtered, or joined in SQL
+- **JSONB:** classification, workflow steps, request history — only ever read back whole, never filtered in SQL
 
 ## License
 

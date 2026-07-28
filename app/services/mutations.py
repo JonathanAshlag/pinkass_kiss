@@ -2,10 +2,10 @@
 
 from datetime import datetime, timezone
 
-from app.db import get_db
 from app.models.page import PageCreate, PageUpdate, TrustTier
 from app.models.request import RequestType, CreatePayload, EditPayload, DeletePayload
 from app.models.user import User
+from app.storage.base import PageRepository, RequestRepository
 from app.services.pages import create_page, update_page, delete_page, compute_content_hash, set_page_references
 from app.services.requests import create_request
 
@@ -13,22 +13,16 @@ from app.services.requests import create_request
 async def apply_page_mutation(
     req_type: RequestType,
     user: User,
+    page_repo: PageRepository,
+    req_repo: RequestRepository,
     data: PageCreate | PageUpdate | None = None,
     page_id: str | None = None,
     trust_tier: TrustTier | None = None,
 ) -> dict:
-    """Apply a page mutation, routing through workflow if the user has one.
-
-    Returns a dict with at minimum {"status": ...}. When a page is
-    created/updated directly, includes {"page": ...}. When routed through
-    a workflow, includes {"request_id": ...}.
-
-    trust_tier: when TrustTier.verified and result is "published", promotes the
-    page trust tier inline. Only meaningful for create mutations.
-    """
+    """Apply a page mutation, routing through workflow if the user has one."""
     if req_type == RequestType.create:
         assert isinstance(data, PageCreate), "data must be PageCreate for create mutations"
-        page = await create_page(data, user)
+        page = await create_page(data, user, page_repo)
         if user.workflow_id:
             payload = CreatePayload(
                 title=data.title,
@@ -40,21 +34,22 @@ async def apply_page_mutation(
                 req_type=RequestType.create,
                 page_id=page.page_id,
                 user=user,
+                req_repo=req_repo,
+                page_repo=page_repo,
                 proposed_content=payload,
             )
             return {"page": page.model_dump(mode="json"), "request_id": req.request_id, "status": "pending_approval"}
         result: dict = {"page": page.model_dump(mode="json"), "status": "published"}
         if trust_tier == TrustTier.verified:
-            db = get_db()
             now = datetime.now(timezone.utc).isoformat()
-            await db.pages.update_one(
-                {"page_id": page.page_id},
-                {"$set": {
+            await page_repo.update_fields(
+                page.page_id,
+                {
                     "trust_tier": TrustTier.verified.value,
                     "verified_content_hash": compute_content_hash(page.content),
                     "verified_at": now,
                     "verified_by": user.user_id,
-                }},
+                },
             )
             result["page"]["trust_tier"] = TrustTier.verified.value
         return result
@@ -76,13 +71,14 @@ async def apply_page_mutation(
                 req_type=RequestType.edit,
                 page_id=page_id,
                 user=user,
+                req_repo=req_repo,
+                page_repo=page_repo,
                 proposed_content=payload,
             )
-            # Persist references immediately regardless of workflow routing (provenance).
             if data.references is not None:
-                await set_page_references(page_id, data.references)
+                await set_page_references(page_id, data.references, page_repo)
             return {"request_id": req.request_id, "status": "pending_approval"}
-        updated = await update_page(page_id, data, user)
+        updated = await update_page(page_id, data, user, page_repo)
         return {"page": updated.model_dump(mode="json"), "status": "published"}
 
     elif req_type == RequestType.delete:
@@ -92,10 +88,12 @@ async def apply_page_mutation(
                 req_type=RequestType.delete,
                 page_id=page_id,
                 user=user,
+                req_repo=req_repo,
+                page_repo=page_repo,
                 proposed_content=DeletePayload(),
             )
             return {"request_id": req.request_id, "status": "pending_approval"}
-        await delete_page(page_id, user)
+        await delete_page(page_id, user, page_repo)
         return {"status": "deleted"}
 
     raise ValueError(f"Unsupported req_type for apply_page_mutation: {req_type}")

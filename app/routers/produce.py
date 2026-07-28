@@ -7,7 +7,8 @@ from io import BytesIO
 
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException
 
-from app.db import get_db, get_gridfs
+from app.db import get_gridfs
+from app.container import PageRepo, RequestRepo, SourceFileRepo
 from app.models.page import TrustTier
 from app.models.user import User
 from app.routers.deps import require_editor
@@ -27,7 +28,6 @@ class ExtractedContent:
 
 
 def _encode_image(data: bytes, name: str) -> str:
-    """Encode image bytes as a base64 data URI."""
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else "png"
     mime = f"image/{ext}" if ext in ("png", "jpeg", "jpg", "gif", "webp") else "image/png"
     b64 = base64.b64encode(data).decode("ascii")
@@ -35,12 +35,6 @@ def _encode_image(data: bytes, name: str) -> str:
 
 
 def _extract_content(content: bytes, content_type: str, filename: str) -> ExtractedContent:
-    """Extract text and images from various file formats.
-
-    Returns ExtractedContent with:
-    - text: plain text for storage and text-only LLM phases
-    - parts: interleaved text/image content parts in document order for multimodal LLM calls
-    """
     if content_type == "application/pdf" or filename.endswith(".pdf"):
         from pypdf import PdfReader
         reader = PdfReader(BytesIO(content))
@@ -65,7 +59,6 @@ def _extract_content(content: bytes, content_type: str, filename: str) -> Extrac
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ) or filename.endswith(".docx"):
         from docx import Document
-        from docx.opc.constants import RELATIONSHIP_TYPE as RT
         doc = Document(BytesIO(content))
         text_parts: list[str] = []
         parts: list[dict] = []
@@ -154,9 +147,11 @@ async def produce(
     files: list[UploadFile] = File(...),
     initial_trust_tier: str = Form(default=TrustTier.unverified.value),
     user: User = Depends(require_editor),
+    page_repo: PageRepo = None,
+    req_repo: RequestRepo = None,
+    source_file_repo: SourceFileRepo = None,
 ):
     """Ingest files, extract text, generate pages via LLM."""
-    db = get_db()
     gridfs = get_gridfs()
     results = []
 
@@ -165,31 +160,23 @@ async def produce(
         content_type = upload_file.content_type or "application/octet-stream"
         filename = upload_file.filename or "unnamed"
 
-        # Store in GridFS
         file_id = await gridfs.upload_from_stream(
             filename,
             BytesIO(content),
-            metadata={
-                "content_type": content_type,
-                "uploaded_by": user.user_id,
-            }
+            metadata={"content_type": content_type, "uploaded_by": user.user_id},
         )
         file_id_str = str(file_id)
 
-        # Extract text and images
         extracted = _extract_content(content, content_type, filename)
 
-        # Store file metadata
-        await db.source_files.insert_one({
-            "file_id": file_id_str,
-            "filename": filename,
-            "content_type": content_type,
-            "uploaded_by": user.user_id,
-            "extracted_text": extracted.text,
-            "generated_page_ids": [],
-        })
+        await source_file_repo.create(
+            file_id=file_id_str,
+            filename=filename,
+            content_type=content_type,
+            uploaded_by=user.user_id,
+            extracted_text=extracted.text,
+        )
 
-        # Run structured ingestion pipeline
         pipeline_results = await run_ingestion_pipeline(
             text=extracted.text,
             content_parts=extracted.parts,
@@ -197,16 +184,14 @@ async def produce(
             file_id_str=file_id_str,
             user=user,
             initial_trust_tier=initial_trust_tier,
+            page_repo=page_repo,
+            req_repo=req_repo,
         )
 
         generated_page_ids = [r["page_id"] for r in pipeline_results]
         results.extend(pipeline_results)
 
-        # Update source file with generated/linked page ids
-        await db.source_files.update_one(
-            {"file_id": file_id_str},
-            {"$set": {"generated_page_ids": generated_page_ids}}
-        )
+        await source_file_repo.set_page_ids(file_id_str, generated_page_ids)
 
     return {"generated_pages": results}
 
@@ -233,5 +218,5 @@ async def get_file(file_id: str):
     return StreamingResponse(
         iterfile(),
         media_type=stream.metadata.get("content_type", "application/octet-stream") if stream.metadata else "application/octet-stream",
-        headers={"Content-Disposition": f"attachment; filename={stream.filename}"}
+        headers={"Content-Disposition": f"attachment; filename={stream.filename}"},
     )

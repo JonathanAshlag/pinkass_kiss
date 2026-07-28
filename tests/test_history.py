@@ -9,15 +9,15 @@ from app.services.pages import create_page, update_page, delete_page, get_page
 
 
 @pytest_asyncio.fixture
-async def editor(mock_db):
+async def editor(user_repo):
     user = User(user_id="hist_editor", name="HistEditor", permission_level=PermissionLevel.editor)
-    await mock_db.users.insert_one(user.model_dump(mode="json"))
+    await user_repo.create(user)
     return user
 
 
 @pytest.mark.asyncio
-async def test_create_logs_history(mock_db, editor):
-    page = await create_page(PageCreate(title="Test", description="Test page", content="Initial"), editor)
+async def test_create_logs_history(editor, page_repo):
+    page = await create_page(PageCreate(title="Test", description="Test page", content="Initial"), editor, page_repo)
     assert len(page.history) == 1
     assert page.history[0].action == "create"
     assert page.history[0].user_id == editor.user_id
@@ -25,9 +25,9 @@ async def test_create_logs_history(mock_db, editor):
 
 
 @pytest.mark.asyncio
-async def test_edit_appends_history(mock_db, editor):
-    page = await create_page(PageCreate(title="Test", description="Test page", content="V1"), editor)
-    updated = await update_page(page.page_id, PageUpdate(content="V2"), editor)
+async def test_edit_appends_history(editor, page_repo):
+    page = await create_page(PageCreate(title="Test", description="Test page", content="V1"), editor, page_repo)
+    updated = await update_page(page.page_id, PageUpdate(content="V2"), editor, page_repo)
 
     assert len(updated.history) == 2
     assert updated.history[0].action == "create"
@@ -36,23 +36,23 @@ async def test_edit_appends_history(mock_db, editor):
 
 
 @pytest.mark.asyncio
-async def test_delete_appends_history(mock_db, editor):
-    page = await create_page(PageCreate(title="Test", description="Test page", content="Delete me"), editor)
-    await delete_page(page.page_id, editor)
+async def test_delete_appends_history(editor, page_repo):
+    page = await create_page(PageCreate(title="Test", description="Test page", content="Delete me"), editor, page_repo)
+    await delete_page(page.page_id, editor, page_repo)
 
-    page = await get_page(page.page_id)
+    page = await get_page(page.page_id, page_repo)
     assert len(page.history) == 2
     assert page.history[1].action == "delete"
 
 
 @pytest.mark.asyncio
-async def test_multiple_edits_accumulate(mock_db, editor):
-    page = await create_page(PageCreate(title="Multi", description="Multi page", content="V1"), editor)
-    await update_page(page.page_id, PageUpdate(content="V2"), editor)
-    await update_page(page.page_id, PageUpdate(title="Multi Updated"), editor)
-    await update_page(page.page_id, PageUpdate(content="V3"), editor)
+async def test_multiple_edits_accumulate(editor, page_repo):
+    page = await create_page(PageCreate(title="Multi", description="Multi page", content="V1"), editor, page_repo)
+    await update_page(page.page_id, PageUpdate(content="V2"), editor, page_repo)
+    await update_page(page.page_id, PageUpdate(title="Multi Updated"), editor, page_repo)
+    await update_page(page.page_id, PageUpdate(content="V3"), editor, page_repo)
 
-    page = await get_page(page.page_id)
+    page = await get_page(page.page_id, page_repo)
     assert len(page.history) == 4
     actions = [h.action for h in page.history]
     assert actions == ["create", "edit", "edit", "edit"]

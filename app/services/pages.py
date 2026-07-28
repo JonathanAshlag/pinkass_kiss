@@ -5,10 +5,15 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from app.db import get_db
-from app.models.page import Page, PageCreate, PageUpdate, PageStatus, TrustTier, HistoryEntry, Reference, ClassificationTriangle
+from app.models.page import (
+    ClassificationTriangle, HistoryEntry, Page, PageCreate, PageStatus,
+    PageUpdate, Reference, TrustTier,
+)
 from app.models.user import User
+from app.storage.base import PageRepository
 from app.services.classification import get_user_triangles, user_satisfies_classification
+
+logger = logging.getLogger("pinkas.pages")
 
 
 def compute_content_hash(content: str) -> str:
@@ -22,12 +27,8 @@ def is_trust_stale(page: Page) -> bool:
         and compute_content_hash(page.content) != page.verified_content_hash
     )
 
-logger = logging.getLogger("pinkas.pages")
 
-
-async def create_page(data: PageCreate, user: User) -> Page:
-    """Create a new page (status=published if no workflow, else draft pending request)."""
-    db = get_db()
+async def create_page(data: PageCreate, user: User, repo: PageRepository) -> Page:
     page = Page(
         title=data.title,
         description=data.description,
@@ -44,24 +45,16 @@ async def create_page(data: PageCreate, user: User) -> Page:
         action="create",
         snapshot=data.content,
     ))
-    await db.pages.insert_one(page.model_dump(mode="json"))
+    await repo.create(page)
     return page
 
 
-async def get_page(page_id: str) -> Optional[Page]:
-    """Get a page by ID."""
-    db = get_db()
-    doc = await db.pages.find_one({"page_id": page_id})
-    if doc:
-        doc.pop("_id", None)
-        return Page(**doc)
-    return None
+async def get_page(page_id: str, repo: PageRepository) -> Optional[Page]:
+    return await repo.get(page_id)
 
 
-async def update_page(page_id: str, data: PageUpdate, user: User) -> Optional[Page]:
-    """Update a page's fields."""
-    db = get_db()
-    page = await get_page(page_id)
+async def update_page(page_id: str, data: PageUpdate, user: User, repo: PageRepository) -> Optional[Page]:
+    page = await repo.get(page_id)
     if not page:
         return None
 
@@ -80,7 +73,6 @@ async def update_page(page_id: str, data: PageUpdate, user: User) -> Optional[Pa
         update_fields["classification"] = [c.model_dump(mode="json") for c in data.classification]
     if data.next_approval_date is not None:
         update_fields["next_approval_date"] = data.next_approval_date.isoformat()
-
     update_fields["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     history_entry = HistoryEntry(
@@ -88,32 +80,17 @@ async def update_page(page_id: str, data: PageUpdate, user: User) -> Optional[Pa
         action="edit",
         diff=str(update_fields),
     )
-
-    await db.pages.update_one(
-        {"page_id": page_id},
-        {
-            "$set": update_fields,
-            "$push": {"history": history_entry.model_dump(mode="json")},
-        }
-    )
-    return await get_page(page_id)
+    await repo.update_with_history(page_id, update_fields, history_entry)
+    return await repo.get(page_id)
 
 
-async def delete_page(page_id: str, user: User) -> bool:
-    """Soft-delete a page."""
-    db = get_db()
-    history_entry = HistoryEntry(
-        user_id=user.user_id,
-        action="delete",
-    )
-    result = await db.pages.update_one(
-        {"page_id": page_id},
-        {
-            "$set": {"status": PageStatus.deleted.value, "updated_at": datetime.now(timezone.utc).isoformat()},
-            "$push": {"history": history_entry.model_dump(mode="json")},
-        }
-    )
-    return result.modified_count > 0
+async def delete_page(page_id: str, user: User, repo: PageRepository) -> None:
+    history_entry = HistoryEntry(user_id=user.user_id, action="delete")
+    fields = {
+        "status": PageStatus.deleted.value,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await repo.update_with_history(page_id, fields, history_entry)
 
 
 _TIER_RANK = {"verified": 3, "source_checked": 2, "unverified": 1}
@@ -122,48 +99,24 @@ _TIER_RANK = {"verified": 3, "source_checked": 2, "unverified": 1}
 async def _find_raw_docs(
     query: str,
     user: User,
+    repo: PageRepository,
     ranked: bool = False,
     statuses: Optional[list] = None,
     limit: int = 10,
-    projection: Optional[dict] = None,
+    fields: Optional[list[str]] = None,
 ) -> list[dict]:
-    """Internal search helper. Callers use find_pages or find_page_docs."""
-    db = get_db()
-    mongo_filter: dict = {}
-    if statuses is not None:
-        mongo_filter["status"] = {"$in": [s.value for s in statuses]}
-    else:
-        mongo_filter["status"] = PageStatus.published.value
+    status_list = [s.value for s in statuses] if statuses else [PageStatus.published.value]
 
-    # Ensure classification field is fetched for filtering even if not in caller's projection
-    effective_projection = projection
     strip_classification = False
-    if projection is not None and "classification" not in projection:
-        effective_projection = {**projection, "classification": 1}
-        strip_classification = True
+    effective_fields: Optional[list[str]] = None
+    if fields is not None:
+        strip_classification = "classification" not in fields
+        required = ["classification", "trust_tier", "inbound_link_count"]
+        extra = [f for f in required if f not in fields]
+        effective_fields = fields + extra
 
-    results = []
-    try:
-        text_filter = {"$text": {"$search": query}, **mongo_filter}
-        cursor = (
-            db.pages.find(text_filter, effective_projection).limit(limit)
-            if effective_projection
-            else db.pages.find(text_filter).limit(limit)
-        )
-        async for doc in cursor:
-            doc.pop("_id", None)
-            results.append(doc)
-    except Exception:
-        cursor = (
-            db.pages.find(mongo_filter, effective_projection).limit(limit)
-            if effective_projection
-            else db.pages.find(mongo_filter).limit(limit)
-        )
-        async for doc in cursor:
-            doc.pop("_id", None)
-            results.append(doc)
+    results = await repo.search(query, status_list, limit, fields=effective_fields)
 
-    # Post-filter by classification triangles
     user_triangles = await get_user_triangles(user.user_id)
     results = [
         doc for doc in results
@@ -172,13 +125,17 @@ async def _find_raw_docs(
             [ClassificationTriangle(**t) for t in doc.get("classification", [])],
         )
     ]
+
     if strip_classification:
         for doc in results:
             doc.pop("classification", None)
 
     if ranked:
         results.sort(
-            key=lambda d: (_TIER_RANK.get(d.get("trust_tier", "unverified"), 0), d.get("inbound_link_count", 0)),
+            key=lambda d: (
+                _TIER_RANK.get(d.get("trust_tier", "unverified"), 0),
+                d.get("inbound_link_count", 0),
+            ),
             reverse=True,
         )
     return results
@@ -187,52 +144,42 @@ async def _find_raw_docs(
 async def find_pages(
     query: str,
     user: User,
+    repo: PageRepository,
     ranked: bool = False,
     statuses: Optional[list] = None,
     limit: int = 10,
 ) -> list[Page]:
-    """Full-text page search with permission and classification filtering."""
-    docs = await _find_raw_docs(query, user=user, ranked=ranked, statuses=statuses, limit=limit)
+    docs = await _find_raw_docs(query, user=user, repo=repo, ranked=ranked, statuses=statuses, limit=limit)
     return [Page(**doc) for doc in docs]
 
 
 async def find_page_docs(
     query: str,
-    projection: dict,
+    fields: list[str],
     user: User,
+    repo: PageRepository,
     ranked: bool = False,
     statuses: Optional[list] = None,
     limit: int = 10,
 ) -> list[dict]:
-    """Full-text page search returning projected dicts."""
-    return await _find_raw_docs(query, user=user, ranked=ranked, statuses=statuses, limit=limit, projection=projection)
-
-
-async def set_page_references(page_id: str, references: list[Reference]) -> None:
-    """Update a page's reference list directly (provenance, no workflow routing)."""
-    db = get_db()
-    await db.pages.update_one(
-        {"page_id": page_id},
-        {"$set": {"references": [r.model_dump(mode="json") for r in references]}},
+    return await _find_raw_docs(
+        query, user=user, repo=repo, ranked=ranked, statuses=statuses, limit=limit, fields=fields,
     )
 
 
-async def search_pages(query: str, user: User) -> list[Page]:
-    """Full-text search filtered by user permissions."""
-    return await find_pages(query, user=user)
+async def set_page_references(page_id: str, references: list[Reference], repo: PageRepository) -> None:
+    await repo.set_references(page_id, references)
 
 
-async def get_page_tree(user: User) -> list[dict]:
-    """Get the page hierarchy visible to the user."""
-    db = get_db()
-    cursor = db.pages.find(
-        {"status": {"$ne": "deleted"}},
-        {"page_id": 1, "title": 1, "parent_id": 1, "status": 1, "classification": 1}
-    )
+async def search_pages(query: str, user: User, repo: PageRepository) -> list[Page]:
+    return await find_pages(query, user=user, repo=repo)
+
+
+async def get_page_tree(user: User, repo: PageRepository) -> list[dict]:
+    nodes = await repo.get_tree_nodes()
     user_triangles = await get_user_triangles(user.user_id)
     pages = []
-    async for doc in cursor:
-        doc.pop("_id", None)
+    for doc in nodes:
         page_classification = [ClassificationTriangle(**t) for t in doc.pop("classification", [])]
         if not user_satisfies_classification(user_triangles, page_classification):
             continue
@@ -240,9 +187,6 @@ async def get_page_tree(user: User) -> list[dict]:
     return pages
 
 
-async def get_page_history(page_id: str) -> list[dict]:
-    """Get change log for a page."""
-    page = await get_page(page_id)
-    if not page:
-        return []
-    return [h.model_dump(mode="json") for h in page.history]
+async def get_page_history(page_id: str, repo: PageRepository) -> list[dict]:
+    history = await repo.get_history(page_id)
+    return [h.model_dump(mode="json") for h in history]

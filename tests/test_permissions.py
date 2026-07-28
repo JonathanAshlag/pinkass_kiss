@@ -9,21 +9,19 @@ from app.services.permissions import can_view_page
 
 
 @pytest_asyncio.fixture
-async def sample_pages(mock_db):
-    """Create pages with varying classification levels."""
+async def sample_pages(page_repo):
     pages = [
-        {"page_id": "public", "title": "Public", "status": "published", "classification": []},
-        {"page_id": "secret", "title": "Secret", "status": "published",
-         "classification": [{"id": "sec", "level": 2}]},
-        {"page_id": "top-secret", "title": "Top Secret", "status": "published",
-         "classification": [{"id": "sec", "level": 4}]},
-        {"page_id": "multi", "title": "Multi", "status": "published",
-         "classification": [{"id": "sec", "level": 1}, {"id": "ops", "level": 3}]},
-        {"page_id": "deleted", "title": "Deleted", "status": "deleted", "classification": []},
+        Page(page_id="public", title="Public", description="", status=PageStatus.published, created_by="test"),
+        Page(page_id="secret", title="Secret", description="", status=PageStatus.published, created_by="test",
+             classification=[ClassificationTriangle(id="sec", level=2)]),
+        Page(page_id="top-secret", title="Top Secret", description="", status=PageStatus.published, created_by="test",
+             classification=[ClassificationTriangle(id="sec", level=4)]),
+        Page(page_id="multi", title="Multi", description="", status=PageStatus.published, created_by="test",
+             classification=[ClassificationTriangle(id="sec", level=1), ClassificationTriangle(id="ops", level=3)]),
+        Page(page_id="deleted", title="Deleted", description="", status=PageStatus.deleted, created_by="test"),
     ]
-    for p in pages:
-        await mock_db.pages.insert_one(p)
-    return pages
+    for page in pages:
+        await page_repo.create(page)
 
 
 def _patch_triangles(monkeypatch, triangles):
@@ -36,59 +34,59 @@ def _patch_triangles(monkeypatch, triangles):
 
 
 @pytest.mark.asyncio
-async def test_unclassified_page_visible_to_all(mock_db, sample_pages, monkeypatch):
+async def test_unclassified_page_visible_to_all(sample_pages, monkeypatch, page_repo):
     _patch_triangles(monkeypatch, [])
     user = User(user_id="u1", name="User1", permission_level=PermissionLevel.read_only)
-    assert await can_view_page(user, "public") is True
+    assert await can_view_page(user, "public", page_repo) is True
 
 
 @pytest.mark.asyncio
-async def test_classified_page_blocked_without_triangles(mock_db, sample_pages, monkeypatch):
+async def test_classified_page_blocked_without_triangles(sample_pages, monkeypatch, page_repo):
     _patch_triangles(monkeypatch, [])
     user = User(user_id="u1", name="User1", permission_level=PermissionLevel.read_only)
-    assert await can_view_page(user, "secret") is False
+    assert await can_view_page(user, "secret", page_repo) is False
 
 
 @pytest.mark.asyncio
-async def test_classified_page_accessible_with_sufficient_level(mock_db, sample_pages, monkeypatch):
+async def test_classified_page_accessible_with_sufficient_level(sample_pages, monkeypatch, page_repo):
     _patch_triangles(monkeypatch, [ClassificationTriangle(id="sec", level=3)])
     user = User(user_id="u1", name="User1", permission_level=PermissionLevel.read_only)
-    assert await can_view_page(user, "secret") is True
+    assert await can_view_page(user, "secret", page_repo) is True
 
 
 @pytest.mark.asyncio
-async def test_classified_page_blocked_with_insufficient_level(mock_db, sample_pages, monkeypatch):
+async def test_classified_page_blocked_with_insufficient_level(sample_pages, monkeypatch, page_repo):
     _patch_triangles(monkeypatch, [ClassificationTriangle(id="sec", level=1)])
     user = User(user_id="u1", name="User1", permission_level=PermissionLevel.read_only)
-    assert await can_view_page(user, "secret") is False
+    assert await can_view_page(user, "secret", page_repo) is False
 
 
 @pytest.mark.asyncio
-async def test_admin_still_blocked_by_classification(mock_db, sample_pages, monkeypatch):
+async def test_admin_still_blocked_by_classification(sample_pages, monkeypatch, page_repo):
     _patch_triangles(monkeypatch, [ClassificationTriangle(id="sec", level=1)])
     admin = User(user_id="a1", name="Admin", permission_level=PermissionLevel.admin)
-    assert await can_view_page(admin, "top-secret") is False
+    assert await can_view_page(admin, "top-secret", page_repo) is False
 
 
 @pytest.mark.asyncio
-async def test_multi_triangle_requires_all(mock_db, sample_pages, monkeypatch):
+async def test_multi_triangle_requires_all(sample_pages, monkeypatch, page_repo):
     _patch_triangles(monkeypatch, [ClassificationTriangle(id="sec", level=4)])
     user = User(user_id="u1", name="User1", permission_level=PermissionLevel.editor)
-    assert await can_view_page(user, "multi") is False  # missing ops
+    assert await can_view_page(user, "multi", page_repo) is False
 
 
 @pytest.mark.asyncio
-async def test_multi_triangle_passes_with_all(mock_db, sample_pages, monkeypatch):
+async def test_multi_triangle_passes_with_all(sample_pages, monkeypatch, page_repo):
     _patch_triangles(monkeypatch, [
         ClassificationTriangle(id="sec", level=1),
         ClassificationTriangle(id="ops", level=3),
     ])
     user = User(user_id="u1", name="User1", permission_level=PermissionLevel.editor)
-    assert await can_view_page(user, "multi") is True
+    assert await can_view_page(user, "multi", page_repo) is True
 
 
 @pytest.mark.asyncio
-async def test_nonexistent_page_returns_false(mock_db, sample_pages, monkeypatch):
+async def test_nonexistent_page_returns_false(sample_pages, monkeypatch, page_repo):
     _patch_triangles(monkeypatch, [ClassificationTriangle(id="sec", level=4)])
     user = User(user_id="u1", name="User1", permission_level=PermissionLevel.admin)
-    assert await can_view_page(user, "does-not-exist") is False
+    assert await can_view_page(user, "does-not-exist", page_repo) is False

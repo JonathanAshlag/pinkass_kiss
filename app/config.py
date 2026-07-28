@@ -1,9 +1,13 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    db_backend: Literal["mongodb", "postgres"] = "mongodb"
     mongo_uri: str = "mongodb://localhost:27017"
     mongo_db: str = "pinkas"
+    postgres_uri: str = "postgresql+asyncpg://localhost/pinkas"
     openai_base_url: str = "http://localhost:8000/v1"
     openai_api_key: str = "not-needed"
     openai_model: str = "local-model"

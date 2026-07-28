@@ -4,15 +4,14 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from app.db import get_db
 from app.models.page import HistoryEntry, PageStatus, TrustTier
-from app.services.pages import compute_content_hash
 from app.models.request import (
-    ApprovalRequest, RequestStatus, RequestType, RequestHistoryEntry,
-    EditPayload, ReviewPayload, PageMutationPayload,
+    ApprovalRequest, EditPayload, RequestHistoryEntry, RequestStatus,
+    RequestType, ReviewPayload,
 )
 from app.models.user import User
-from app.services.workflows import get_workflow
+from app.storage.base import PageRepository, RequestRepository, WorkflowRepository
+from app.services.pages import compute_content_hash
 
 logger = logging.getLogger("pinkas.requests")
 
@@ -21,10 +20,10 @@ async def create_request(
     req_type: RequestType,
     page_id: str,
     user: User,
-    proposed_content: Optional[PageMutationPayload] = None,
+    req_repo: RequestRepository,
+    page_repo: PageRepository,
+    proposed_content=None,
 ) -> ApprovalRequest:
-    """Create a new approval request routed through the user's workflow."""
-    db = get_db()
     req = ApprovalRequest(
         type=req_type,
         page_id=page_id,
@@ -39,75 +38,66 @@ async def create_request(
         decision="submitted",
         comment=f"Request type: {req_type.value}",
     ))
-    await db.requests.insert_one(req.model_dump(mode="json"))
+    await req_repo.create(req)
 
-    if req_type == RequestType.create or req_type == RequestType.review:
-        await db.pages.update_one(
-            {"page_id": page_id},
-            {"$set": {"status": PageStatus.pending_approval.value}}
-        )
+    if req_type in (RequestType.create, RequestType.review):
+        await page_repo.update_fields(page_id, {"status": PageStatus.pending_approval.value})
 
     return req
 
 
-async def get_request(request_id: str) -> Optional[ApprovalRequest]:
-    """Get a request by ID."""
-    db = get_db()
-    doc = await db.requests.find_one({"request_id": request_id})
-    if doc:
-        doc.pop("_id", None)
-        return ApprovalRequest(**doc)
-    return None
+async def get_request(request_id: str, repo: RequestRepository) -> Optional[ApprovalRequest]:
+    return await repo.get(request_id)
 
 
-async def get_user_requests(user_id: str) -> list[ApprovalRequest]:
-    """Get all requests created by a user."""
-    db = get_db()
-    requests = []
-    cursor = db.requests.find({"requested_by": user_id})
-    async for doc in cursor:
-        doc.pop("_id", None)
-        requests.append(ApprovalRequest(**doc))
-    return requests
+async def get_user_requests(user_id: str, repo: RequestRepository) -> list[ApprovalRequest]:
+    return await repo.list_for_user(user_id)
 
 
-async def get_user_approvals(user_id: str) -> list[ApprovalRequest]:
-    """Get requests waiting for a user's decision + past decisions."""
-    db = get_db()
-    requests = []
-    cursor = db.requests.find()
-    async for doc in cursor:
-        doc.pop("_id", None)
-        req = ApprovalRequest(**doc)
-        wf = await get_workflow(req.workflow_id)
+async def get_user_approvals(
+    user_id: str,
+    req_repo: RequestRepository,
+    wf_repo: WorkflowRepository,
+) -> list[ApprovalRequest]:
+    all_reqs = await req_repo.list_all()
+    results: list[ApprovalRequest] = []
+    seen: set[str] = set()
+
+    for req in all_reqs:
+        wf = await wf_repo.get(req.workflow_id)
         if not wf:
             continue
         # Pending and this user is the current approver
         if req.status == RequestStatus.pending:
             if req.current_step < len(wf.steps) and wf.steps[req.current_step] == user_id:
-                requests.append(req)
+                if req.request_id not in seen:
+                    results.append(req)
+                    seen.add(req.request_id)
         # Past decisions by this user
         for h in req.history:
             if h.user_id == user_id and h.decision in ("approve", "reject"):
-                if req not in requests:
-                    requests.append(req)
+                if req.request_id not in seen:
+                    results.append(req)
+                    seen.add(req.request_id)
                 break
-    return requests
+
+    return results
 
 
 async def decide_request(
     request_id: str,
     user_id: str,
     decision: str,
+    req_repo: RequestRepository,
+    page_repo: PageRepository,
+    wf_repo: WorkflowRepository,
     comment: Optional[str] = None,
 ) -> Optional[ApprovalRequest]:
-    """Process an approval/rejection decision."""
-    db = get_db()
-    req = await get_request(request_id)
+    req = await req_repo.get(request_id)
     if not req or req.status != RequestStatus.pending:
         return None
 
-    wf = await get_workflow(req.workflow_id)
+    wf = await wf_repo.get(req.workflow_id)
     if not wf:
         return None
 
@@ -121,57 +111,42 @@ async def decide_request(
     )
 
     if decision == "reject":
-        await db.requests.update_one(
-            {"request_id": request_id},
-            {
-                "$set": {"status": RequestStatus.rejected.value},
-                "$push": {"history": history_entry.model_dump(mode="json")},
-            }
+        await req_repo.update_with_history(
+            request_id,
+            {"status": RequestStatus.rejected.value},
+            history_entry,
         )
-        await db.pages.update_one(
-            {"page_id": req.page_id},
-            {
-                "$set": {"status": PageStatus.rejected.value},
-                "$push": {"history": HistoryEntry(
-                    user_id=user_id,
-                    action="reject",
-                    comment=comment,
-                ).model_dump(mode="json")},
-            }
+        await page_repo.update_with_history(
+            req.page_id,
+            {"status": PageStatus.rejected.value},
+            HistoryEntry(user_id=user_id, action="reject", comment=comment),
         )
     elif decision == "approve":
         next_step = req.current_step + 1
         if next_step >= len(wf.steps):
-            # Final approval
-            await db.requests.update_one(
-                {"request_id": request_id},
-                {
-                    "$set": {"status": RequestStatus.approved.value, "current_step": next_step},
-                    "$push": {"history": history_entry.model_dump(mode="json")},
-                }
+            await req_repo.update_with_history(
+                request_id,
+                {"status": RequestStatus.approved.value, "current_step": next_step},
+                history_entry,
             )
-            await _apply_approved_request(req, user_id, comment)
+            await _apply_approved_request(req, user_id, comment, page_repo)
         else:
-            # Move to next step
-            await db.requests.update_one(
-                {"request_id": request_id},
-                {
-                    "$set": {"current_step": next_step},
-                    "$push": {"history": history_entry.model_dump(mode="json")},
-                }
+            await req_repo.update_with_history(
+                request_id,
+                {"current_step": next_step},
+                history_entry,
             )
 
-    return await get_request(request_id)
+    return await req_repo.get(request_id)
 
 
-async def _apply_approved_request(req: ApprovalRequest, approver_id: str, comment: Optional[str]) -> None:
-    """Apply changes after final approval."""
-    db = get_db()
-    page_history = HistoryEntry(
-        user_id=approver_id,
-        action="approve",
-        comment=comment,
-    )
+async def _apply_approved_request(
+    req: ApprovalRequest,
+    approver_id: str,
+    comment: Optional[str],
+    page_repo: PageRepository,
+) -> None:
+    page_history = HistoryEntry(user_id=approver_id, action="approve", comment=comment)
 
     if req.type in (RequestType.create, RequestType.review):
         update: dict = {"status": PageStatus.published.value, "updated_at": datetime.now(timezone.utc).isoformat()}
@@ -182,19 +157,14 @@ async def _apply_approved_request(req: ApprovalRequest, approver_id: str, commen
             if hasattr(pc, "content") and pc.content:
                 update["content"] = pc.content
             if req.type == RequestType.review and isinstance(pc, ReviewPayload) and pc.trust_tier == TrustTier.verified.value:
-                page_doc = await db.pages.find_one({"page_id": req.page_id})
-                final_content = update.get("content") or (page_doc.get("content", "") if page_doc else "")
+                page = await page_repo.get(req.page_id)
+                final_content = update.get("content") or (page.content if page else "")
                 update["trust_tier"] = TrustTier.verified.value
                 update["verified_content_hash"] = compute_content_hash(final_content)
                 update["verified_at"] = datetime.now(timezone.utc).isoformat()
                 update["verified_by"] = approver_id
-        await db.pages.update_one(
-            {"page_id": req.page_id},
-            {
-                "$set": update,
-                "$push": {"history": page_history.model_dump(mode="json")},
-            }
-        )
+        await page_repo.update_with_history(req.page_id, update, page_history)
+
     elif req.type == RequestType.edit:
         update = {"status": PageStatus.published.value, "updated_at": datetime.now(timezone.utc).isoformat()}
         if req.proposed_content and isinstance(req.proposed_content, EditPayload):
@@ -205,18 +175,11 @@ async def _apply_approved_request(req: ApprovalRequest, approver_id: str, commen
                     update[key] = val
             if ep.references is not None:
                 update["references"] = ep.references
-        await db.pages.update_one(
-            {"page_id": req.page_id},
-            {
-                "$set": update,
-                "$push": {"history": page_history.model_dump(mode="json")},
-            }
-        )
+        await page_repo.update_with_history(req.page_id, update, page_history)
+
     elif req.type == RequestType.delete:
-        await db.pages.update_one(
-            {"page_id": req.page_id},
-            {
-                "$set": {"status": PageStatus.deleted.value, "updated_at": datetime.now(timezone.utc).isoformat()},
-                "$push": {"history": page_history.model_dump(mode="json")},
-            }
+        await page_repo.update_with_history(
+            req.page_id,
+            {"status": PageStatus.deleted.value, "updated_at": datetime.now(timezone.utc).isoformat()},
+            page_history,
         )

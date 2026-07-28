@@ -138,12 +138,11 @@ async def test_get_user_triangles_returns_empty_on_error(monkeypatch):
 # ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture
-async def classified_pages(mock_db):
+async def classified_pages(page_repo, user_repo):
     """Create pages with different classification levels."""
     admin = User(user_id="admin1", name="Admin", permission_level=PermissionLevel.admin)
-    await mock_db.users.insert_one(admin.model_dump(mode="json"))
+    await user_repo.create(admin)
 
-    # Unclassified page (accessible to all)
     page_open = Page(
         page_id="open-page",
         title="Open Page",
@@ -152,7 +151,6 @@ async def classified_pages(mock_db):
         status=PageStatus.published,
         created_by="admin1",
     )
-    # Page with low classification
     page_low = Page(
         page_id="low-page",
         title="Low Secret",
@@ -162,7 +160,6 @@ async def classified_pages(mock_db):
         status=PageStatus.published,
         created_by="admin1",
     )
-    # Page with high classification
     page_high = Page(
         page_id="high-page",
         title="Top Secret",
@@ -172,7 +169,6 @@ async def classified_pages(mock_db):
         status=PageStatus.published,
         created_by="admin1",
     )
-    # Page with multiple triangles
     page_multi = Page(
         page_id="multi-page",
         title="Multi Classified",
@@ -186,7 +182,7 @@ async def classified_pages(mock_db):
         created_by="admin1",
     )
     for page in [page_open, page_low, page_high, page_multi]:
-        await mock_db.pages.insert_one(page.model_dump(mode="json"))
+        await page_repo.create(page)
 
     return {"open": page_open, "low": page_low, "high": page_high, "multi": page_multi}
 
@@ -212,41 +208,41 @@ def _patch_user_triangles(monkeypatch, triangles: list[ClassificationTriangle]):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_can_view_page_classification_filtering(mock_db, classified_pages, monkeypatch):
+async def test_can_view_page_classification_filtering(mock_db, classified_pages, monkeypatch, page_repo):
     user = User(
         user_id="u1", name="User1",
         permission_level=PermissionLevel.read_only,
     )
     _patch_user_triangles(monkeypatch, [ClassificationTriangle(id="sec", level=2)])
 
-    assert await can_view_page(user, "open-page") is True
-    assert await can_view_page(user, "low-page") is True
-    assert await can_view_page(user, "high-page") is False  # needs level 4
+    assert await can_view_page(user, "open-page", page_repo) is True
+    assert await can_view_page(user, "low-page", page_repo) is True
+    assert await can_view_page(user, "high-page", page_repo) is False  # needs level 4
 
 
 @pytest.mark.asyncio
-async def test_can_view_page_admin_still_blocked_by_classification(mock_db, classified_pages, monkeypatch):
+async def test_can_view_page_admin_still_blocked_by_classification(mock_db, classified_pages, monkeypatch, page_repo):
     admin = User(user_id="admin1", name="Admin", permission_level=PermissionLevel.admin)
     _patch_user_triangles(monkeypatch, [ClassificationTriangle(id="sec", level=1)])
 
-    assert await can_view_page(admin, "open-page") is True
-    assert await can_view_page(admin, "low-page") is True  # level 1 == level 1
-    assert await can_view_page(admin, "high-page") is False  # admin but lacks level 4
+    assert await can_view_page(admin, "open-page", page_repo) is True
+    assert await can_view_page(admin, "low-page", page_repo) is True  # level 1 == level 1
+    assert await can_view_page(admin, "high-page", page_repo) is False  # admin but lacks level 4
 
 
 @pytest.mark.asyncio
-async def test_can_view_page_unclassified_page_no_triangles_needed(mock_db, classified_pages, monkeypatch):
+async def test_can_view_page_unclassified_page_no_triangles_needed(mock_db, classified_pages, monkeypatch, page_repo):
     user = User(
         user_id="u1", name="User1",
         permission_level=PermissionLevel.read_only,
     )
     _patch_user_triangles(monkeypatch, [])  # no triangles at all
 
-    assert await can_view_page(user, "open-page") is True  # no classification needed
+    assert await can_view_page(user, "open-page", page_repo) is True  # no classification needed
 
 
 @pytest.mark.asyncio
-async def test_can_view_page_multi_triangle_requirement(mock_db, classified_pages, monkeypatch):
+async def test_can_view_page_multi_triangle_requirement(mock_db, classified_pages, monkeypatch, page_repo):
     user = User(
         user_id="u1", name="User1",
         permission_level=PermissionLevel.admin,
@@ -254,14 +250,14 @@ async def test_can_view_page_multi_triangle_requirement(mock_db, classified_page
 
     # Has sec but not ops
     _patch_user_triangles(monkeypatch, [ClassificationTriangle(id="sec", level=4)])
-    assert await can_view_page(user, "multi-page") is False
+    assert await can_view_page(user, "multi-page", page_repo) is False
 
     # Has both with sufficient levels
     _patch_user_triangles(monkeypatch, [
         ClassificationTriangle(id="sec", level=2),
         ClassificationTriangle(id="ops", level=3),
     ])
-    assert await can_view_page(user, "multi-page") is True
+    assert await can_view_page(user, "multi-page", page_repo) is True
 
 
 # ---------------------------------------------------------------------------
@@ -269,11 +265,11 @@ async def test_can_view_page_multi_triangle_requirement(mock_db, classified_page
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_find_pages_filters_by_classification(mock_db, classified_pages, monkeypatch):
+async def test_find_pages_filters_by_classification(mock_db, classified_pages, monkeypatch, page_repo):
     admin = User(user_id="admin1", name="Admin", permission_level=PermissionLevel.admin)
     _patch_user_triangles(monkeypatch, [ClassificationTriangle(id="sec", level=2)])
 
-    results = await find_pages("", user=admin)
+    results = await find_pages("", user=admin, repo=page_repo)
     page_ids = {p.page_id for p in results}
 
     assert "open-page" in page_ids
@@ -283,7 +279,7 @@ async def test_find_pages_filters_by_classification(mock_db, classified_pages, m
 
 
 @pytest.mark.asyncio
-async def test_find_pages_system_user_sees_all_with_full_clearance(mock_db, classified_pages, monkeypatch):
+async def test_find_pages_system_user_sees_all_with_full_clearance(mock_db, classified_pages, monkeypatch, page_repo):
     """System user with full classification clearance can see all pages."""
     system_user = User(user_id="system", name="System", permission_level=PermissionLevel.admin)
     _patch_user_triangles(monkeypatch, [
@@ -291,7 +287,7 @@ async def test_find_pages_system_user_sees_all_with_full_clearance(mock_db, clas
         ClassificationTriangle(id="ops", level=4),
     ])
 
-    results = await find_pages("", user=system_user)
+    results = await find_pages("", user=system_user, repo=page_repo)
     page_ids = {p.page_id for p in results}
 
     assert "open-page" in page_ids
@@ -305,11 +301,11 @@ async def test_find_pages_system_user_sees_all_with_full_clearance(mock_db, clas
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_get_page_tree_filters_classified_pages(mock_db, classified_pages, monkeypatch):
+async def test_get_page_tree_filters_classified_pages(mock_db, classified_pages, monkeypatch, page_repo):
     admin = User(user_id="admin1", name="Admin", permission_level=PermissionLevel.admin)
     _patch_user_triangles(monkeypatch, [ClassificationTriangle(id="sec", level=1)])
 
-    tree = await get_page_tree(admin)
+    tree = await get_page_tree(admin, page_repo)
     page_ids = {p["page_id"] for p in tree}
 
     assert "open-page" in page_ids
@@ -323,9 +319,9 @@ async def test_get_page_tree_filters_classified_pages(mock_db, classified_pages,
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_create_page_persists_classification(mock_db):
+async def test_create_page_persists_classification(page_repo, user_repo):
     user = User(user_id="creator", name="Creator", permission_level=PermissionLevel.admin)
-    await mock_db.users.insert_one(user.model_dump(mode="json"))
+    await user_repo.create(user)
 
     data = PageCreate(
         title="Classified Doc",
@@ -336,7 +332,7 @@ async def test_create_page_persists_classification(mock_db):
             ClassificationTriangle(id="beta", level=3),
         ],
     )
-    page = await create_page(data, user)
+    page = await create_page(data, user, page_repo)
 
     assert len(page.classification) == 2
     assert page.classification[0].id == "alpha"
@@ -344,15 +340,14 @@ async def test_create_page_persists_classification(mock_db):
     assert page.classification[1].id == "beta"
     assert page.classification[1].level == 3
 
-    # Verify persisted in DB
-    stored = await get_page(page.page_id)
+    stored = await get_page(page.page_id, page_repo)
     assert len(stored.classification) == 2
 
 
 @pytest.mark.asyncio
-async def test_update_page_changes_classification(mock_db):
+async def test_update_page_changes_classification(page_repo, user_repo):
     user = User(user_id="creator", name="Creator", permission_level=PermissionLevel.admin)
-    await mock_db.users.insert_one(user.model_dump(mode="json"))
+    await user_repo.create(user)
 
     data = PageCreate(
         title="Doc",
@@ -360,7 +355,7 @@ async def test_update_page_changes_classification(mock_db):
         content="Content",
         classification=[ClassificationTriangle(id="x", level=1)],
     )
-    page = await create_page(data, user)
+    page = await create_page(data, user, page_repo)
 
     update_data = PageUpdate(
         classification=[
@@ -368,19 +363,19 @@ async def test_update_page_changes_classification(mock_db):
             ClassificationTriangle(id="y", level=2),
         ]
     )
-    updated = await update_page(page.page_id, update_data, user)
+    updated = await update_page(page.page_id, update_data, user, page_repo)
     assert len(updated.classification) == 2
     assert updated.classification[0].id == "x"
     assert updated.classification[0].level == 3
 
 
 @pytest.mark.asyncio
-async def test_create_page_without_classification_defaults_empty(mock_db):
+async def test_create_page_without_classification_defaults_empty(page_repo, user_repo):
     user = User(user_id="creator", name="Creator", permission_level=PermissionLevel.admin)
-    await mock_db.users.insert_one(user.model_dump(mode="json"))
+    await user_repo.create(user)
 
     data = PageCreate(title="Normal", description="Normal page", content="Hello")
-    page = await create_page(data, user)
+    page = await create_page(data, user, page_repo)
     assert page.classification == []
 
 
@@ -389,7 +384,7 @@ async def test_create_page_without_classification_defaults_empty(mock_db):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_api_failure_blocks_classified_pages(mock_db, classified_pages, monkeypatch):
+async def test_api_failure_blocks_classified_pages(mock_db, classified_pages, monkeypatch, page_repo):
     """When external API fails, user gets empty triangles — classified pages inaccessible."""
     from app.config import settings
     monkeypatch.setattr(settings, "classification_api_url", "http://broken-api")
@@ -403,8 +398,6 @@ async def test_api_failure_blocks_classified_pages(mock_db, classified_pages, mo
 
     admin = User(user_id="admin1", name="Admin", permission_level=PermissionLevel.admin)
 
-    # Unclassified page should still be accessible
-    assert await can_view_page(admin, "open-page") is True
-    # Classified pages should be blocked
-    assert await can_view_page(admin, "low-page") is False
-    assert await can_view_page(admin, "high-page") is False
+    assert await can_view_page(admin, "open-page", page_repo) is True
+    assert await can_view_page(admin, "low-page", page_repo) is False
+    assert await can_view_page(admin, "high-page", page_repo) is False

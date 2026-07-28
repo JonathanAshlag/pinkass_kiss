@@ -7,6 +7,7 @@ from app.config import settings
 from app.llm.client import _get_client
 from app.models.user import User
 from app.prompts.retrieval import QA_SYSTEM_PROMPT, RETRIEVE_TOOL
+from app.storage.base import PageRepository
 from app.services.pages import find_page_docs
 
 logger = logging.getLogger("pinkas.llm")
@@ -17,15 +18,12 @@ MAX_TOOL_ITERATIONS = 5
 async def ask_with_retrieval(
     messages: list[dict],
     user: User,
+    page_repo: PageRepository,
 ) -> dict:
-    """Answer a question using LLM with retrieve tool.
-
-    Returns {"answer": str, "cited_pages": list[str]}
-    """
+    """Answer a question using LLM with retrieve tool."""
     client = _get_client()
 
     system_msg = {"role": "system", "content": QA_SYSTEM_PROMPT}
-
     conversation = [system_msg] + messages
     cited_pages: list[str] = []
 
@@ -43,15 +41,16 @@ async def ask_with_retrieval(
 
         choice = response.choices[0]
 
-        if choice.finish_reason == "tool_calls" or (choice.message.tool_calls):
+        if choice.finish_reason == "tool_calls" or choice.message.tool_calls:
             conversation.append(choice.message.model_dump())
             for tool_call in choice.message.tool_calls:
                 if tool_call.function.name == "retrieve":
                     args = json.loads(tool_call.function.arguments)
                     results = await find_page_docs(
                         args["query"],
-                        projection={"page_id": 1, "title": 1, "content": 1, "trust_tier": 1, "inbound_link_count": 1, "_id": 0},
+                        fields=["page_id", "title", "content", "trust_tier", "inbound_link_count"],
                         user=user,
+                        repo=page_repo,
                         ranked=True,
                         limit=10,
                     )

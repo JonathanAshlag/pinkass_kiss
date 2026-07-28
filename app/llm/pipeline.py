@@ -13,6 +13,7 @@ from app.models.page import (
 )
 from app.models.request import RequestType
 from app.models.user import User, PermissionLevel
+from app.storage.base import PageRepository, RequestRepository
 from app.services.mutations import apply_page_mutation
 from app.services.pages import find_page_docs, get_page, set_page_references
 
@@ -26,18 +27,13 @@ async def run_ingestion_pipeline(
     file_id_str: str,
     user: User,
     initial_trust_tier: str,
+    page_repo: PageRepository,
+    req_repo: RequestRepository,
 ) -> list[dict]:
-    """Run the 3-phase ingestion pipeline for a single document.
-
-    Phase 1: Extract topic candidates (title + description).
-    Phase 2: Dedup check per candidate (search + LLM judge).
-    Phase 3A: Generate full content and create new page.
-    Phase 3B: Merge new info into existing page (or just link source).
-    """
+    """Run the 3-phase ingestion pipeline for a single document."""
     file_ref = Reference(type=ReferenceType.file, file_id=file_id_str)
     results = []
 
-    # Phase 1
     candidates = await extract_topic_candidates(text, filename, content_parts)
     logger.info(f"Extracted {len(candidates)} topic candidates from {filename}")
 
@@ -47,11 +43,11 @@ async def run_ingestion_pipeline(
         if not title:
             continue
 
-        # Phase 2: search within the uploading user's permissions
         search_results = await find_page_docs(
             f"{title} {description}",
-            projection={"page_id": 1, "title": 1, "description": 1, "content": 1, "_id": 0},
+            fields=["page_id", "title", "description", "content"],
             user=user,
+            repo=page_repo,
             statuses=[s for s in PageStatus if s != PageStatus.deleted],
             limit=5,
         )
@@ -60,10 +56,9 @@ async def run_ingestion_pipeline(
         if search_results:
             verdict = await judge_duplicate(candidate, search_results)
             if verdict.get("is_duplicate") and verdict.get("confidence") in ("high", "medium"):
-                matched_page = await get_page(verdict["matched_page_id"])
+                matched_page = await get_page(verdict["matched_page_id"], page_repo)
 
         if matched_page:
-            # Phase 3B — existing page found
             merge = await merge_content(
                 matched_page.title,
                 matched_page.content,
@@ -71,20 +66,20 @@ async def run_ingestion_pipeline(
                 filename,
                 text,
             )
-
             updated_refs = list(matched_page.references) + [file_ref]
 
             if merge.get("has_new_info") and merge.get("merged_content"):
                 mutation_result = await apply_page_mutation(
                     RequestType.edit,
                     user,
+                    page_repo=page_repo,
+                    req_repo=req_repo,
                     data=PageUpdate(content=merge["merged_content"], references=updated_refs),
                     page_id=matched_page.page_id,
                 )
                 action_status = mutation_result["status"]
             else:
-                # No new info — record the new source reference only (no approval needed).
-                await set_page_references(matched_page.page_id, updated_refs)
+                await set_page_references(matched_page.page_id, updated_refs, page_repo)
                 action_status = "linked"
 
             results.append({
@@ -95,7 +90,6 @@ async def run_ingestion_pipeline(
             })
             continue
 
-        # Phase 3A — new topic
         content_result = await generate_page_content(title, description, filename, text, content_parts)
         page_content = content_result.get("content", text)
 
@@ -105,7 +99,6 @@ async def run_ingestion_pipeline(
             content=page_content,
             references=[file_ref],
         )
-        # Admin-verified trust tier promotion is handled inside the seam.
         should_verify = (
             user.permission_level == PermissionLevel.admin
             and initial_trust_tier == TrustTier.verified.value
@@ -113,6 +106,8 @@ async def run_ingestion_pipeline(
         mutation_result = await apply_page_mutation(
             RequestType.create,
             user,
+            page_repo=page_repo,
+            req_repo=req_repo,
             data=page_data,
             trust_tier=TrustTier.verified if should_verify else None,
         )
