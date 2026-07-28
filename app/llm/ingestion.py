@@ -3,6 +3,16 @@
 import logging
 
 from app.llm.client import _call_llm_json
+from app.prompts.ingestion import (
+    EXTRACT_TOPICS_SYSTEM,
+    GENERATE_CONTENT_SYSTEM,
+    JUDGE_DUPLICATE_SYSTEM,
+    MERGE_CONTENT_SYSTEM,
+    build_extract_topics_user,
+    build_generate_content_user,
+    build_judge_duplicate_user,
+    build_merge_content_user,
+)
 
 logger = logging.getLogger("pinkas.llm")
 
@@ -28,25 +38,11 @@ async def extract_topic_candidates(text: str, filename: str, content_parts: list
 
     Returns list of {"title": str, "description": str}
     """
-    prompt_text = (
-        f"Document: {filename}\n\n"
-        "For each distinct topic in the document, return:\n"
-        "- title: concise wiki-style title\n"
-        "- description: one sentence defining this topic (used for search and dedup)\n\n"
-        "Return a JSON array only. No other text.\n\n"
-        "Document content follows:\n"
-    )
-    user_content = _build_multimodal_content(prompt_text, content_parts)
+    user_content = _build_multimodal_content(build_extract_topics_user(filename), content_parts)
 
     result = await _call_llm_json(
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    'You are a knowledge base curator for an organizational wiki called "Pinkas" (פנקס כיס). '
-                    "Identify the distinct wiki-worthy topics in a source document."
-                ),
-            },
+            {"role": "system", "content": EXTRACT_TOPICS_SYSTEM},
             {"role": "user", "content": user_content},
         ],
         default=[{"title": filename, "description": f"Content from {filename}"}],
@@ -61,24 +57,10 @@ async def judge_duplicate(candidate: dict, search_results: list[dict]) -> dict:
 
     Returns {"is_duplicate": bool, "matched_page_id": str|None, "confidence": "high"|"medium"|"low"}
     """
-    pages_text = "\n".join(
-        f"- [{r['page_id']}] {r['title']}: {r.get('description', '')}\n  Content: {r.get('content', '')}"
-        for r in search_results
-    )
     return await _call_llm_json(
         messages=[
-            {"role": "system", "content": "You are a knowledge deduplication specialist."},
-            {
-                "role": "user",
-                "content": (
-                    f"Candidate:\n"
-                    f"  Title: {candidate['title']}\n"
-                    f"  Description: {candidate.get('description', '')}\n\n"
-                    f"Existing pages:\n{pages_text}\n\n"
-                    "Is the candidate the same concept as any existing page?\n"
-                    'Return JSON only: {"is_duplicate": bool, "matched_page_id": "id or null", "confidence": "high|medium|low"}'
-                ),
-            },
+            {"role": "system", "content": JUDGE_DUPLICATE_SYSTEM},
+            {"role": "user", "content": build_judge_duplicate_user(candidate, search_results)},
         ],
         default={"is_duplicate": False, "matched_page_id": None, "confidence": "low"},
         name="judge_duplicate",
@@ -90,21 +72,11 @@ async def generate_page_content(title: str, description: str, filename: str, tex
 
     Returns {"content": str}
     """
-    prompt_text = (
-        f'Write a complete wiki page for the topic "{title}" ({description}).\n'
-        f"Source document: {filename}\n\n"
-        "Base your content only on what the document says about this topic.\n"
-        'Return JSON only: {"content": "full markdown content"}\n\n'
-        "Document content follows:\n"
-    )
-    user_content = _build_multimodal_content(prompt_text, content_parts)
+    user_content = _build_multimodal_content(build_generate_content_user(title, description, filename), content_parts)
 
     return await _call_llm_json(
         messages=[
-            {
-                "role": "system",
-                "content": "You are a wiki editor writing a new page for an organizational knowledge base.",
-            },
+            {"role": "system", "content": GENERATE_CONTENT_SYSTEM},
             {"role": "user", "content": user_content},
         ],
         default={"content": text},
@@ -119,24 +91,8 @@ async def merge_content(existing_title: str, existing_content: str, candidate_de
     """
     return await _call_llm_json(
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a wiki editor. Determine if a source document adds new information "
-                    "to an existing wiki page, and if so produce updated content."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f'Existing page "{existing_title}":\n{existing_content}\n\n'
-                    f'New source "{filename}" covers this topic as:\n'
-                    f"  Description: {candidate_description}\n\n"
-                    f"Document text:\n{text}\n\n"
-                    "Does the document add meaningful information not already in the existing page?\n"
-                    'Return JSON only: {"has_new_info": bool, "merged_content": "full updated markdown or null", "summary_of_additions": "brief or null"}'
-                ),
-            },
+            {"role": "system", "content": MERGE_CONTENT_SYSTEM},
+            {"role": "user", "content": build_merge_content_user(existing_title, existing_content, candidate_description, filename, text)},
         ],
         default={"has_new_info": False, "merged_content": None, "summary_of_additions": None},
         name="merge_content",
