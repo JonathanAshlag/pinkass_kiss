@@ -10,8 +10,9 @@ from app.models.request import (
     RequestType, ReviewPayload,
 )
 from app.models.user import User
-from app.storage.base import PageRepository, RequestRepository, WorkflowRepository
+from app.storage.base import PageRepository, RequestRepository, SourceFileRepository, WorkflowRepository
 from app.services.pages import compute_content_hash
+from app.services.source_files import cleanup_source_file_for_page
 
 logger = logging.getLogger("pinkas.requests")
 
@@ -92,6 +93,7 @@ async def decide_request(
     page_repo: PageRepository,
     wf_repo: WorkflowRepository,
     comment: Optional[str] = None,
+    source_file_repo: Optional[SourceFileRepository] = None,
 ) -> Optional[ApprovalRequest]:
     req = await req_repo.get(request_id)
     if not req or req.status != RequestStatus.pending:
@@ -129,7 +131,7 @@ async def decide_request(
                 {"status": RequestStatus.approved.value, "current_step": next_step},
                 history_entry,
             )
-            await _apply_approved_request(req, user_id, comment, page_repo)
+            await _apply_approved_request(req, user_id, comment, page_repo, source_file_repo)
         else:
             await req_repo.update_with_history(
                 request_id,
@@ -145,6 +147,7 @@ async def _apply_approved_request(
     approver_id: str,
     comment: Optional[str],
     page_repo: PageRepository,
+    source_file_repo: Optional[SourceFileRepository] = None,
 ) -> None:
     page_history = HistoryEntry(user_id=approver_id, action="approve", comment=comment)
 
@@ -183,3 +186,5 @@ async def _apply_approved_request(
             {"status": PageStatus.deleted.value, "updated_at": datetime.now(timezone.utc).isoformat()},
             page_history,
         )
+        if source_file_repo is not None:
+            await cleanup_source_file_for_page(req.page_id, source_file_repo)

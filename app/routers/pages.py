@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.container import PageRepo, RequestRepo
+from app.container import PageRepo, RequestRepo, SourceFileRepo
 from app.models.page import Page, PageCreate, PageUpdate, PageStatus
 from app.models.request import RequestType
 from app.models.user import User
@@ -12,6 +12,7 @@ from app.services.pages import (
     get_page, search_pages, get_page_tree, get_page_history, is_trust_stale,
 )
 from app.services.permissions import can_view_page
+from app.services.source_files import cleanup_source_file_for_page
 
 router = APIRouter(prefix="/pages", tags=["pages"])
 
@@ -90,10 +91,14 @@ async def delete_page_endpoint(
     user: User = Depends(require_editor),
     page_repo: PageRepo = None,
     req_repo: RequestRepo = None,
+    source_file_repo: SourceFileRepo = None,
 ):
     if not await can_view_page(user, page_id, page_repo):
         raise HTTPException(status_code=403, detail="No permission to view this page")
     page = await get_page(page_id, page_repo)
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
-    return await apply_page_mutation(RequestType.delete, user, page_repo, req_repo, page_id=page_id)
+    result = await apply_page_mutation(RequestType.delete, user, page_repo, req_repo, page_id=page_id)
+    if result.get("status") == "deleted":
+        await cleanup_source_file_for_page(page_id, source_file_repo)
+    return result

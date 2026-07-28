@@ -79,3 +79,12 @@ def req_repo(backend, mock_db, pg_session):
         return PostgresRequestRepository(pg_session)
     from app.storage.mongo.requests import MongoRequestRepository
     return MongoRequestRepository(mock_db)
+
+
+@pytest.fixture
+def source_file_repo(backend, mock_db, pg_session):
+    if backend == "postgres":
+        from app.storage.postgres.source_files import PostgresSourceFileRepository
+        return PostgresSourceFileRepository(pg_session)
+    from app.storage.mongo.source_files import MongoSourceFileRepository
+    return MongoSourceFileRepository(mock_db)

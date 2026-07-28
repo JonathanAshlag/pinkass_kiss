@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.container import PageRepo, RequestRepo, WorkflowRepo
+from app.container import PageRepo, RequestRepo, SourceFileRepo, WorkflowRepo
 from app.models.request import Decision
 from app.models.user import User
 from app.routers.deps import get_current_user
@@ -40,6 +40,7 @@ async def decide(
     req_repo: RequestRepo = None,
     page_repo: PageRepo = None,
     wf_repo: WorkflowRepo = None,
+    source_file_repo: SourceFileRepo = None,
 ):
     if data.decision not in ("approve", "reject"):
         raise HTTPException(status_code=400, detail="Decision must be 'approve' or 'reject'")
@@ -47,7 +48,7 @@ async def decide(
     result = await decide_request(
         request_id, user.user_id, data.decision,
         req_repo=req_repo, page_repo=page_repo, wf_repo=wf_repo,
-        comment=data.comment,
+        comment=data.comment, source_file_repo=source_file_repo,
     )
     if not result:
         raise HTTPException(

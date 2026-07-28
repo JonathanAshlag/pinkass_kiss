@@ -93,15 +93,26 @@ python seed_db.py   # creates sample users, workflow, and page hierarchy
 
 ### PostgreSQL
 
+MongoDB must still be running alongside Postgres — file blobs (PDFs, images, etc.) are always stored in GridFS, which requires MongoDB. Only structured data (pages, users, workflows, requests) moves to Postgres.
+
 ```bash
 DB_BACKEND=postgres
 POSTGRES_URI=postgresql+asyncpg://user:password@localhost/pinkas
+# MongoDB is still required — keep MONGO_URI and MONGO_DB set
+MONGO_URI=mongodb://localhost:27017
+MONGO_DB=pinkas
 ```
 
-Run the Alembic migration to create tables:
+Run the Alembic migration to create Postgres tables:
 
 ```bash
 alembic upgrade head
+```
+
+Create MongoDB indexes (GridFS needs this even in Postgres mode):
+
+```bash
+python init_db.py
 ```
 
 Seed demo data (uses the same script — reads `DB_BACKEND` from `.env`):
@@ -205,7 +216,7 @@ sudo systemctl start pinkas-api pinkas-ui
 
 6. **Ask a question:** Go to "שאל שאלה", type a question about the wiki content. The LLM searches and composes an answer, preferring verified pages and noting when it relies on unverified content.
 
-7. **Produce from a file:** Go to "העלאת מסמך", upload a PDF, DOCX, XLSX, PPTX, HTML, or TXT file. The system extracts text and any embedded images (up to 20 per document) and generates wiki pages using multimodal LLM calls. Admin users can pass `initial_trust_tier=verified` via the API to self-certify the upload.
+7. **Produce from a file:** Go to "העלאת מסמך", upload a PDF, DOCX, XLSX, PPTX, HTML, or TXT file. The system extracts text and any embedded images (up to 20 per document) and generates wiki pages using multimodal LLM calls. Admin users can pass `initial_trust_tier=verified` via the API to self-certify the upload. The raw file is kept in GridFS and reference-counted against the pages it produced — it is purged automatically once the last generated page is deleted.
 
 8. **Verify a page:** Submit a `review` approval request with `proposed_content.type = "review"` and `trust_tier = "verified"`. Once the workflow approves it, the page is stamped as human-verified, a SHA-256 content hash is recorded, and `verified_at`/`verified_by` are set. Any subsequent content change triggers an automatic re-verification request the next morning.
 
@@ -308,6 +319,7 @@ pinkas/
 │   │   ├── workflows.py
 │   │   ├── users.py
 │   │   ├── requests.py          # Approval request lifecycle + decision handling
+│   │   ├── source_files.py      # Source file lifecycle — reference-counted GridFS cleanup
 │   │   └── permissions.py
 │   ├── models/                  # Pydantic v2 domain models
 │   ├── storage/                 # Data access layer

@@ -16,6 +16,8 @@ from app.prompts.ingestion import (
 
 logger = logging.getLogger("pinkas.llm")
 
+def _concat_prompt_with_textual_content_parts(prompt: str, content_parts: list[dict] | None) -> str:
+    return prompt + "\n\n".join(p.get("text") for p in content_parts if p.get("type") == "text")
 
 def _build_multimodal_content(prompt: str, content_parts: list[dict] | None) -> str | list[dict]:
     """Build a message content value with interleaved text/images in document order.
@@ -26,11 +28,13 @@ def _build_multimodal_content(prompt: str, content_parts: list[dict] | None) -> 
     if not content_parts:
         return prompt
     has_images = any(p.get("type") == "image_url" for p in content_parts)
+    text_message = {"type": "text", "text": _concat_prompt_with_textual_content_parts(prompt, content_parts)}
     if not has_images:
-        return prompt
-    parts: list[dict] = [{"type": "text", "text": prompt}]
-    parts.extend(content_parts)
-    return parts
+        return [text_message]
+    parts: list[dict] = []
+    parts.append(text_message)
+    parts.extend([p for p in content_parts if p.get("type") == "image_url"])
+    return parts #_concat_prompt_with_textual_content_parts(prompt, content_parts)
 
 
 async def extract_topic_candidates(text: str, filename: str, content_parts: list[dict] = None) -> list[dict]:

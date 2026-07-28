@@ -93,7 +93,7 @@ def api_post(path: str, user_id: str = None, json_data: dict = None, files=None)
         headers["X-User-Id"] = user_id
     try:
         if files:
-            resp = requests.post(f"{API_URL}{path}", headers=headers, files=files, timeout=60)
+            resp = requests.post(f"{API_URL}{path}", headers=headers, files=files, timeout=300)
         else:
             resp = requests.post(f"{API_URL}{path}", headers=headers, json=json_data, timeout=30)
         if resp.status_code == 200:
