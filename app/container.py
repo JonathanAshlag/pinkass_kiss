@@ -125,6 +125,7 @@ async def background_repos():
                 users=PostgresUserRepository(session),
                 workflows=PostgresWorkflowRepository(session),
             )
+            await session.commit()
     else:
         from app.storage.mongo.pages import MongoPageRepository
         from app.storage.mongo.requests import MongoRequestRepository

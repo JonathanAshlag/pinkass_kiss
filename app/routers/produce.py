@@ -2,12 +2,14 @@
 
 import base64
 import logging
+import uuid
 from dataclasses import dataclass, field
 from io import BytesIO
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException
 
-from app.db import get_gridfs
+from app.config import settings
 from app.container import PageRepo, RequestRepo, SourceFileRepo
 from app.models.page import TrustTier
 from app.models.user import User
@@ -17,6 +19,13 @@ from app.llm.pipeline import run_ingestion_pipeline
 logger = logging.getLogger("pinkas.produce")
 
 router = APIRouter(tags=["produce"])
+
+_UPLOADS_DIR = Path("uploads")
+
+
+def _uploads_path(file_id: str) -> Path:
+    _UPLOADS_DIR.mkdir(exist_ok=True)
+    return _UPLOADS_DIR / file_id
 
 MAX_IMAGES = 20
 
@@ -152,7 +161,6 @@ async def produce(
     source_file_repo: SourceFileRepo = None,
 ):
     """Ingest files, extract text, generate pages via LLM."""
-    gridfs = get_gridfs()
     results = []
 
     for upload_file in files:
@@ -160,12 +168,18 @@ async def produce(
         content_type = upload_file.content_type or "application/octet-stream"
         filename = upload_file.filename or "unnamed"
 
-        file_id = await gridfs.upload_from_stream(
-            filename,
-            BytesIO(content),
-            metadata={"content_type": content_type, "uploaded_by": user.user_id},
-        )
-        file_id_str = str(file_id)
+        if settings.db_backend == "postgres":
+            file_id_str = str(uuid.uuid4())
+            _uploads_path(file_id_str).write_bytes(content)
+        else:
+            from app.db import get_gridfs
+            gridfs = get_gridfs()
+            oid = await gridfs.upload_from_stream(
+                filename,
+                BytesIO(content),
+                metadata={"content_type": content_type, "uploaded_by": user.user_id},
+            )
+            file_id_str = str(oid)
 
         extracted = _extract_content(content, content_type, filename)
 
@@ -199,24 +213,37 @@ async def produce(
 @router.get("/files/{file_id}")
 async def get_file(file_id: str):
     """Download a stored source file."""
-    from bson import ObjectId
     from fastapi.responses import StreamingResponse
 
-    gridfs = get_gridfs()
-    try:
-        stream = await gridfs.open_download_stream(ObjectId(file_id))
-    except Exception:
-        raise HTTPException(status_code=404, detail="File not found")
+    if settings.db_backend == "postgres":
+        path = _uploads_path(file_id)
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="File not found")
 
-    async def iterfile():
-        while True:
-            chunk = await stream.read(8192)
-            if not chunk:
-                break
-            yield chunk
+        async def iterfile_disk():
+            with open(path, "rb") as f:
+                while chunk := f.read(8192):
+                    yield chunk
 
-    return StreamingResponse(
-        iterfile(),
-        media_type=stream.metadata.get("content_type", "application/octet-stream") if stream.metadata else "application/octet-stream",
-        headers={"Content-Disposition": f"attachment; filename={stream.filename}"},
-    )
+        return StreamingResponse(iterfile_disk(), media_type="application/octet-stream")
+    else:
+        from bson import ObjectId
+        from app.db import get_gridfs
+        gridfs = get_gridfs()
+        try:
+            stream = await gridfs.open_download_stream(ObjectId(file_id))
+        except Exception:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        async def iterfile_gridfs():
+            while True:
+                chunk = await stream.read(8192)
+                if not chunk:
+                    break
+                yield chunk
+
+        return StreamingResponse(
+            iterfile_gridfs(),
+            media_type=stream.metadata.get("content_type", "application/octet-stream") if stream.metadata else "application/octet-stream",
+            headers={"Content-Disposition": f"attachment; filename={stream.filename}"},
+        )

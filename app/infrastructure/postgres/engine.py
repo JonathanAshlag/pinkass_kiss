@@ -34,6 +34,7 @@ async def get_session() -> AsyncGenerator[AsyncSession | None, None]:
         return
     async with _session_factory() as session:
         yield session
+        await session.commit()
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession] | None:

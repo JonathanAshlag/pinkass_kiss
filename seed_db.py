@@ -129,8 +129,6 @@ async def _clear_postgres() -> None:
 
 async def seed() -> None:
     # Initialize backends
-    from app.infrastructure.mongo import init_client
-    init_client()
     if settings.db_backend == "postgres":
         from app.infrastructure.postgres.engine import init_engine
         init_engine(settings.postgres_uri)

@@ -1,4 +1,5 @@
 """פנקס כיס — Streamlit main app."""
+from dotenv import load_dotenv
 
 import os
 import sys
@@ -12,6 +13,7 @@ from streamlit_app.helpers import apply_rtl, api_get
 
 # Get path to logo files relative to project root
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(_PROJECT_ROOT, '.env'))
 LOGO_IMG = os.path.join(_PROJECT_ROOT, "logo_img.png")
 LOGO_TEXT = os.path.join(_PROJECT_ROOT, "logo_text.png")
 
