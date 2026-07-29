@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.config import settings
+from app.infrastructure.elasticsearch import init_es, close_es
 from app.infrastructure.mongo import init_client, close_client
 from app.infrastructure.postgres.engine import init_engine, close_engine
 from app.scheduler import setup_scheduler
@@ -25,10 +26,22 @@ async def lifespan(app: FastAPI):
     if settings.db_backend == "postgres":
         init_engine(settings.postgres_uri)
         logger.info(f"PostgreSQL backend initialized: {settings.postgres_uri}")
+    if settings.es_audit_enabled and settings.es_hosts:
+        hosts = [h.strip() for h in settings.es_hosts.split(",")]
+        kwargs = {}
+        if settings.es_api_key:
+            kwargs["api_key"] = settings.es_api_key
+        elif settings.es_username and settings.es_password:
+            kwargs["basic_auth"] = (settings.es_username, settings.es_password)
+        if settings.es_cloud_id:
+            kwargs["cloud_id"] = settings.es_cloud_id
+        init_es(hosts, **kwargs)
+        logger.info("Elasticsearch audit logging initialized")
     scheduler = setup_scheduler()
     logger.info(f"Pinkas API started (backend: {settings.db_backend})")
     yield
     scheduler.shutdown()
+    await close_es()
     if settings.db_backend == "postgres":
         await close_engine()
     close_client()
