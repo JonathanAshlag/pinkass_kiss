@@ -5,11 +5,13 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger, DateTime, ForeignKey, Index, Integer,
-    JSON, String, Text,
+    JSON, MetaData, String, Text,
 )
 from sqlalchemy.schema import FetchedValue
 from sqlalchemy import types as sa_types
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+SCHEMA = "pinkass"
 
 
 class TSVector(sa_types.TypeDecorator):
@@ -25,7 +27,7 @@ class TSVector(sa_types.TypeDecorator):
 
 
 class Base(DeclarativeBase):
-    pass
+    metadata = MetaData(schema=SCHEMA)
 
 
 class PageORM(Base):

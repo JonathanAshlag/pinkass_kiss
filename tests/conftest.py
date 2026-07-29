@@ -31,7 +31,10 @@ async def pg_session():
     """SQLite in-memory async session — stand-in for the Postgres session in tests."""
     from app.infrastructure.postgres.models import Base
 
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        execution_options={"schema_translate_map": {"pinkass": None}},
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)

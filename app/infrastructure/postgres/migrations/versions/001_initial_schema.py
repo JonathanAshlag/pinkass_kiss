@@ -16,8 +16,12 @@ down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+SCHEMA = "pinkass"
+
 
 def upgrade() -> None:
+    op.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
+
     op.create_table(
         "pages",
         sa.Column("page_id", sa.String(), primary_key=True),
@@ -47,40 +51,44 @@ def upgrade() -> None:
             ),
             nullable=True,
         ),
+        schema=SCHEMA,
     )
-    op.create_index("ix_pages_status", "pages", ["status"])
-    op.create_index("ix_pages_trust_inbound", "pages", ["trust_tier", "inbound_link_count"])
+    op.create_index("ix_pages_status", "pages", ["status"], schema=SCHEMA)
+    op.create_index("ix_pages_trust_inbound", "pages", ["trust_tier", "inbound_link_count"], schema=SCHEMA)
     op.create_index(
         "ix_pages_next_approval",
         "pages",
         ["next_approval_date"],
+        schema=SCHEMA,
         postgresql_where=sa.text("next_approval_date IS NOT NULL"),
     )
-    op.create_index("ix_pages_tsv", "pages", ["tsv"], postgresql_using="gin")
+    op.create_index("ix_pages_tsv", "pages", ["tsv"], schema=SCHEMA, postgresql_using="gin")
 
     op.create_table(
         "page_revisions",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
-        sa.Column("page_id", sa.String(), sa.ForeignKey("pages.page_id", ondelete="CASCADE"), nullable=False),
+        sa.Column("page_id", sa.String(), sa.ForeignKey(f"{SCHEMA}.pages.page_id", ondelete="CASCADE"), nullable=False),
         sa.Column("user_id", sa.String(), nullable=False),
         sa.Column("action", sa.String(), nullable=False),
         sa.Column("diff", sa.Text(), nullable=True),
         sa.Column("snapshot", sa.Text(), nullable=True),
         sa.Column("comment", sa.Text(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        schema=SCHEMA,
     )
-    op.create_index("ix_page_revisions_page_id_created_at", "page_revisions", ["page_id", "created_at"])
+    op.create_index("ix_page_revisions_page_id_created_at", "page_revisions", ["page_id", "created_at"], schema=SCHEMA)
 
     op.create_table(
         "page_refs",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
-        sa.Column("from_page_id", sa.String(), sa.ForeignKey("pages.page_id", ondelete="CASCADE"), nullable=False),
+        sa.Column("from_page_id", sa.String(), sa.ForeignKey(f"{SCHEMA}.pages.page_id", ondelete="CASCADE"), nullable=False),
         sa.Column("ref_type", sa.String(), nullable=False),
-        sa.Column("to_page_id", sa.String(), sa.ForeignKey("pages.page_id", ondelete="SET NULL"), nullable=True),
+        sa.Column("to_page_id", sa.String(), sa.ForeignKey(f"{SCHEMA}.pages.page_id", ondelete="SET NULL"), nullable=True),
         sa.Column("file_id", sa.String(), nullable=True),
+        schema=SCHEMA,
     )
-    op.create_index("ix_page_refs_from", "page_refs", ["from_page_id"])
-    op.create_index("ix_page_refs_to_page", "page_refs", ["to_page_id"])
+    op.create_index("ix_page_refs_from", "page_refs", ["from_page_id"], schema=SCHEMA)
+    op.create_index("ix_page_refs_to_page", "page_refs", ["to_page_id"], schema=SCHEMA)
 
     op.create_table(
         "users",
@@ -89,6 +97,7 @@ def upgrade() -> None:
         sa.Column("permission_level", sa.String(), nullable=False, server_default="read_only"),
         sa.Column("workflow_id", sa.String(), nullable=True),
         sa.Column("page_permissions", JSONB(), nullable=False, server_default="[]"),
+        schema=SCHEMA,
     )
 
     op.create_table(
@@ -98,6 +107,7 @@ def upgrade() -> None:
         sa.Column("description", sa.Text(), nullable=False, server_default=""),
         sa.Column("steps", JSONB(), nullable=False, server_default="[]"),
         sa.Column("history", JSONB(), nullable=False, server_default="[]"),
+        schema=SCHEMA,
     )
 
     op.create_table(
@@ -112,10 +122,11 @@ def upgrade() -> None:
         sa.Column("status", sa.String(), nullable=False, server_default="pending"),
         sa.Column("history", JSONB(), nullable=False, server_default="[]"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        schema=SCHEMA,
     )
-    op.create_index("ix_requests_status", "requests", ["status"])
-    op.create_index("ix_requests_requested_by", "requests", ["requested_by"])
-    op.create_index("ix_requests_page_id", "requests", ["page_id"])
+    op.create_index("ix_requests_status", "requests", ["status"], schema=SCHEMA)
+    op.create_index("ix_requests_requested_by", "requests", ["requested_by"], schema=SCHEMA)
+    op.create_index("ix_requests_page_id", "requests", ["page_id"], schema=SCHEMA)
 
     op.create_table(
         "source_files",
@@ -126,14 +137,16 @@ def upgrade() -> None:
         sa.Column("extracted_text", sa.Text(), nullable=False, server_default=""),
         sa.Column("generated_page_ids", JSONB(), nullable=False, server_default="[]"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        schema=SCHEMA,
     )
 
 
 def downgrade() -> None:
-    op.drop_table("source_files")
-    op.drop_table("requests")
-    op.drop_table("workflows")
-    op.drop_table("users")
-    op.drop_table("page_refs")
-    op.drop_table("page_revisions")
-    op.drop_table("pages")
+    op.drop_table("source_files", schema=SCHEMA)
+    op.drop_table("requests", schema=SCHEMA)
+    op.drop_table("workflows", schema=SCHEMA)
+    op.drop_table("users", schema=SCHEMA)
+    op.drop_table("page_refs", schema=SCHEMA)
+    op.drop_table("page_revisions", schema=SCHEMA)
+    op.drop_table("pages", schema=SCHEMA)
+    op.execute(f"DROP SCHEMA IF EXISTS {SCHEMA}")

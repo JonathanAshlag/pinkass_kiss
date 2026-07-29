@@ -123,7 +123,7 @@ async def _clear_postgres() -> None:
     async with factory() as session:
         # Order matters: refs/revisions before pages, requests before nothing
         for table in ("page_refs", "page_revisions", "requests", "pages", "workflows", "users"):
-            await session.execute(text(f"DELETE FROM {table}"))
+            await session.execute(text(f"DELETE FROM pinkass.{table}"))
         await session.commit()
 
 

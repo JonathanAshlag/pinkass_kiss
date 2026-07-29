@@ -2,14 +2,14 @@
 import asyncio
 from logging.config import fileConfig
 
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 
 from app.config import settings
-from app.infrastructure.postgres.models import Base
+from app.infrastructure.postgres.models import Base, SCHEMA
 
 config = context.config
 
@@ -30,13 +30,20 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        version_table_schema=SCHEMA,
+        include_schemas=True,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        version_table_schema=SCHEMA,
+        include_schemas=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
@@ -49,6 +56,10 @@ async def run_async_migrations() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+    # Create the schema in its own committed transaction so it exists before
+    # Alembic tries to place its alembic_version table there.
+    async with connectable.begin() as conn:
+        await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}"))
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await connectable.dispose()
