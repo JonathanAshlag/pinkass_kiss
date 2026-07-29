@@ -58,7 +58,10 @@ def init_postgres() -> None:
 async def main() -> None:
     print(f"Backend: {settings.db_backend}")
     if settings.db_backend == "postgres":
-        init_postgres()
+        # Run in a thread so Alembic's own asyncio.run() doesn't conflict
+        # with the outer event loop started by asyncio.run(main()).
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, init_postgres)
     else:
         await init_mongo()
 
