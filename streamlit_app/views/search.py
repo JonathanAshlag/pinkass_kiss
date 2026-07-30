@@ -4,6 +4,7 @@ import streamlit as st
 
 from streamlit_app.strings import UI
 from streamlit_app.helpers import api_get, get_status_display
+from streamlit_app.state import VIEWING_PAGE, NAV_BROWSE, navigate_to
 
 
 def render(user_id: str):
@@ -19,7 +20,6 @@ def render(user_id: str):
                 with st.expander(f"📄 {page['title']} — {get_status_display(page.get('status', ''))}"):
                     st.markdown(page.get("content", "")[:500])
                     if st.button("פתח דף", key=f"open_{page['page_id']}"):
-                        st.session_state.viewing_page = page["page_id"]
-                        st.rerun()
+                        navigate_to(NAV_BROWSE, **{VIEWING_PAGE: page["page_id"]})
         else:
             st.info(UI["no_results"])

@@ -63,7 +63,7 @@ async def update_page(page_id: str, data: PageUpdate, user: User, repo: PageRepo
         update_fields["title"] = data.title
     if data.description is not None:
         update_fields["description"] = data.description
-    if data.parent_id is not None:
+    if "parent_id" in data.model_fields_set:
         update_fields["parent_id"] = data.parent_id
     if data.content is not None:
         update_fields["content"] = data.content

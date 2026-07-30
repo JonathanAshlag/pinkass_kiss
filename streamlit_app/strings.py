@@ -41,6 +41,7 @@ UI = {
     # Create/Edit
     "create_page": "יצירת דף חדש",
     "edit_page": "עריכת דף",
+    "edit_page_existing": "עריכת דף קיים",
     "delete_page": "מחיקת דף",
     "title_field": "כותרת",
     "description_field": "תיאור קצר",
@@ -49,6 +50,11 @@ UI = {
     "save_button": "שמור",
     "delete_button": "מחק",
     "confirm_delete": "האם למחוק את הדף?",
+
+    # Parent picker
+    "parent_search_label": "חיפוש דף אב",
+    "no_parent": "ללא דף אב",
+    "clear_parent": "נקה",
 
     # Ask
     "ask_title": "שאל שאלה",

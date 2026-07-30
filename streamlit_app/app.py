@@ -10,6 +10,12 @@ import streamlit as st
 
 from streamlit_app.strings import UI
 from streamlit_app.helpers import apply_rtl, api_get
+from streamlit_app.state import (
+    USER_ID, USER_DATA, CURRENT_PAGE, EDITING_PAGE, PP_CTX,
+    NAV_BROWSE, NAV_CREATE, NAV_SEARCH, NAV_ASK, NAV_PRODUCE,
+    NAV_MY_REQUESTS, NAV_MY_APPROVALS, NAV_ADMIN,
+    navigate_to,
+)
 
 # Get path to logo files relative to project root
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -27,10 +33,10 @@ st.set_page_config(
 apply_rtl()
 
 # Session state init
-if "user_id" not in st.session_state:
-    st.session_state.user_id = None
-if "user_data" not in st.session_state:
-    st.session_state.user_data = None
+if USER_ID not in st.session_state:
+    st.session_state[USER_ID] = None
+if USER_DATA not in st.session_state:
+    st.session_state[USER_DATA] = None
 
 
 def show_login():
@@ -39,16 +45,14 @@ def show_login():
     with col2:
         if os.path.exists(LOGO_IMG):
             st.image(LOGO_IMG, width=500)
-        # st.title(UI["app_title"])
         st.subheader(UI["app_subtitle"])
         user_id = st.text_input(UI["login_prompt"], key="login_input")
         if st.button(UI["login_button"]):
             if user_id:
-                # Verify user exists
                 user_data = api_get("/users/me", user_id=user_id)
                 if user_data and "error" not in user_data:
-                    st.session_state.user_id = user_id
-                    st.session_state.user_data = user_data
+                    st.session_state[USER_ID] = user_id
+                    st.session_state[USER_DATA] = user_data
                     st.rerun()
                 else:
                     st.error(f"{UI['error']}: משתמש לא נמצא")
@@ -56,8 +60,8 @@ def show_login():
 
 def show_sidebar():
     """Display sidebar navigation."""
-    if "current_page" not in st.session_state:
-        st.session_state.current_page = "nav_browse"
+    if CURRENT_PAGE not in st.session_state:
+        st.session_state[CURRENT_PAGE] = NAV_BROWSE
 
     with st.sidebar:
         if os.path.exists(LOGO_TEXT):
@@ -65,77 +69,83 @@ def show_sidebar():
         else:
             st.title(UI["app_title"])
 
-        user = st.session_state.user_data
+        user = st.session_state[USER_DATA]
         st.markdown(f"**{UI['user_name']}:** {user.get('name', '')}")
         st.markdown(f"**{UI['permission_level']}:** {user.get('permission_level', '')}")
         st.divider()
 
         nav_items = [
-            ("nav_browse", "📂"),
-            ("nav_search", "🔍"),
-            ("nav_ask", "💬"),
+            (NAV_BROWSE, "📂"),
+            (NAV_SEARCH, "🔍"),
+            (NAV_ASK, "💬"),
         ]
 
         if user.get("permission_level") in ("editor", "admin"):
             nav_items.extend([
-                ("nav_create", "✏️"),
-                ("nav_produce", "📄"),
+                (NAV_CREATE, "✏️"),
+                (NAV_PRODUCE, "📄"),
             ])
 
         nav_items.extend([
-            ("nav_my_requests", "📋"),
-            ("nav_my_approvals", "✅"),
+            (NAV_MY_REQUESTS, "📋"),
+            (NAV_MY_APPROVALS, "✅"),
         ])
 
         if user.get("permission_level") == "admin":
-            nav_items.append(("nav_admin", "⚙️"))
+            nav_items.append((NAV_ADMIN, "⚙️"))
 
         for key, icon in nav_items:
-            active = st.session_state.current_page == key
+            active = st.session_state[CURRENT_PAGE] == key
             label = f"{icon} **{UI[key]}**" if active else f"{icon} {UI[key]}"
             if st.button(label, key=f"nav_{key}", use_container_width=True):
-                st.session_state.current_page = key
-                st.rerun()
+                if key == NAV_CREATE:
+                    navigate_to(NAV_CREATE, **{EDITING_PAGE: None, PP_CTX: None})
+                else:
+                    navigate_to(key)
 
         st.divider()
         if st.button(f"🚪 {UI['logout']}", use_container_width=True):
-            st.session_state.user_id = None
-            st.session_state.user_data = None
+            st.session_state[USER_ID] = None
+            st.session_state[USER_DATA] = None
             st.rerun()
 
-        return UI[st.session_state.current_page]
+        return UI[st.session_state[CURRENT_PAGE]]
 
 
 def main():
-    if not st.session_state.user_id:
+    if not st.session_state[USER_ID]:
         show_login()
         return
 
     selection = show_sidebar()
-    user_id = st.session_state.user_id
+    user_id = st.session_state[USER_ID]
 
-    if selection == UI["nav_browse"]:
+    if selection == UI[NAV_BROWSE]:
         from streamlit_app.views.browse import render
         render(user_id)
-    elif selection == UI["nav_search"]:
+    elif selection == UI[NAV_SEARCH]:
         from streamlit_app.views.search import render
         render(user_id)
-    elif selection == UI["nav_create"]:
-        from streamlit_app.views.create_edit import render_create
-        render_create(user_id)
-    elif selection == UI["nav_ask"]:
+    elif selection == UI[NAV_CREATE]:
+        if st.session_state.get(EDITING_PAGE):
+            from streamlit_app.views.create_edit import render_edit
+            render_edit(user_id)
+        else:
+            from streamlit_app.views.create_edit import render_create
+            render_create(user_id)
+    elif selection == UI[NAV_ASK]:
         from streamlit_app.views.ask_page import render
         render(user_id)
-    elif selection == UI["nav_produce"]:
+    elif selection == UI[NAV_PRODUCE]:
         from streamlit_app.views.produce_page import render
         render(user_id)
-    elif selection == UI["nav_my_requests"]:
+    elif selection == UI[NAV_MY_REQUESTS]:
         from streamlit_app.views.my_requests import render
         render(user_id)
-    elif selection == UI["nav_my_approvals"]:
+    elif selection == UI[NAV_MY_APPROVALS]:
         from streamlit_app.views.my_approvals import render
         render(user_id)
-    elif selection == UI["nav_admin"]:
+    elif selection == UI[NAV_ADMIN]:
         from streamlit_app.views.admin import render
         render(user_id)
 
