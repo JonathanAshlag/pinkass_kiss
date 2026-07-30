@@ -44,6 +44,15 @@ class PageRepository(ABC):
         fields: "list[str] | None" = None,
     ) -> list[dict]: ...
 
+    async def fuzzy_search(
+        self,
+        query: str,
+        statuses: list[str],
+        limit: int,
+        fields: "list[str] | None" = None,
+    ) -> list[dict]:
+        return await self.search(query, statuses, limit, fields)
+
     @abstractmethod
     async def get_tree_nodes(self) -> list[dict]: ...
 
@@ -61,6 +70,9 @@ class PageRepository(ABC):
 
     @abstractmethod
     async def reset_inbound_link_counts(self, except_ids: list[str]) -> None: ...
+
+    @abstractmethod
+    async def delete(self, page_id: str) -> None: ...
 
 
 class UserRepository(ABC):

@@ -36,13 +36,11 @@ async def test_edit_appends_history(editor, page_repo):
 
 
 @pytest.mark.asyncio
-async def test_delete_appends_history(editor, page_repo):
+async def test_delete_removes_page(editor, page_repo):
     page = await create_page(PageCreate(title="Test", description="Test page", content="Delete me"), editor, page_repo)
     await delete_page(page.page_id, editor, page_repo)
 
-    page = await get_page(page.page_id, page_repo)
-    assert len(page.history) == 2
-    assert page.history[1].action == "delete"
+    assert await get_page(page.page_id, page_repo) is None
 
 
 @pytest.mark.asyncio

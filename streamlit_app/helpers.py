@@ -78,7 +78,7 @@ def api_get(path: str, user_id: str = None, params: dict = None) -> dict | list 
     if user_id:
         headers["X-User-Id"] = user_id
     try:
-        resp = requests.get(f"{API_URL}{path}", headers=headers, params=params, timeout=30)
+        resp = requests.get(f"{API_URL}{path}", headers=headers, params=params, timeout=90)
         if resp.status_code == 200:
             return resp.json()
         return None
@@ -95,7 +95,7 @@ def api_post(path: str, user_id: str = None, json_data: dict = None, files=None)
         if files:
             resp = requests.post(f"{API_URL}{path}", headers=headers, files=files, timeout=300)
         else:
-            resp = requests.post(f"{API_URL}{path}", headers=headers, json=json_data, timeout=30)
+            resp = requests.post(f"{API_URL}{path}", headers=headers, json=json_data, timeout=90)
         if resp.status_code == 200:
             return resp.json()
         return {"error": resp.text}
@@ -109,7 +109,7 @@ def api_put(path: str, user_id: str = None, json_data: dict = None) -> dict | No
     if user_id:
         headers["X-User-Id"] = user_id
     try:
-        resp = requests.put(f"{API_URL}{path}", headers=headers, json=json_data, timeout=30)
+        resp = requests.put(f"{API_URL}{path}", headers=headers, json=json_data, timeout=90)
         if resp.status_code == 200:
             return resp.json()
         return {"error": resp.text}

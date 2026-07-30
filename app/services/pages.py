@@ -86,11 +86,8 @@ async def update_page(page_id: str, data: PageUpdate, user: User, repo: PageRepo
 
 async def delete_page(page_id: str, user: User, repo: PageRepository) -> None:
     history_entry = HistoryEntry(user_id=user.user_id, action="delete")
-    fields = {
-        "status": PageStatus.deleted.value,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    await repo.update_with_history(page_id, fields, history_entry)
+    await repo.append_history(page_id, history_entry)
+    await repo.delete(page_id)
 
 
 _TIER_RANK = {"verified": 3, "source_checked": 2, "unverified": 1}
@@ -116,6 +113,51 @@ async def _find_raw_docs(
         effective_fields = fields + extra
 
     results = await repo.search(query, status_list, limit, fields=effective_fields)
+
+    user_triangles = await get_user_triangles(user.user_id)
+    results = [
+        doc for doc in results
+        if user_satisfies_classification(
+            user_triangles,
+            [ClassificationTriangle(**t) for t in doc.get("classification", [])],
+        )
+    ]
+
+    if strip_classification:
+        for doc in results:
+            doc.pop("classification", None)
+
+    if ranked:
+        results.sort(
+            key=lambda d: (
+                _TIER_RANK.get(d.get("trust_tier", "unverified"), 0),
+                d.get("inbound_link_count", 0),
+            ),
+            reverse=True,
+        )
+    return results
+
+
+async def _find_raw_docs_fuzzy(
+    query: str,
+    user: User,
+    repo: PageRepository,
+    ranked: bool = False,
+    statuses: Optional[list] = None,
+    limit: int = 10,
+    fields: Optional[list[str]] = None,
+) -> list[dict]:
+    status_list = [s.value for s in statuses] if statuses else [PageStatus.published.value]
+
+    strip_classification = False
+    effective_fields: Optional[list[str]] = None
+    if fields is not None:
+        strip_classification = "classification" not in fields
+        required = ["classification", "trust_tier", "inbound_link_count"]
+        extra = [f for f in required if f not in fields]
+        effective_fields = fields + extra
+
+    results = await repo.fuzzy_search(query, status_list, limit, fields=effective_fields)
 
     user_triangles = await get_user_triangles(user.user_id)
     results = [
@@ -173,6 +215,26 @@ async def set_page_references(page_id: str, references: list[Reference], repo: P
 
 async def search_pages(query: str, user: User, repo: PageRepository) -> list[Page]:
     return await find_pages(query, user=user, repo=repo)
+
+
+async def fuzzy_search_pages(query: str, user: User, repo: PageRepository) -> list[Page]:
+    from app.search_config import FUZZY_SEARCH_LIMIT
+    docs = await _find_raw_docs_fuzzy(query, user=user, repo=repo, limit=FUZZY_SEARCH_LIMIT)
+    return [Page(**doc) for doc in docs]
+
+
+async def find_page_docs_fuzzy(
+    query: str,
+    fields: list[str],
+    user: User,
+    repo: PageRepository,
+    ranked: bool = False,
+    statuses: Optional[list] = None,
+    limit: int = 10,
+) -> list[dict]:
+    return await _find_raw_docs_fuzzy(
+        query, user=user, repo=repo, ranked=ranked, statuses=statuses, limit=limit, fields=fields,
+    )
 
 
 async def get_page_tree(user: User, repo: PageRepository) -> list[dict]:

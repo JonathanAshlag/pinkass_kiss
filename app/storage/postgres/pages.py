@@ -188,6 +188,36 @@ class PostgresPageRepository(PageRepository):
         rows = result.scalars().all()
         return [self._row_to_dict(row, fields) for row in rows]
 
+    async def fuzzy_search(
+        self,
+        query: str,
+        statuses: list[str],
+        limit: int,
+        fields: Optional[list[str]] = None,
+    ) -> list[dict]:
+        from app.search_config import FUZZY_TITLE_THRESHOLD, FUZZY_DESCRIPTION_THRESHOLD
+        base = select(PageORM).where(PageORM.status.in_(statuses))
+
+        if query and self._dialect == "postgresql":
+            sim_title = func.word_similarity(query, PageORM.title)
+            sim_desc = func.word_similarity(query, PageORM.description)
+            stmt = (
+                base
+                .where(or_(sim_title > FUZZY_TITLE_THRESHOLD, sim_desc > FUZZY_DESCRIPTION_THRESHOLD))
+                .order_by(func.greatest(sim_title, sim_desc).desc())
+                .limit(limit)
+            )
+        elif query:
+            stmt = base.where(
+                or_(PageORM.title.ilike(f"%{query}%"), PageORM.content.ilike(f"%{query}%"))
+            ).limit(limit)
+        else:
+            stmt = base.limit(limit)
+
+        result = await self._s.execute(stmt)
+        rows = result.scalars().all()
+        return [self._row_to_dict(row, fields) for row in rows]
+
     async def get_tree_nodes(self) -> list[dict]:
         result = await self._s.execute(
             select(PageORM).where(PageORM.status != "deleted")
@@ -266,6 +296,10 @@ class PostgresPageRepository(PageRepository):
             )
         else:
             await self._s.execute(update(PageORM).values(inbound_link_count=0))
+        await self._s.flush()
+
+    async def delete(self, page_id: str) -> None:
+        await self._s.execute(delete(PageORM).where(PageORM.page_id == page_id))
         await self._s.flush()
 
     def _coerce(self, fields: dict) -> dict:

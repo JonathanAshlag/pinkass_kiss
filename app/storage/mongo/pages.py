@@ -147,3 +147,6 @@ class MongoPageRepository(PageRepository):
     async def reset_inbound_link_counts(self, except_ids: list[str]) -> None:
         query = {"page_id": {"$nin": except_ids}} if except_ids else {}
         await self._db.pages.update_many(query, {"$set": {"inbound_link_count": 0}})
+
+    async def delete(self, page_id: str) -> None:
+        await self._db.pages.delete_one({"page_id": page_id})

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.models.page import PageCreate, PageStatus
+from app.models.page import PageCreate
 from app.models.request import RequestType, RequestStatus
 from app.models.user import User, PermissionLevel
 from app.models.workflow import WorkflowCreate
@@ -168,6 +168,5 @@ async def test_workflow_approved_delete_cleans_up_source_file(
         assert result.status == RequestStatus.approved
         mock_bucket.delete.assert_awaited_once()
 
-    deleted_page = await get_page(page.page_id, page_repo)
-    assert deleted_page.status == PageStatus.deleted
+    assert await get_page(page.page_id, page_repo) is None
     assert await source_file_repo.get_for_page(page.page_id) is None

@@ -8,7 +8,7 @@ from app.llm.client import _get_client
 from app.models.user import User
 from app.prompts.retrieval import QA_SYSTEM_PROMPT, RETRIEVE_TOOL
 from app.storage.base import PageRepository
-from app.services.pages import find_page_docs
+from app.services.pages import find_page_docs_fuzzy
 
 logger = logging.getLogger("pinkas.llm")
 
@@ -46,7 +46,7 @@ async def ask_with_retrieval(
             for tool_call in choice.message.tool_calls:
                 if tool_call.function.name == "retrieve":
                     args = json.loads(tool_call.function.arguments)
-                    results = await find_page_docs(
+                    results = await find_page_docs_fuzzy(
                         args["query"],
                         fields=["page_id", "title", "content", "trust_tier", "inbound_link_count"],
                         user=user,

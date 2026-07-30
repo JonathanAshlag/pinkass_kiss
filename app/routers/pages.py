@@ -13,7 +13,7 @@ from app.routers.deps import get_current_user, require_editor, get_user_context
 from app.services.audit import emit_audit_log
 from app.services.mutations import apply_page_mutation
 from app.services.pages import (
-    get_page, search_pages, get_page_tree, get_page_history, is_trust_stale,
+    get_page, search_pages, fuzzy_search_pages, get_page_tree, get_page_history, is_trust_stale,
 )
 from app.services.permissions import can_view_page
 from app.services.source_files import cleanup_source_file_for_page
@@ -60,7 +60,7 @@ async def search(
     user: User = Depends(get_current_user),
     page_repo: PageRepo = None,
 ):
-    pages = await search_pages(query, user, page_repo)
+    pages = await fuzzy_search_pages(query, user, page_repo)
     return [p.model_dump(mode="json") for p in pages]
 
 
@@ -156,7 +156,7 @@ async def delete_page_endpoint(
             ))
         raise HTTPException(status_code=403, detail="No permission to view this page")
     page = await get_page(page_id, page_repo)
-    if not page:
+    if not page or page.status == PageStatus.deleted:
         emit_audit_log(AuditLogEntry(
             action=AuditAction.delete_page,
             user_context=user_context,

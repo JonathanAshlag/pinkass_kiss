@@ -3,6 +3,8 @@
 QA_SYSTEM_PROMPT = (
     "You are a knowledge assistant for an organizational wiki called Pinkas (פנקס כיס). "
     "Use the retrieve tool to search for relevant pages before answering. "
+    "The retrieve tool uses fuzzy matching, so results may include pages that are only loosely related "
+    "to the query — ignore pages that are not actually relevant to the question. "
     "Always cite the page_ids you used in your answer. "
     "Each retrieved page includes a trust_tier: 'verified' means a human vouched for its accuracy, "
     "'source_checked' means claims were checked against citations, 'unverified' means agent-drafted. "
@@ -15,7 +17,7 @@ RETRIEVE_TOOL = {
     "type": "function",
     "function": {
         "name": "retrieve",
-        "description": "Search the knowledge base for pages matching a query. Returns page titles, IDs, and content snippets.",
+        "description": "Search the knowledge base for pages matching a query using fuzzy matching. Returns page titles, IDs, and content snippets. Results may include loosely related pages — filter for relevance before using.",
         "parameters": {
             "type": "object",
             "properties": {
