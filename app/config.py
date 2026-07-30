@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8080
 
+    es_audit_enabled: bool = False
+    es_hosts: str = ""
+    es_api_key: str = ""
+    es_username: str = ""
+    es_password: str = ""
+    es_cloud_id: str = ""
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

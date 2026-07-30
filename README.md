@@ -56,6 +56,12 @@ cp .env.example .env
 | `API_HOST` | FastAPI bind address | `0.0.0.0` |
 | `API_PORT` | FastAPI port | `8080` |
 | `PINKAS_API_URL` | API URL for the Streamlit GUI | `http://localhost:8080` |
+| `ES_AUDIT_ENABLED` | Enable Elasticsearch audit logging | `false` |
+| `ES_HOSTS` | Comma-separated Elasticsearch URLs | *(empty)* |
+| `ES_API_KEY` | Elasticsearch API key (optional) | *(empty)* |
+| `ES_USERNAME` | Elasticsearch basic auth username (optional) | *(empty)* |
+| `ES_PASSWORD` | Elasticsearch basic auth password (optional) | *(empty)* |
+| `ES_CLOUD_ID` | Elastic Cloud ID (optional) | *(empty)* |
 
 ### Pointing to a local LLM server
 
@@ -286,6 +292,61 @@ The classification API must expose `GET {CLASSIFICATION_API_URL}/users/{user_id}
 {"triangles": [{"id": "alpha", "level": 3}, {"id": "beta", "level": 4}]}
 ```
 
+## Audit Logging
+
+Pinkas can emit audit logs to Elasticsearch for every user action: page creation, editing, deletion, and Q&A queries. Logs are written asynchronously (fire-and-forget) so they never slow down API responses.
+
+### Setup
+
+1. Set `ES_AUDIT_ENABLED=true` and `ES_HOSTS` in `.env`:
+
+```bash
+ES_AUDIT_ENABLED=true
+ES_HOSTS=http://localhost:9200
+```
+
+2. Optionally configure authentication:
+
+```bash
+# API key auth
+ES_API_KEY=your-api-key
+
+# OR basic auth
+ES_USERNAME=elastic
+ES_PASSWORD=changeme
+
+# OR Elastic Cloud
+ES_CLOUD_ID=my-deployment:dXMtY2VudHJhbC...
+```
+
+### Index pattern
+
+Audit documents are indexed to `pinkas-audit-YYYY.MM` (monthly rotation). Each document contains:
+
+| Field | Description |
+|-------|-------------|
+| `timestamp` | UTC ISO-8601 timestamp |
+| `action` | `ask`, `create_page`, `edit_page`, `delete_page` |
+| `user_context.user_id` | The acting user |
+| `user_context.client_application_id` | Optional — external app making the call |
+| `user_context.client_session_id` | Optional — session on the external app |
+| `resource_id` | Page ID (null for queries) |
+| `outcome` | `success`, `pending_approval`, `denied`, `not_found`, `error` |
+| `result` | The full operation response (page data, answer + cited pages, etc.) |
+| `latency_ms` | Server-side processing time in milliseconds |
+| `request_path` | HTTP endpoint path |
+
+Both failed attempts (permission denied, page not found) and successful operations are logged.
+
+### Client headers
+
+External applications can identify themselves by sending optional headers:
+
+- `X-Client-Application-Id` — identifies the calling application
+- `X-Client-Session-Id` — identifies the user's session on the calling application
+
+These are included in the `user_context` of every audit log entry.
+
 ## Running Tests
 
 ```bash
@@ -328,6 +389,7 @@ pinkas/
 │   │   └── postgres/            # SQLAlchemy 2.0 async implementations
 │   ├── infrastructure/          # Connection management and schema
 │   │   ├── mongo.py             # Motor client singleton + GridFS
+│   │   ├── elasticsearch.py     # Async Elasticsearch client for audit logging
 │   │   └── postgres/
 │   │       ├── engine.py        # SQLAlchemy engine + session factory
 │   │       ├── models.py        # ORM table definitions
