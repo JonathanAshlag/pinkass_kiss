@@ -9,6 +9,15 @@ from app.models.page import ClassificationTriangle
 
 logger = logging.getLogger("pinkas.classification")
 
+_http_client: httpx.AsyncClient | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(timeout=300.0)
+    return _http_client
+
 
 async def get_user_triangles(user_id: str) -> list[ClassificationTriangle]:
     """Fetch classification triangles for a user from the external API.
@@ -20,11 +29,10 @@ async def get_user_triangles(user_id: str) -> list[ClassificationTriangle]:
         return []
     url = f"{settings.classification_api_url}/users/{user_id}/classifications"
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-            return [ClassificationTriangle(**t) for t in data.get("triangles", [])]
+        resp = await _get_http_client().get(url)
+        resp.raise_for_status()
+        data = resp.json()
+        return [ClassificationTriangle(**t) for t in data.get("triangles", [])]
     except Exception as e:
         logger.warning(f"Failed to fetch classification for user {user_id}: {e}")
         return []

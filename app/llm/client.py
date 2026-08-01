@@ -9,12 +9,15 @@ from app.config import settings
 
 logger = logging.getLogger("pinkas.llm")
 
+_client = AsyncOpenAI(
+    base_url=settings.openai_base_url,
+    api_key=settings.openai_api_key,
+    timeout=600.0,
+)
 
-def _get_client() -> AsyncOpenAI:
-    return AsyncOpenAI(
-        base_url=settings.openai_base_url,
-        api_key=settings.openai_api_key,
-    )
+
+def get_client() -> AsyncOpenAI:
+    return _client
 
 
 def _parse_json_response(raw: str) -> str:
@@ -29,9 +32,8 @@ def _parse_json_response(raw: str) -> str:
 
 async def _call_llm_json(messages: list[dict], default: object, name: str = "llm") -> object:
     """Call the LLM and parse a JSON response. Returns `default` on any error."""
-    client = _get_client()
     try:
-        response = await client.chat.completions.create(
+        response = await get_client().chat.completions.create(
             model=settings.openai_model,
             messages=messages,
         )

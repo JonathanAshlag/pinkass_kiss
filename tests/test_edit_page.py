@@ -50,7 +50,7 @@ async def test_edit_page_updates_title(editor, existing_page, page_repo, req_rep
         data=PageUpdate(title="New Title"),
         page_id=existing_page.page_id,
     )
-    assert result["status"] == "published"
+    assert result.status == "published"
     updated = await get_page(existing_page.page_id, page_repo)
     assert updated.title == "New Title"
 
@@ -62,7 +62,7 @@ async def test_edit_page_updates_content(editor, existing_page, page_repo, req_r
         data=PageUpdate(content="Updated content"),
         page_id=existing_page.page_id,
     )
-    assert result["status"] == "published"
+    assert result.status == "published"
     updated = await get_page(existing_page.page_id, page_repo)
     assert updated.content == "Updated content"
 
@@ -87,8 +87,8 @@ async def test_edit_page_with_workflow_creates_pending_request(editor_with_workf
         data=PageUpdate(title="Proposed Title"),
         page_id=existing_page.page_id,
     )
-    assert result["status"] == "pending_approval"
-    assert "request_id" in result
+    assert result.status == "pending_approval"
+    assert result.request_id
     # Original page should be unchanged
     original = await get_page(existing_page.page_id, page_repo)
     assert original.title == "Original Title"
@@ -113,4 +113,4 @@ async def test_edit_page_page_remains_published(editor, existing_page, page_repo
         data=PageUpdate(description="New description"),
         page_id=existing_page.page_id,
     )
-    assert result["page"]["status"] == PageStatus.published
+    assert result.page["status"] == PageStatus.published

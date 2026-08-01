@@ -134,7 +134,7 @@ The PostgreSQL schema normalizes page history into a `page_revisions` table and 
 ### FastAPI server
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8080
+uvicorn app.main:app --host 0.0.0.0 --port 8080 --env-file .env
 ```
 
 API docs available at: `http://localhost:8080/docs`
@@ -220,7 +220,7 @@ sudo systemctl start pinkas-api pinkas-ui
 
 5. **Test approval flow:** Login as `editor1` (has a workflow). Create a page — it will be pending approval. Login as `admin1`, go to "אישורים", approve the request.
 
-6. **Ask a question:** Go to "שאל שאלה", type a question about the wiki content. The LLM searches and composes an answer, preferring verified pages and noting when it relies on unverified content.
+6. **Ask a question:** Go to "שאל שאלה", type a question about the wiki content. The LLM searches and composes an answer, preferring verified pages and noting when it relies on unverified content. The response includes a `cited_pages` list of page **titles** used as context. Only pages the requesting user has access to (per classification triangles) are included as context.
 
 7. **Produce from a file:** Go to "העלאת מסמך", upload a PDF, DOCX, XLSX, PPTX, HTML, or TXT file. The system extracts text and any embedded images (up to 20 per document) and generates wiki pages using multimodal LLM calls. Admin users can pass `initial_trust_tier=verified` via the API to self-certify the upload. The raw file is kept in GridFS and reference-counted against the pages it produced — it is purged automatically once the last generated page is deleted.
 
@@ -239,7 +239,15 @@ Every `POST /approvals` request carries a `proposed_content` object discriminate
 
 All mutations (create/edit/delete) go through `apply_page_mutation()` in `app/services/mutations.py`. Users with a `workflow_id` are automatically routed to the approval queue; users without one have changes applied immediately.
 
-`apply_page_mutation` accepts an optional `trust_tier` parameter. When `trust_tier=verified` and the create mutation is published directly (no workflow), the seam promotes the page's trust tier inline — recording the content hash, `verified_at`, and `verified_by` — so the pipeline never needs to reach around the seam with raw DB writes.
+`apply_page_mutation` returns a typed `MutationResult` — one of three shapes, reflected in the OpenAPI schema:
+
+| Return type | `status` | Extra fields |
+|-------------|----------|--------------|
+| `PublishedResult` | `"published"` | `page` — the full page object |
+| `PendingResult` | `"pending_approval"` | `request_id`; `page` present for create, absent for edit/delete |
+| `DeletedResult` | `"deleted"` | *(none)* |
+
+`apply_page_mutation` also accepts an optional `trust_tier` parameter. When `trust_tier=verified` and the create mutation is published directly (no workflow), the seam promotes the page's trust tier inline — recording the content hash, `verified_at`, and `verified_by` — so the pipeline never needs to reach around the seam with raw DB writes.
 
 When an edit mutation is routed through a workflow, `apply_page_mutation` immediately persists any `references` on the `PageUpdate` regardless of approval state. Source provenance is always recorded; only content changes wait for approval.
 
@@ -272,6 +280,7 @@ Pages can carry a `classification` field — a list of `ClassificationTriangle` 
 - If `CLASSIFICATION_API_URL` is not configured the feature is disabled and all pages are accessible.
 - If the classification API call fails the system **fails closed**: the user is treated as having no triangles and cannot access any classified page.
 - Unclassified pages (`classification: []`) are always accessible to users with the normal page-level permissions.
+- **Q&A is classification-aware:** the retrieval layer fetches the user's triangles once at the start of each query and filters search results before passing them to the LLM, so classified pages the user cannot read will never appear in cited context.
 
 **Setting classifications on a page:**
 
@@ -374,7 +383,8 @@ pinkas/
 │   │   └── deps.py              # Auth dependencies
 │   ├── services/                # Business logic (backend-agnostic)
 │   │   ├── mutations.py         # Central mutation seam — routes creates/edits/deletes
-│   │   │                        # through workflows; handles trust promotion and reference persistence
+│   │   │                        # through workflows; returns typed MutationResult
+│   │   │                        # (PublishedResult | PendingResult | DeletedResult)
 │   │   ├── pages.py
 │   │   ├── classification.py    # Triangle access control + external API client
 │   │   ├── workflows.py
@@ -395,10 +405,12 @@ pinkas/
 │   │       ├── models.py        # ORM table definitions
 │   │       └── migrations/      # Alembic migrations
 │   ├── llm/                     # LLM integration
-│   │   ├── client.py            # OpenAI-compatible client setup
-│   │   ├── retrieval.py         # Q&A with tool-calling retrieval loop
-│   │   ├── ingestion.py         # Per-phase LLM calls (extract → dedup → generate/merge)
-│   │   └── pipeline.py          # 3-phase ingestion orchestrator
+│   │   ├── client.py            # OpenAI-compatible client (persistent singleton, 600 s timeout)
+│   │   ├── retrieval.py         # Q&A with tool-calling loop; classification-aware search;
+│   │   │                        # cited_pages returns page titles
+│   │   ├── ingestion.py         # Per-phase LLM calls (extract → dedup → generate/merge);
+│   │   │                        # prompt structure optimised for vLLM prefix-cache reuse
+│   │   └── pipeline.py          # 3-phase ingestion orchestrator; returns list[PageIngestOutcome]
 │   └── scheduler/               # APScheduler daily jobs
 │       └── jobs.py              # check_expired_pages, check_verification_drift,
 │                                # update_inbound_link_counts

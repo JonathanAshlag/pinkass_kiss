@@ -188,8 +188,8 @@ async def produce(
             req_repo=req_repo,
         )
 
-        generated_page_ids = [r["page_id"] for r in pipeline_results]
-        results.extend(pipeline_results)
+        generated_page_ids = [r.page_id for r in pipeline_results]
+        results.extend([r.model_dump(mode="json") for r in pipeline_results])
 
         await source_file_repo.set_page_ids(file_id_str, generated_page_ids)
 

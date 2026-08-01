@@ -85,8 +85,8 @@ async def test_create_page_with_parent_id(editor, parent_page, page_repo, req_re
             parent_id=parent_page.page_id,
         ),
     )
-    assert result["status"] == "published"
-    child = await get_page(result["page"]["page_id"], page_repo)
+    assert result.status == "published"
+    child = await get_page(result.page["page_id"], page_repo)
     assert child.parent_id == parent_page.page_id
 
 
@@ -96,7 +96,7 @@ async def test_create_page_without_parent_is_root(editor, page_repo, req_repo):
         RequestType.create, editor, page_repo, req_repo,
         data=PageCreate(title="Root Page", description="d", content="c"),
     )
-    page = await get_page(result["page"]["page_id"], page_repo)
+    page = await get_page(result.page["page_id"], page_repo)
     assert page.parent_id is None
 
 
@@ -173,7 +173,7 @@ async def test_multiple_children_share_same_parent(editor, parent_page, page_rep
                 parent_id=parent_page.page_id,
             ),
         )
-        child_ids.append(result["page"]["page_id"])
+        child_ids.append(result.page["page_id"])
 
     for cid in child_ids:
         page = await get_page(cid, page_repo)

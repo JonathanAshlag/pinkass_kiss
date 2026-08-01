@@ -6,15 +6,15 @@ EXTRACT_TOPICS_SYSTEM = (
 )
 
 
-def build_extract_topics_user(filename: str) -> str:
-    return (
-        f"Document: {filename}\n\n"
-        "For each distinct topic in the document, return:\n"
+def build_extract_topics_user(filename: str) -> tuple[str, str]:
+    pre = f"Document: {filename}\n\nDocument content:\n"
+    post = (
+        "\n\nFor each distinct topic in the document, return:\n"
         "- title: concise wiki-style title\n"
         "- description: one sentence defining this topic (used for search and dedup)\n\n"
-        "Return a JSON array only. No other text.\n\n"
-        "Document content follows:\n"
+        "Return a JSON array only. No other text."
     )
+    return pre, post
 
 
 JUDGE_DUPLICATE_SYSTEM = "You are a knowledge deduplication specialist."
@@ -38,14 +38,14 @@ def build_judge_duplicate_user(candidate: dict, search_results: list[dict]) -> s
 GENERATE_CONTENT_SYSTEM = "You are a wiki editor writing a new page for an organizational knowledge base."
 
 
-def build_generate_content_user(title: str, description: str, filename: str) -> str:
-    return (
-        f'Write a complete wiki page for the topic "{title}" ({description}).\n'
-        f"Source document: {filename}\n\n"
+def build_generate_content_user(title: str, description: str, filename: str) -> tuple[str, str]:
+    pre = f"Source document: {filename}\n\nDocument content:\n"
+    post = (
+        f'\n\nWrite a complete wiki page for the topic "{title}" ({description}).\n'
         "Base your content only on what the document says about this topic.\n"
-        'Return JSON only: {"content": "full markdown content"}\n\n'
-        "Document content follows:\n"
+        'Return JSON only: {"content": "full markdown content"}'
     )
+    return pre, post
 
 
 MERGE_CONTENT_SYSTEM = (
@@ -62,10 +62,9 @@ def build_merge_content_user(
     text: str,
 ) -> str:
     return (
+        f'Source document "{filename}":\n{text}\n\n'
         f'Existing page "{existing_title}":\n{existing_content}\n\n'
-        f'New source "{filename}" covers this topic as:\n'
-        f"  Description: {candidate_description}\n\n"
-        f"Document text:\n{text}\n\n"
+        f"New source covers this topic as: {candidate_description}\n\n"
         "Does the document add meaningful information not already in the existing page?\n"
         'Return JSON only: {"has_new_info": bool, "merged_content": "full updated markdown or null", "summary_of_additions": "brief or null"}'
     )

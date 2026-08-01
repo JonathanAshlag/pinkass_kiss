@@ -1,6 +1,9 @@
 """Single seam for page mutations — owns the workflow-routing decision."""
 
 from datetime import datetime, timezone
+from typing import Literal, Optional, Union
+
+from pydantic import BaseModel
 
 from app.models.page import PageCreate, PageUpdate, TrustTier
 from app.models.request import RequestType, CreatePayload, EditPayload, DeletePayload
@@ -8,6 +11,27 @@ from app.models.user import User
 from app.storage.base import PageRepository, RequestRepository
 from app.services.pages import create_page, update_page, delete_page, compute_content_hash, set_page_references
 from app.services.requests import create_request
+
+
+class PublishedResult(BaseModel):
+    """Mutation applied directly — page is live."""
+    status: Literal["published"] = "published"
+    page: dict
+
+
+class PendingResult(BaseModel):
+    """Mutation queued for workflow approval."""
+    status: Literal["pending_approval"] = "pending_approval"
+    request_id: str
+    page: Optional[dict] = None  # present for create, absent for edit/delete
+
+
+class DeletedResult(BaseModel):
+    """Page deleted directly (no workflow)."""
+    status: Literal["deleted"] = "deleted"
+
+
+MutationResult = Union[PublishedResult, PendingResult, DeletedResult]
 
 
 async def apply_page_mutation(
@@ -18,7 +42,7 @@ async def apply_page_mutation(
     data: PageCreate | PageUpdate | None = None,
     page_id: str | None = None,
     trust_tier: TrustTier | None = None,
-) -> dict:
+) -> MutationResult:
     """Apply a page mutation, routing through workflow if the user has one."""
     if req_type == RequestType.create:
         assert isinstance(data, PageCreate), "data must be PageCreate for create mutations"
@@ -38,8 +62,8 @@ async def apply_page_mutation(
                 page_repo=page_repo,
                 proposed_content=payload,
             )
-            return {"page": page.model_dump(mode="json"), "request_id": req.request_id, "status": "pending_approval"}
-        result: dict = {"page": page.model_dump(mode="json"), "status": "published"}
+            return PendingResult(request_id=req.request_id, page=page.model_dump(mode="json"))
+        result = PublishedResult(page=page.model_dump(mode="json"))
         if trust_tier == TrustTier.verified:
             now = datetime.now(timezone.utc).isoformat()
             await page_repo.update_fields(
@@ -51,7 +75,7 @@ async def apply_page_mutation(
                     "verified_by": user.user_id,
                 },
             )
-            result["page"]["trust_tier"] = TrustTier.verified.value
+            result.page["trust_tier"] = TrustTier.verified.value
         return result
 
     elif req_type == RequestType.edit:
@@ -77,9 +101,9 @@ async def apply_page_mutation(
             )
             if data.references is not None:
                 await set_page_references(page_id, data.references, page_repo)
-            return {"request_id": req.request_id, "status": "pending_approval"}
+            return PendingResult(request_id=req.request_id)
         updated = await update_page(page_id, data, user, page_repo)
-        return {"page": updated.model_dump(mode="json"), "status": "published"}
+        return PublishedResult(page=updated.model_dump(mode="json"))
 
     elif req_type == RequestType.delete:
         assert page_id is not None, "page_id required for delete mutations"
@@ -92,8 +116,8 @@ async def apply_page_mutation(
                 page_repo=page_repo,
                 proposed_content=DeletePayload(),
             )
-            return {"request_id": req.request_id, "status": "pending_approval"}
+            return PendingResult(request_id=req.request_id)
         await delete_page(page_id, user, page_repo)
-        return {"status": "deleted"}
+        return DeletedResult()
 
     raise ValueError(f"Unsupported req_type for apply_page_mutation: {req_type}")

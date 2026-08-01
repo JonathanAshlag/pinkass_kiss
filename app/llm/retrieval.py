@@ -4,11 +4,12 @@ import json
 import logging
 
 from app.config import settings
-from app.llm.client import _get_client
+from app.llm.client import get_client
 from app.models.user import User
 from app.prompts.retrieval import QA_SYSTEM_PROMPT, RETRIEVE_TOOL
 from app.storage.base import PageRepository
 from app.services.pages import find_page_docs_fuzzy
+from app.services.classification import get_user_triangles
 
 logger = logging.getLogger("pinkas.llm")
 
@@ -21,10 +22,12 @@ async def ask_with_retrieval(
     page_repo: PageRepository,
 ) -> dict:
     """Answer a question using LLM with retrieve tool."""
-    client = _get_client()
+    client = get_client()
+    user_triangles = await get_user_triangles(user.user_id)
 
     system_msg = {"role": "system", "content": QA_SYSTEM_PROMPT}
     conversation = [system_msg] + messages
+    cited_page_ids: set[str] = set()
     cited_pages: list[str] = []
 
     for _ in range(MAX_TOOL_ITERATIONS):
@@ -53,12 +56,14 @@ async def ask_with_retrieval(
                         repo=page_repo,
                         ranked=True,
                         limit=10,
+                        user_triangles=user_triangles,
                     )
                     for r in results:
-                        r["content"] = r.get("content", "")[:500]
+                        r["content"] = r.get("content", "")
                     for r in results:
-                        if r["page_id"] not in cited_pages:
-                            cited_pages.append(r["page_id"])
+                        if r["page_id"] not in cited_page_ids:
+                            cited_page_ids.add(r["page_id"])
+                            cited_pages.append(r.get("title", r["page_id"]))
                     conversation.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,

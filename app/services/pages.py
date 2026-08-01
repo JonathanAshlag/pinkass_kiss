@@ -146,6 +146,7 @@ async def _find_raw_docs_fuzzy(
     statuses: Optional[list] = None,
     limit: int = 10,
     fields: Optional[list[str]] = None,
+    user_triangles: Optional[list[ClassificationTriangle]] = None,
 ) -> list[dict]:
     status_list = [s.value for s in statuses] if statuses else [PageStatus.published.value]
 
@@ -159,7 +160,8 @@ async def _find_raw_docs_fuzzy(
 
     results = await repo.fuzzy_search(query, status_list, limit, fields=effective_fields)
 
-    user_triangles = await get_user_triangles(user.user_id)
+    if user_triangles is None:
+        user_triangles = await get_user_triangles(user.user_id)
     results = [
         doc for doc in results
         if user_satisfies_classification(
@@ -231,9 +233,11 @@ async def find_page_docs_fuzzy(
     ranked: bool = False,
     statuses: Optional[list] = None,
     limit: int = 10,
+    user_triangles: Optional[list[ClassificationTriangle]] = None,
 ) -> list[dict]:
     return await _find_raw_docs_fuzzy(
         query, user=user, repo=repo, ranked=ranked, statuses=statuses, limit=limit, fields=fields,
+        user_triangles=user_triangles,
     )
 
 

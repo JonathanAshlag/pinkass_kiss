@@ -53,6 +53,18 @@ class PageRepository(ABC):
     ) -> list[dict]:
         return await self.search(query, statuses, limit, fields)
 
+    async def find_similar_for_dedup(
+        self,
+        title: str,
+        description: str,
+        threshold: float,
+        limit: int,
+        fields: "list[str] | None" = None,
+    ) -> list[dict]:
+        from app.models.page import PageStatus
+        statuses = [s.value for s in PageStatus if s != PageStatus.deleted]
+        return await self.search(f"{title} {description}", statuses, limit, fields)
+
     @abstractmethod
     async def get_tree_nodes(self) -> list[dict]: ...
 

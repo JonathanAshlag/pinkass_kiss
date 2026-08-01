@@ -11,7 +11,7 @@ from app.models.request import RequestType
 from app.models.user import User
 from app.routers.deps import get_current_user, require_editor, get_user_context
 from app.services.audit import emit_audit_log
-from app.services.mutations import apply_page_mutation
+from app.services.mutations import apply_page_mutation, MutationResult
 from app.services.pages import (
     get_page, search_pages, fuzzy_search_pages, get_page_tree, get_page_history, is_trust_stale,
 )
@@ -27,7 +27,7 @@ def _mutation_outcome(status: str) -> AuditOutcome:
     return AuditOutcome.success
 
 
-@router.post("", response_model=dict)
+@router.post("", response_model=MutationResult)
 async def create_page_endpoint(
     data: PageCreate,
     user: User = Depends(require_editor),
@@ -40,9 +40,9 @@ async def create_page_endpoint(
     emit_audit_log(AuditLogEntry(
         action=AuditAction.create_page,
         user_context=user_context,
-        resource_id=result.get("page", {}).get("page_id"),
-        outcome=_mutation_outcome(result.get("status", "")),
-        result=result,
+        resource_id=result.page.get("page_id") if result.page else None,
+        outcome=_mutation_outcome(result.status),
+        result=result.model_dump(mode="json"),
         latency_ms=(time.perf_counter() - t0) * 1000,
         request_path="/pages",
     ))
@@ -91,7 +91,7 @@ async def get_history(
     return await get_page_history(page_id, page_repo)
 
 
-@router.put("/{page_id}", response_model=dict)
+@router.put("/{page_id}", response_model=MutationResult)
 async def update_page_endpoint(
     page_id: str,
     data: PageUpdate,
@@ -127,15 +127,15 @@ async def update_page_endpoint(
         action=AuditAction.edit_page,
         user_context=user_context,
         resource_id=page_id,
-        outcome=_mutation_outcome(result.get("status", "")),
-        result=result,
+        outcome=_mutation_outcome(result.status),
+        result=result.model_dump(mode="json"),
         latency_ms=(time.perf_counter() - t0) * 1000,
         request_path=f"/pages/{page_id}",
     ))
     return result
 
 
-@router.delete("/{page_id}", response_model=dict)
+@router.delete("/{page_id}", response_model=MutationResult)
 async def delete_page_endpoint(
     page_id: str,
     user: User = Depends(require_editor),
@@ -167,14 +167,14 @@ async def delete_page_endpoint(
             ))
         raise HTTPException(status_code=404, detail="Page not found")
     result = await apply_page_mutation(RequestType.delete, user, page_repo, req_repo, page_id=page_id)
-    if result.get("status") == "deleted":
+    if result.status == "deleted":
         await cleanup_source_file_for_page(page_id, source_file_repo)
     emit_audit_log(AuditLogEntry(
         action=AuditAction.delete_page,
         user_context=user_context,
         resource_id=page_id,
-        outcome=_mutation_outcome(result.get("status", "")),
-        result=result,
+        outcome=_mutation_outcome(result.status),
+        result=result.model_dump(mode="json"),
         latency_ms=(time.perf_counter() - t0) * 1000,
         request_path=f"/pages/{page_id}",
     ))

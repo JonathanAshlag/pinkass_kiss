@@ -170,7 +170,7 @@ class TestAuditIntegration:
             assert entry.outcome == AuditOutcome.success
             assert entry.user_context.user_id == "editor1"
             assert entry.user_context.client_application_id == "test-app"
-            assert entry.resource_id == result["page"]["page_id"]
+            assert entry.resource_id == result.page["page_id"]
             assert entry.latency_ms > 0
 
     @pytest.mark.asyncio

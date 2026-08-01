@@ -1,6 +1,9 @@
 """Structured LLM ingestion pipeline: extract → dedup → create/merge."""
 
 import logging
+from typing import Literal
+
+from pydantic import BaseModel
 
 from app.llm.ingestion import (
     extract_topic_candidates,
@@ -9,15 +12,24 @@ from app.llm.ingestion import (
     merge_content,
 )
 from app.models.page import (
-    Page, PageCreate, PageUpdate, PageStatus, Reference, ReferenceType, TrustTier,
+    Page, PageCreate, PageUpdate, Reference, ReferenceType, TrustTier,
 )
 from app.models.request import RequestType
 from app.models.user import User, PermissionLevel
+from app.search_config import DEDUP_SIMILARITY_THRESHOLD, DEDUP_TOP_K
 from app.storage.base import PageRepository, RequestRepository
 from app.services.mutations import apply_page_mutation
-from app.services.pages import find_page_docs, get_page, set_page_references
+from app.services.pages import get_page, set_page_references
 
 logger = logging.getLogger("pinkas.pipeline")
+
+
+class PageIngestOutcome(BaseModel):
+    """Result of ingesting a single topic candidate from a document."""
+    page_id: str
+    title: str
+    action: Literal["created", "merged", "linked"]
+    status: str  # "published" | "pending_approval" | "linked"
 
 
 async def run_ingestion_pipeline(
@@ -29,10 +41,10 @@ async def run_ingestion_pipeline(
     initial_trust_tier: str,
     page_repo: PageRepository,
     req_repo: RequestRepository,
-) -> list[dict]:
+) -> list[PageIngestOutcome]:
     """Run the 3-phase ingestion pipeline for a single document."""
     file_ref = Reference(type=ReferenceType.file, file_id=file_id_str)
-    results = []
+    results: list[PageIngestOutcome] = []
 
     candidates = await extract_topic_candidates(text, filename, content_parts)
     logger.info(f"Extracted {len(candidates)} topic candidates from {filename}")
@@ -43,18 +55,17 @@ async def run_ingestion_pipeline(
         if not title:
             continue
 
-        search_results = await find_page_docs(
-            f"{title} {description}",
+        similar_pages = await page_repo.find_similar_for_dedup(
+            title,
+            description,
+            threshold=DEDUP_SIMILARITY_THRESHOLD,
+            limit=DEDUP_TOP_K,
             fields=["page_id", "title", "description", "content"],
-            user=user,
-            repo=page_repo,
-            statuses=[s for s in PageStatus if s != PageStatus.deleted],
-            limit=5,
         )
 
         matched_page: Page | None = None
-        if search_results:
-            verdict = await judge_duplicate(candidate, search_results)
+        if similar_pages:
+            verdict = await judge_duplicate(candidate, similar_pages)
             if verdict.get("is_duplicate") and verdict.get("confidence") in ("high", "medium"):
                 matched_page = await get_page(verdict["matched_page_id"], page_repo)
 
@@ -77,17 +88,20 @@ async def run_ingestion_pipeline(
                     data=PageUpdate(content=merge["merged_content"], references=updated_refs),
                     page_id=matched_page.page_id,
                 )
-                action_status = mutation_result["status"]
+                results.append(PageIngestOutcome(
+                    page_id=matched_page.page_id,
+                    title=matched_page.title,
+                    action="merged",
+                    status=mutation_result.status,
+                ))
             else:
                 await set_page_references(matched_page.page_id, updated_refs, page_repo)
-                action_status = "linked"
-
-            results.append({
-                "page_id": matched_page.page_id,
-                "title": matched_page.title,
-                "status": action_status,
-                "action": "merged" if merge.get("has_new_info") else "linked",
-            })
+                results.append(PageIngestOutcome(
+                    page_id=matched_page.page_id,
+                    title=matched_page.title,
+                    action="linked",
+                    status="linked",
+                ))
             continue
 
         content_result = await generate_page_content(title, description, filename, text, content_parts)
@@ -111,13 +125,11 @@ async def run_ingestion_pipeline(
             data=page_data,
             trust_tier=TrustTier.verified if should_verify else None,
         )
-        action_status = mutation_result["status"]
-
-        results.append({
-            "page_id": (mutation_result.get("page") or {}).get("page_id", ""),
-            "title": title,
-            "status": action_status,
-            "action": "created",
-        })
+        results.append(PageIngestOutcome(
+            page_id=mutation_result.page["page_id"] if mutation_result.page else "",
+            title=title,
+            action="created",
+            status=mutation_result.status,
+        ))
 
     return results

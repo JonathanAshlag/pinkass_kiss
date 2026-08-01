@@ -16,25 +16,21 @@ from app.prompts.ingestion import (
 
 logger = logging.getLogger("pinkas.llm")
 
-def _concat_prompt_with_textual_content_parts(prompt: str, content_parts: list[dict] | None) -> str:
-    return prompt + "\n\n".join(p.get("text") for p in content_parts if p.get("type") == "text")
+def _build_multimodal_content(pre: str, content_parts: list[dict] | None, post: str = "") -> str | list[dict]:
+    """Build user message content with the document as a separate block for KV-cache reuse.
 
-def _build_multimodal_content(prompt: str, content_parts: list[dict] | None) -> str | list[dict]:
-    """Build a message content value with interleaved text/images in document order.
-
-    If content_parts has no images, returns a plain string (prompt + text).
-    Otherwise returns a multimodal array: prompt text, then document parts in order.
+    Structure: [pre_instruction, document_block, ...images..., post_instruction]
+    Keeping the document as a stable prefix lets vLLM's automatic prefix caching reuse
+    it across all candidates extracted from the same source document.
     """
     if not content_parts:
-        return prompt
-    has_images = any(p.get("type") == "image_url" for p in content_parts)
-    text_message = {"type": "text", "text": _concat_prompt_with_textual_content_parts(prompt, content_parts)}
-    if not has_images:
-        return [text_message]
-    parts: list[dict] = []
-    parts.append(text_message)
-    parts.extend([p for p in content_parts if p.get("type") == "image_url"])
-    return parts #_concat_prompt_with_textual_content_parts(prompt, content_parts)
+        return pre + post
+    doc_text = "\n\n".join(p.get("text", "") for p in content_parts if p.get("type") == "text")
+    parts: list[dict] = [{"type": "text", "text": pre}, {"type": "text", "text": doc_text}]
+    parts.extend(p for p in content_parts if p.get("type") == "image_url")
+    if post:
+        parts.append({"type": "text", "text": post})
+    return parts
 
 
 async def extract_topic_candidates(text: str, filename: str, content_parts: list[dict] = None) -> list[dict]:
@@ -42,7 +38,8 @@ async def extract_topic_candidates(text: str, filename: str, content_parts: list
 
     Returns list of {"title": str, "description": str}
     """
-    user_content = _build_multimodal_content(build_extract_topics_user(filename), content_parts)
+    pre, post = build_extract_topics_user(filename)
+    user_content = _build_multimodal_content(pre, content_parts, post)
 
     result = await _call_llm_json(
         messages=[
@@ -76,7 +73,8 @@ async def generate_page_content(title: str, description: str, filename: str, tex
 
     Returns {"content": str}
     """
-    user_content = _build_multimodal_content(build_generate_content_user(title, description, filename), content_parts)
+    pre, post = build_generate_content_user(title, description, filename)
+    user_content = _build_multimodal_content(pre, content_parts, post)
 
     return await _call_llm_json(
         messages=[

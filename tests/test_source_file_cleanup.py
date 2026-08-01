@@ -108,7 +108,7 @@ async def test_direct_delete_cleans_up_source_file(page_repo, source_file_repo):
         result = await apply_page_mutation(
             RequestType.delete, editor, page_repo, req_repo=None, page_id=page.page_id
         )
-        assert result["status"] == "deleted"
+        assert result.status == "deleted"
 
         await cleanup_source_file_for_page(page.page_id, source_file_repo)
 

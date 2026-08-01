@@ -48,17 +48,17 @@ def test_retrieve_tool_schema():
 # ---------------------------------------------------------------------------
 
 def test_extract_topics_user_contains_filename():
-    result = build_extract_topics_user("report.pdf")
+    result = "".join(build_extract_topics_user("report.pdf"))
     assert "report.pdf" in result
 
 
 def test_extract_topics_user_instructs_json_array():
-    result = build_extract_topics_user("doc.txt")
+    result = "".join(build_extract_topics_user("doc.txt"))
     assert "JSON array" in result
 
 
 def test_extract_topics_user_requests_title_and_description():
-    result = build_extract_topics_user("doc.txt")
+    result = "".join(build_extract_topics_user("doc.txt"))
     assert "title" in result
     assert "description" in result
 
@@ -131,22 +131,22 @@ def test_judge_duplicate_user_instructs_json_response():
 # ---------------------------------------------------------------------------
 
 def test_generate_content_user_contains_title():
-    result = build_generate_content_user("Security Policy", "Company security rules", "handbook.pdf")
+    result = "".join(build_generate_content_user("Security Policy", "Company security rules", "handbook.pdf"))
     assert "Security Policy" in result
 
 
 def test_generate_content_user_contains_description():
-    result = build_generate_content_user("Security Policy", "Company security rules", "handbook.pdf")
+    result = "".join(build_generate_content_user("Security Policy", "Company security rules", "handbook.pdf"))
     assert "Company security rules" in result
 
 
 def test_generate_content_user_contains_filename():
-    result = build_generate_content_user("Security Policy", "Company security rules", "handbook.pdf")
+    result = "".join(build_generate_content_user("Security Policy", "Company security rules", "handbook.pdf"))
     assert "handbook.pdf" in result
 
 
 def test_generate_content_user_instructs_json_response():
-    result = build_generate_content_user("Title", "Desc", "file.pdf")
+    result = "".join(build_generate_content_user("Title", "Desc", "file.pdf"))
     assert '"content"' in result
 
 
