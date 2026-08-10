@@ -8,6 +8,8 @@ if TYPE_CHECKING:
     from app.models.user import User
     from app.models.workflow import Workflow
     from app.models.request import ApprovalRequest, RequestHistoryEntry
+    from app.models.agent import Agent
+    from app.models.bundle import Bundle
 
 
 class PageRepository(ABC):
@@ -36,22 +38,27 @@ class PageRepository(ABC):
     async def get_history(self, page_id: str) -> "list[HistoryEntry]": ...
 
     @abstractmethod
-    async def search(
+    async def search_by_name(
         self,
         query: str,
         statuses: list[str],
         limit: int,
         fields: "list[str] | None" = None,
-    ) -> list[dict]: ...
-
-    async def fuzzy_search(
-        self,
-        query: str,
-        statuses: list[str],
-        limit: int,
-        fields: "list[str] | None" = None,
+        tags: "list[str] | None" = None,
     ) -> list[dict]:
-        return await self.search(query, statuses, limit, fields)
+        """Match pages by title or alias only (not content/description)."""
+        ...
+
+    async def fuzzy_search_by_name(
+        self,
+        query: str,
+        statuses: list[str],
+        limit: int,
+        fields: "list[str] | None" = None,
+        tags: "list[str] | None" = None,
+    ) -> list[dict]:
+        """Fuzzy-match pages by title or alias only (not content/description)."""
+        return await self.search_by_name(query, statuses, limit, fields, tags=tags)
 
     async def find_similar_for_dedup(
         self,
@@ -63,7 +70,31 @@ class PageRepository(ABC):
     ) -> list[dict]:
         from app.models.page import PageStatus
         statuses = [s.value for s in PageStatus if s != PageStatus.deleted]
-        return await self.search(f"{title} {description}", statuses, limit, fields)
+        return await self.search_by_name(f"{title} {description}", statuses, limit, fields)
+
+    async def fuzzy_search_scored(
+        self,
+        query: str,
+        statuses: list[str],
+        limit: int,
+        fields: "list[str] | None" = None,
+        tags: "list[str] | None" = None,
+    ) -> list[dict]:
+        """Fuzzy-match pages by title or alias, with a numeric 'score' field per result.
+        Default: rank-based synthetic score. Postgres overrides with real word_similarity."""
+        docs = await self.fuzzy_search_by_name(query, statuses, limit, fields, tags=tags)
+        for i, d in enumerate(docs):
+            d["score"] = max(0.0, 1.0 - i * 0.05)
+        return docs
+
+    async def list_scannable_pages(
+        self,
+        fields: "list[str] | None" = None,
+    ) -> list[dict]:
+        """Return all published pages for passive-scan caching.
+        Must return complete list, not limited."""
+        from app.models.page import PageStatus
+        return await self.search_by_name("", [PageStatus.published.value], limit=100_000, fields=fields)
 
     @abstractmethod
     async def get_tree_nodes(self) -> list[dict]: ...
@@ -172,3 +203,31 @@ class SourceFileRepository(ABC):
 
     @abstractmethod
     async def delete(self, file_id: str) -> None: ...
+
+
+class AgentRepository(ABC):
+    @abstractmethod
+    async def get(self, agent_id: str) -> "Agent | None": ...
+
+    @abstractmethod
+    async def get_by_api_key_hash(self, api_key_hash: str) -> "Agent | None": ...
+
+    @abstractmethod
+    async def create(self, agent: "Agent") -> None: ...
+
+    @abstractmethod
+    async def list_all(self) -> "list[Agent]": ...
+
+    @abstractmethod
+    async def update_fields(self, agent_id: str, fields: dict) -> None: ...
+
+
+class BundleRepository(ABC):
+    @abstractmethod
+    async def get(self, name: str) -> "Bundle | None": ...
+
+    @abstractmethod
+    async def upsert(self, bundle: "Bundle") -> None: ...
+
+    @abstractmethod
+    async def list_all(self) -> "list[Bundle]": ...

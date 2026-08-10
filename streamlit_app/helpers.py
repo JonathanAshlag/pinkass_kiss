@@ -163,6 +163,30 @@ def get_status_display(status: str) -> str:
     return mapping.get(status, status)
 
 
+def get_allowed_tags(user_id: str) -> list[str]:
+    """Fetch the allowed-tags vocabulary once per session."""
+    if "allowed_tags_cache" not in st.session_state:
+        result = api_get("/pages/tags", user_id=user_id)
+        st.session_state["allowed_tags_cache"] = (result or {}).get("tags", [])
+    return st.session_state["allowed_tags_cache"]
+
+
+def load_bundle_into_editor(user_id: str, name: str) -> None:
+    """Fetch a bundle's entries, resolve titles, and populate the bundle editor session state."""
+    from streamlit_app.state import BUNDLE_EDITOR_NAME, BUNDLE_EDITOR_ENTRIES, BUNDLE_SEARCH_RESULTS
+
+    existing = api_get(f"/bundles/{name}", user_id=user_id)
+    st.session_state[BUNDLE_EDITOR_NAME] = name
+    entries = []
+    if existing and "error" not in existing:
+        for e in existing.get("entries", []):
+            page = api_get(f"/pages/{e['page_id']}", user_id=user_id)
+            title = page.get("title", e["page_id"]) if page else e["page_id"]
+            entries.append({"page_id": e["page_id"], "title": title, "content_form": e["content_form"]})
+    st.session_state[BUNDLE_EDITOR_ENTRIES] = entries
+    st.session_state[BUNDLE_SEARCH_RESULTS] = None
+
+
 def get_type_display(req_type: str) -> str:
     """Get Hebrew display name for a request type."""
     from streamlit_app.strings import UI

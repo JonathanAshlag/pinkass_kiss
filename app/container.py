@@ -18,7 +18,7 @@ from app.infrastructure.mongo import get_db
 from app.infrastructure.postgres.engine import get_session, get_session_factory
 from app.storage.base import (
     PageRepository, RequestRepository, SourceFileRepository,
-    UserRepository, WorkflowRepository,
+    UserRepository, WorkflowRepository, AgentRepository, BundleRepository,
 )
 
 
@@ -93,6 +93,22 @@ def _source_file_repo(db=Depends(_mongo_db), session: AsyncSession | None = Depe
     return MongoSourceFileRepository(db)
 
 
+def _agent_repo(db=Depends(_mongo_db), session: AsyncSession | None = Depends(_pg_session)) -> AgentRepository:
+    if settings.db_backend == "postgres":
+        from app.storage.postgres.agents import PostgresAgentRepository
+        return PostgresAgentRepository(session)
+    from app.storage.mongo.agents import MongoAgentRepository
+    return MongoAgentRepository(db)
+
+
+def _bundle_repo(db=Depends(_mongo_db), session: AsyncSession | None = Depends(_pg_session)) -> BundleRepository:
+    if settings.db_backend == "postgres":
+        from app.storage.postgres.bundles import PostgresBundleRepository
+        return PostgresBundleRepository(session)
+    from app.storage.mongo.bundles import MongoBundleRepository
+    return MongoBundleRepository(db)
+
+
 # ---------------------------------------------------------------------------
 # Annotated aliases — import these in routers for clean signatures
 # ---------------------------------------------------------------------------
@@ -102,6 +118,8 @@ UserRepo = Annotated[UserRepository, Depends(_user_repo)]
 WorkflowRepo = Annotated[WorkflowRepository, Depends(_workflow_repo)]
 RequestRepo = Annotated[RequestRepository, Depends(_request_repo)]
 SourceFileRepo = Annotated[SourceFileRepository, Depends(_source_file_repo)]
+AgentRepo = Annotated[AgentRepository, Depends(_agent_repo)]
+BundleRepo = Annotated[BundleRepository, Depends(_bundle_repo)]
 
 
 # ---------------------------------------------------------------------------

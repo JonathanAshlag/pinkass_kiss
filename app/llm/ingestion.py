@@ -3,7 +3,7 @@
 import logging
 
 from app.llm.client import _call_llm_json
-from app.prompts.ingestion import (
+from app.IP.prompts.ingestion import (
     EXTRACT_TOPICS_SYSTEM,
     GENERATE_CONTENT_SYSTEM,
     JUDGE_DUPLICATE_SYSTEM,

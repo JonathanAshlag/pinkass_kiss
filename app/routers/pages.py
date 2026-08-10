@@ -5,12 +5,13 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.container import PageRepo, RequestRepo, SourceFileRepo
+from app.IP.tags import ALLOWED_TAGS
 from app.models.audit import AuditAction, AuditLogEntry, AuditOutcome, UserContext
 from app.models.page import Page, PageCreate, PageUpdate, PageStatus
 from app.models.request import RequestType
 from app.models.user import User
 from app.routers.deps import get_current_user, require_editor, get_user_context
-from app.services.audit import emit_audit_log
+from app.services.event_log import emit_audit_log
 from app.services.mutations import apply_page_mutation, MutationResult
 from app.services.pages import (
     get_page, search_pages, fuzzy_search_pages, get_page_tree, get_page_history, is_trust_stale,
@@ -36,7 +37,18 @@ async def create_page_endpoint(
     req_repo: RequestRepo = None,
 ):
     t0 = time.perf_counter()
-    result = await apply_page_mutation(RequestType.create, user, page_repo, req_repo, data=data)
+    try:
+        result = await apply_page_mutation(RequestType.create, user, page_repo, req_repo, data=data)
+    except ValueError as e:
+        emit_audit_log(AuditLogEntry(
+            action=AuditAction.create_page,
+            user_context=user_context,
+            resource_id=data.title,
+            outcome=AuditOutcome.denied,
+            latency_ms=(time.perf_counter() - t0) * 1000,
+            request_path="/pages",
+        ))
+        raise HTTPException(status_code=409, detail=str(e))
     emit_audit_log(AuditLogEntry(
         action=AuditAction.create_page,
         user_context=user_context,
@@ -57,11 +69,17 @@ async def get_tree(user: User = Depends(get_current_user), page_repo: PageRepo =
 @router.get("/search")
 async def search(
     query: str = Query(...),
+    tags: list[str] | None = Query(None),
     user: User = Depends(get_current_user),
     page_repo: PageRepo = None,
 ):
-    pages = await fuzzy_search_pages(query, user, page_repo)
+    pages = await fuzzy_search_pages(query, user, page_repo, tags=tags)
     return [p.model_dump(mode="json") for p in pages]
+
+
+@router.get("/tags")
+async def list_allowed_tags(user: User = Depends(get_current_user)):
+    return {"tags": ALLOWED_TAGS}
 
 
 @router.get("/{page_id}")

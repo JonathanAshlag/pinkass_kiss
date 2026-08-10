@@ -5,7 +5,9 @@ from datetime import datetime, date, timezone
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.IP.tags import ALLOWED_TAGS
 
 
 class PageStatus(str, Enum):
@@ -53,6 +55,8 @@ class Page(BaseModel):
     description: str
     parent_id: Optional[str] = None
     references: list[Reference] = Field(default_factory=list)
+    aliases: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
     content: str = ""
     history: list[HistoryEntry] = Field(default_factory=list)
     next_approval_date: Optional[date] = None
@@ -67,6 +71,14 @@ class Page(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+    @field_validator("tags")
+    @classmethod
+    def _validate_tags(cls, v: list[str]) -> list[str]:
+        unknown = [t for t in v if t not in ALLOWED_TAGS]
+        if unknown:
+            raise ValueError(f"Unknown tag(s): {unknown}. Allowed tags: {ALLOWED_TAGS}")
+        return v
+
 
 class PageCreate(BaseModel):
     title: str
@@ -74,8 +86,18 @@ class PageCreate(BaseModel):
     parent_id: Optional[str] = None
     content: str = ""
     references: list[Reference] = Field(default_factory=list)
+    aliases: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
     classification: list[ClassificationTriangle] = Field(default_factory=list)
     next_approval_date: Optional[date] = None
+
+    @field_validator("tags")
+    @classmethod
+    def _validate_tags(cls, v: list[str]) -> list[str]:
+        unknown = [t for t in v if t not in ALLOWED_TAGS]
+        if unknown:
+            raise ValueError(f"Unknown tag(s): {unknown}. Allowed tags: {ALLOWED_TAGS}")
+        return v
 
 
 class PageUpdate(BaseModel):
@@ -84,5 +106,17 @@ class PageUpdate(BaseModel):
     parent_id: Optional[str] = None
     content: Optional[str] = None
     references: Optional[list[Reference]] = None
+    aliases: Optional[list[str]] = None
+    tags: Optional[list[str]] = None
     classification: Optional[list[ClassificationTriangle]] = None
     next_approval_date: Optional[date] = None
+
+    @field_validator("tags")
+    @classmethod
+    def _validate_tags(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        if v is None:
+            return v
+        unknown = [t for t in v if t not in ALLOWED_TAGS]
+        if unknown:
+            raise ValueError(f"Unknown tag(s): {unknown}. Allowed tags: {ALLOWED_TAGS}")
+        return v

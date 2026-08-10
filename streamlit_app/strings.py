@@ -23,6 +23,9 @@ UI = {
 
     # Browse
     "page_tree": "עץ דפים",
+    "tag_folders": "תיקיות תגיות",
+    "untagged_folder": "ללא תגית",
+    "back_to_folders": "חזרה לתיקיות",
     "page_title": "כותרת",
     "page_content": "תוכן",
     "page_status": "סטטוס",
@@ -46,6 +49,8 @@ UI = {
     "title_field": "כותרת",
     "description_field": "תיאור קצר",
     "content_field": "תוכן (Markdown)",
+    "aliases_field": "כינויים (מופרדים בפסיק)",
+    "tags_field": "תגיות",
     "approval_date": "תאריך אישור הבא",
     "save_button": "שמור",
     "delete_button": "מחק",
@@ -95,6 +100,27 @@ UI = {
     "workflow_steps": "שלבי אישור (מזהי משתמשים, מופרדים בפסיקים)",
     "create_user": "יצירת משתמש",
     "assign_workflow": "שיוך תהליך עבודה",
+
+    # Bundles
+    "nav_bundle_create": "יצירת חבילה",
+    "nav_bundle_browse": "עיון בחבילות",
+    "bundle_name": "שם חבילה",
+    "bundle_name_placeholder": "שם חבילה קיים או חדש",
+    "bundle_load": "טען",
+    "bundle_entries": "דפים בחבילה",
+    "bundle_no_entries": "לא נבחרו דפים",
+    "bundle_add_description": "הוסף (תיאור)",
+    "bundle_add_full_info": "הוסף (תוכן מלא)",
+    "bundle_remove": "הסר",
+    "bundle_save": "שמור חבילה",
+    "bundle_existing": "חבילות קיימות",
+    "bundle_no_bundles": "אין חבילות",
+    "bundle_preview": "תצוגה מקדימה",
+    "bundle_load_to_editor": "טען לעריכה",
+    "bundle_rendered_text": "טקסט מעובד",
+    "bundle_form_description": "תיאור",
+    "bundle_form_full_info": "תוכן מלא",
+    "bundle_search_label": "חיפוש דף להוספה",
 
     # Status values
     "status_draft": "טיוטה",

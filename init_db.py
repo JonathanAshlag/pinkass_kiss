@@ -19,7 +19,7 @@ async def init_mongo() -> None:
     db = client[settings.mongo_db]
 
     await db.pages.create_index(
-        [("title", "text"), ("content", "text")],
+        [("title", "text"), ("aliases", "text")],
         name="pages_text_search",
     )
     await db.pages.create_index("parent_id", name="pages_parent_id")
@@ -27,6 +27,7 @@ async def init_mongo() -> None:
     await db.pages.create_index("page_id", unique=True, name="pages_page_id")
     await db.pages.create_index("status", name="pages_status")
     await db.pages.create_index("trust_tier", name="pages_trust_tier")
+    await db.pages.create_index("tags", name="pages_tags")
     await db.pages.create_index(
         [("trust_tier", 1), ("inbound_link_count", -1)],
         name="pages_trust_link_rank",
@@ -37,6 +38,9 @@ async def init_mongo() -> None:
     await db.requests.create_index("status", name="requests_status")
     await db.requests.create_index("requested_by", name="requests_requested_by")
     await db.source_files.create_index("file_id", unique=True, name="source_files_file_id")
+    await db.agents.create_index("agent_id", unique=True, name="agents_agent_id")
+    await db.agents.create_index("api_key_hash", unique=True, name="agents_api_key_hash")
+    await db.bundles.create_index("name", unique=True, name="bundles_name")
 
     print("✓ All MongoDB indexes created successfully")
     print(f"  Database: {settings.mongo_db}")

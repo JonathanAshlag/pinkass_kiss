@@ -129,6 +129,35 @@ python seed_db.py
 
 The PostgreSQL schema normalizes page history into a `page_revisions` table and page references into a `page_refs` table (for efficient backlink queries). Classification and metadata are stored as JSONB. Full-text search uses a generated `tsvector` column with a GIN index.
 
+### Resetting after a squashed/rewritten migration
+
+While the schema is still in flux (pre-production, no real data to preserve), migration files under `app/infrastructure/postgres/migrations/versions/` are sometimes squashed or rewritten instead of layered with new revisions. If your local Postgres DB was already migrated to a revision that no longer exists on disk, Alembic will fail with something like:
+
+```
+alembic.util.exc.CommandError: Can't locate revision identified by '004'
+```
+
+This happens because the DB's `alembic_version` table still points at a revision ID that was deleted. Since there's no data worth keeping yet, the fix is to drop the schema (which also wipes the stale `alembic_version` row) and re-migrate from scratch:
+
+```bash
+python -c "
+import asyncio
+from sqlalchemy.ext.asyncio import create_async_engine
+from app.config import settings
+
+async def main():
+    engine = create_async_engine(settings.postgres_uri)
+    async with engine.begin() as conn:
+        await conn.exec_driver_sql('DROP SCHEMA IF EXISTS pinkass CASCADE')
+    await engine.dispose()
+
+asyncio.run(main())
+"
+python init_db.py
+```
+
+This is destructive — only do it when the Postgres data is disposable. Once the schema is stable in production, migrations should be added as new revisions instead of rewritten in place.
+
 ## Running
 
 ### FastAPI server
@@ -272,6 +301,20 @@ Every page carries a `trust_tier` field that signals how thoroughly its content 
 - `check_verification_drift` — re-verification requests for verified pages whose content has changed
 - `update_inbound_link_counts` — refreshes inbound link counts across all published pages
 
+## Tags
+
+Pages carry a `tags` field drawn from a **closed, curated vocabulary** — unlike `aliases` (free text), a tag must come from a fixed list. `PageCreate`/`PageUpdate` reject any tag not in the vocabulary with HTTP 422.
+
+**`app/IP/`** holds proprietary content that shouldn't live as hardcoded literals in the reviewed application code: the real tag taxonomy (`app/IP/tags.py::ALLOWED_TAGS`) and the LLM system prompts (`app/IP/prompts/`). The directory ships with placeholder/demo content and is committed normally (no `.gitignore`) — replace `app/IP/tags.py` with the real organizational taxonomy when ready.
+
+**Inheritance:** a child page automatically inherits its parent's tags (unioned with its own) whenever it's created, edited, or re-parented. This is **forward-only** — editing a parent's tags later does not retroactively update pages that are already its descendants; inheritance is only applied at the moment a page itself is written.
+
+**Search:** `GET /pages/search` accepts a repeated `tags` query param and matches a page if it carries **any** of the requested tags (OR semantics), combined with the existing fuzzy title/alias search. `GET /pages/tags` returns the full `ALLOWED_TAGS` vocabulary and backs the tag pickers in the Streamlit UI.
+
+**Browse UI:** the main "עיון" page is a two-layer, folder-style navigator over tags rather than a flat page tree:
+- **Layer 1** lists one folder per tag (with a live page count) plus a "ללא תגית" (untagged) folder.
+- **Layer 2**, after entering a tag, shows only the hierarchy chain leading to pages that carry it — unrelated branches with no tagged descendant never appear. Clicking a page toggles its children open/closed inline and loads its full detail in the side panel; a back button returns to layer 1.
+
 ## Classification Triangle Access Control
 
 Pages can carry a `classification` field — a list of `ClassificationTriangle` objects, each with an `id` and a `level` (1–4). A user may only read or edit a classified page if their own triangles (fetched from an external API) satisfy **every** triangle on the page at an equal or higher level.
@@ -393,6 +436,9 @@ pinkas/
 │   │   ├── source_files.py      # Source file lifecycle — reference-counted GridFS cleanup
 │   │   └── permissions.py
 │   ├── models/                  # Pydantic v2 domain models
+│   ├── IP/                      # Proprietary/curated content, kept separate from reviewed app code
+│   │   ├── tags.py              # ALLOWED_TAGS — closed tag vocabulary (placeholder/demo data)
+│   │   └── prompts/             # LLM system prompts (retrieval.py, ingestion.py)
 │   ├── storage/                 # Data access layer
 │   │   ├── base.py              # Abstract base classes (PageRepository, UserRepository, …)
 │   │   ├── mongo/               # Motor implementations
@@ -416,9 +462,10 @@ pinkas/
 │                                # update_inbound_link_counts
 ├── streamlit_app/               # Streamlit GUI (Hebrew RTL)
 │   ├── app.py
+│   ├── state.py                 # Session-state key constants + navigate_to()
 │   ├── strings.py               # Hebrew UI strings
 │   ├── helpers.py               # API client + RTL helpers
-│   └── pages/
+│   └── views/                   # browse.py, search.py, create_edit.py, ask_page.py, …
 ├── tests/                       # pytest suite (each test runs against both backends)
 ├── init_db.py                   # Create MongoDB indexes
 ├── seed_db.py                   # Seed demo data
@@ -436,6 +483,7 @@ pinkas/
 MongoDB always runs alongside Postgres (GridFS for file blobs). Schema design rationale:
 - **Normalized:** page history (`page_revisions`) and page references (`page_refs`) — queried, filtered, or joined in SQL
 - **JSONB:** classification, workflow steps, request history — only ever read back whole, never filtered in SQL
+- **JSONB + GIN index:** `tags` is the one JSONB column filtered directly in SQL — pages carry a small closed-vocabulary tag list, and `ix_pages_tags_gin` supports the `?|` "any of these tags" query efficiently
 
 ## License
 

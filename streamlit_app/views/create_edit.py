@@ -4,7 +4,7 @@ import streamlit as st
 from datetime import date
 
 from streamlit_app.strings import UI
-from streamlit_app.helpers import api_post, api_put, api_get
+from streamlit_app.helpers import api_post, api_put, api_get, get_allowed_tags
 from streamlit_app.state import (
     EDITING_PAGE, VIEWING_PAGE, PP_CTX, PP_SEL_ID, PP_SEL_TITLE, PP_RESULTS,
     NAV_BROWSE,
@@ -78,6 +78,8 @@ def render_create(user_id: str):
     description = st.text_input(UI["description_field"])
     parent_id = _render_parent_picker(user_id, context="create")
     content = st.text_area(UI["content_field"], height=300)
+    aliases_raw = st.text_input(UI["aliases_field"])
+    tags = st.multiselect(UI["tags_field"], options=get_allowed_tags(user_id), default=[])
     approval_date = st.date_input(
         UI["approval_date"],
         value=None,
@@ -97,6 +99,8 @@ def render_create(user_id: str):
             "description": description,
             "content": content,
             "parent_id": parent_id,
+            "aliases": [a.strip() for a in aliases_raw.split(",") if a.strip()],
+            "tags": tags,
         }
         if approval_date:
             data["next_approval_date"] = approval_date.isoformat()
@@ -133,6 +137,10 @@ def render_edit(user_id: str):
         initial_parent_id=page.get("parent_id"),
     )
     content = st.text_area(UI["content_field"], value=page.get("content", ""), height=300)
+    aliases_raw = st.text_input(UI["aliases_field"], value=", ".join(page.get("aliases") or []))
+    tags = st.multiselect(
+        UI["tags_field"], options=get_allowed_tags(user_id), default=page.get("tags") or [],
+    )
 
     current_date = None
     if page.get("next_approval_date"):
@@ -156,6 +164,11 @@ def render_edit(user_id: str):
                 data["content"] = content
             if parent_id != page.get("parent_id"):
                 data["parent_id"] = parent_id
+            new_aliases = [a.strip() for a in aliases_raw.split(",") if a.strip()]
+            if new_aliases != (page.get("aliases") or []):
+                data["aliases"] = new_aliases
+            if tags != (page.get("tags") or []):
+                data["tags"] = tags
             if approval_date:
                 data["next_approval_date"] = approval_date.isoformat()
 

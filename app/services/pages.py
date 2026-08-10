@@ -28,13 +28,29 @@ def is_trust_stale(page: Page) -> bool:
     )
 
 
+async def _merge_parent_tags(tags: list[str], parent_id: Optional[str], repo: PageRepository) -> list[str]:
+    """Union a page's tags with its parent's current tags (forward-only, no retroactive cascade)."""
+    if not parent_id:
+        return tags
+    parent = await repo.get(parent_id)
+    if parent is None:
+        return tags
+    return sorted(set(tags) | set(parent.tags))
+
+
 async def create_page(data: PageCreate, user: User, repo: PageRepository) -> Page:
+    if await repo.get(data.title) is not None:
+        raise ValueError(f"A page titled '{data.title}' already exists")
+    merged_tags = await _merge_parent_tags(data.tags, data.parent_id, repo)
     page = Page(
+        page_id=data.title,
         title=data.title,
         description=data.description,
         parent_id=data.parent_id,
         content=data.content,
         references=data.references,
+        aliases=data.aliases,
+        tags=merged_tags,
         classification=data.classification,
         next_approval_date=data.next_approval_date,
         status=PageStatus.published if not user.workflow_id else PageStatus.draft,
@@ -69,6 +85,12 @@ async def update_page(page_id: str, data: PageUpdate, user: User, repo: PageRepo
         update_fields["content"] = data.content
     if data.references is not None:
         update_fields["references"] = [r.model_dump(mode="json") for r in data.references]
+    if data.aliases is not None:
+        update_fields["aliases"] = data.aliases
+    if data.tags is not None or "parent_id" in data.model_fields_set:
+        base_tags = data.tags if data.tags is not None else page.tags
+        new_parent_id = data.parent_id if "parent_id" in data.model_fields_set else page.parent_id
+        update_fields["tags"] = await _merge_parent_tags(base_tags, new_parent_id, repo)
     if data.classification is not None:
         update_fields["classification"] = [c.model_dump(mode="json") for c in data.classification]
     if data.next_approval_date is not None:
@@ -101,6 +123,7 @@ async def _find_raw_docs(
     statuses: Optional[list] = None,
     limit: int = 10,
     fields: Optional[list[str]] = None,
+    tags: Optional[list[str]] = None,
 ) -> list[dict]:
     status_list = [s.value for s in statuses] if statuses else [PageStatus.published.value]
 
@@ -112,7 +135,7 @@ async def _find_raw_docs(
         extra = [f for f in required if f not in fields]
         effective_fields = fields + extra
 
-    results = await repo.search(query, status_list, limit, fields=effective_fields)
+    results = await repo.search_by_name(query, status_list, limit, fields=effective_fields, tags=tags)
 
     user_triangles = await get_user_triangles(user.user_id)
     results = [
@@ -147,6 +170,7 @@ async def _find_raw_docs_fuzzy(
     limit: int = 10,
     fields: Optional[list[str]] = None,
     user_triangles: Optional[list[ClassificationTriangle]] = None,
+    tags: Optional[list[str]] = None,
 ) -> list[dict]:
     status_list = [s.value for s in statuses] if statuses else [PageStatus.published.value]
 
@@ -158,7 +182,7 @@ async def _find_raw_docs_fuzzy(
         extra = [f for f in required if f not in fields]
         effective_fields = fields + extra
 
-    results = await repo.fuzzy_search(query, status_list, limit, fields=effective_fields)
+    results = await repo.fuzzy_search_by_name(query, status_list, limit, fields=effective_fields, tags=tags)
 
     if user_triangles is None:
         user_triangles = await get_user_triangles(user.user_id)
@@ -192,8 +216,9 @@ async def find_pages(
     ranked: bool = False,
     statuses: Optional[list] = None,
     limit: int = 10,
+    tags: Optional[list[str]] = None,
 ) -> list[Page]:
-    docs = await _find_raw_docs(query, user=user, repo=repo, ranked=ranked, statuses=statuses, limit=limit)
+    docs = await _find_raw_docs(query, user=user, repo=repo, ranked=ranked, statuses=statuses, limit=limit, tags=tags)
     return [Page(**doc) for doc in docs]
 
 
@@ -205,9 +230,10 @@ async def find_page_docs(
     ranked: bool = False,
     statuses: Optional[list] = None,
     limit: int = 10,
+    tags: Optional[list[str]] = None,
 ) -> list[dict]:
     return await _find_raw_docs(
-        query, user=user, repo=repo, ranked=ranked, statuses=statuses, limit=limit, fields=fields,
+        query, user=user, repo=repo, ranked=ranked, statuses=statuses, limit=limit, fields=fields, tags=tags,
     )
 
 
@@ -215,13 +241,15 @@ async def set_page_references(page_id: str, references: list[Reference], repo: P
     await repo.set_references(page_id, references)
 
 
-async def search_pages(query: str, user: User, repo: PageRepository) -> list[Page]:
-    return await find_pages(query, user=user, repo=repo)
+async def search_pages(query: str, user: User, repo: PageRepository, tags: Optional[list[str]] = None) -> list[Page]:
+    return await find_pages(query, user=user, repo=repo, tags=tags)
 
 
-async def fuzzy_search_pages(query: str, user: User, repo: PageRepository) -> list[Page]:
+async def fuzzy_search_pages(
+    query: str, user: User, repo: PageRepository, tags: Optional[list[str]] = None,
+) -> list[Page]:
     from app.search_config import FUZZY_SEARCH_LIMIT
-    docs = await _find_raw_docs_fuzzy(query, user=user, repo=repo, limit=FUZZY_SEARCH_LIMIT)
+    docs = await _find_raw_docs_fuzzy(query, user=user, repo=repo, limit=FUZZY_SEARCH_LIMIT, tags=tags)
     return [Page(**doc) for doc in docs]
 
 
@@ -234,10 +262,78 @@ async def find_page_docs_fuzzy(
     statuses: Optional[list] = None,
     limit: int = 10,
     user_triangles: Optional[list[ClassificationTriangle]] = None,
+    tags: Optional[list[str]] = None,
 ) -> list[dict]:
     return await _find_raw_docs_fuzzy(
         query, user=user, repo=repo, ranked=ranked, statuses=statuses, limit=limit, fields=fields,
-        user_triangles=user_triangles,
+        user_triangles=user_triangles, tags=tags,
+    )
+
+
+async def _find_raw_docs_fuzzy_scored(
+    query: str,
+    user: User,
+    repo: PageRepository,
+    ranked: bool = False,
+    statuses: Optional[list] = None,
+    limit: int = 10,
+    fields: Optional[list[str]] = None,
+    user_triangles: Optional[list[ClassificationTriangle]] = None,
+    tags: Optional[list[str]] = None,
+) -> list[dict]:
+    """Like _find_raw_docs_fuzzy but using fuzzy_search_scored (which includes a 'score' field)."""
+    status_list = [s.value for s in statuses] if statuses else [PageStatus.published.value]
+
+    strip_classification = False
+    effective_fields: Optional[list[str]] = None
+    if fields is not None:
+        strip_classification = "classification" not in fields
+        required = ["classification", "trust_tier", "inbound_link_count"]
+        extra = [f for f in required if f not in fields]
+        effective_fields = fields + extra
+
+    results = await repo.fuzzy_search_scored(query, status_list, limit, fields=effective_fields, tags=tags)
+
+    if user_triangles is None:
+        user_triangles = await get_user_triangles(user.user_id)
+    results = [
+        doc for doc in results
+        if user_satisfies_classification(
+            user_triangles,
+            [ClassificationTriangle(**t) for t in doc.get("classification", [])],
+        )
+    ]
+
+    if strip_classification:
+        for doc in results:
+            doc.pop("classification", None)
+
+    if ranked:
+        results.sort(
+            key=lambda d: (
+                _TIER_RANK.get(d.get("trust_tier", "unverified"), 0),
+                d.get("inbound_link_count", 0),
+            ),
+            reverse=True,
+        )
+    return results
+
+
+async def find_page_docs_fuzzy_scored(
+    query: str,
+    fields: list[str],
+    user: User,
+    repo: PageRepository,
+    ranked: bool = False,
+    statuses: Optional[list] = None,
+    limit: int = 10,
+    user_triangles: Optional[list[ClassificationTriangle]] = None,
+    tags: Optional[list[str]] = None,
+) -> list[dict]:
+    """Fuzzy search returning results with numeric 'score' field."""
+    return await _find_raw_docs_fuzzy_scored(
+        query, user=user, repo=repo, ranked=ranked, statuses=statuses, limit=limit, fields=fields,
+        user_triangles=user_triangles, tags=tags,
     )
 
 

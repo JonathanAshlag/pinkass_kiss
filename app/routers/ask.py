@@ -11,7 +11,7 @@ from app.models.audit import AuditAction, AuditLogEntry, AuditOutcome, UserConte
 from app.models.user import User
 from app.routers.deps import get_current_user, get_user_context
 from app.llm.retrieval import ask_with_retrieval
-from app.services.audit import emit_audit_log
+from app.services.event_log import emit_audit_log
 
 router = APIRouter(tags=["ask"])
 

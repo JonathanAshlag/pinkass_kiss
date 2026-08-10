@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     es_password: str = ""
     es_cloud_id: str = ""
 
+    agent_api_key_pepper: str = ""
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

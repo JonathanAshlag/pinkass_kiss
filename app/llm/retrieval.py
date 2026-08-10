@@ -6,7 +6,7 @@ import logging
 from app.config import settings
 from app.llm.client import get_client
 from app.models.user import User
-from app.prompts.retrieval import QA_SYSTEM_PROMPT, RETRIEVE_TOOL
+from app.IP.prompts.retrieval import QA_SYSTEM_PROMPT, RETRIEVE_TOOL
 from app.storage.base import PageRepository
 from app.services.pages import find_page_docs_fuzzy
 from app.services.classification import get_user_triangles
@@ -51,7 +51,7 @@ async def ask_with_retrieval(
                     args = json.loads(tool_call.function.arguments)
                     results = await find_page_docs_fuzzy(
                         args["query"],
-                        fields=["page_id", "title", "content", "trust_tier", "inbound_link_count"],
+                        fields=["page_id", "title", "content", "aliases", "trust_tier", "inbound_link_count"],
                         user=user,
                         repo=page_repo,
                         ranked=True,

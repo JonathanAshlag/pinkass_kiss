@@ -14,6 +14,7 @@ from streamlit_app.state import (
     USER_ID, USER_DATA, CURRENT_PAGE, EDITING_PAGE, PP_CTX,
     NAV_BROWSE, NAV_CREATE, NAV_SEARCH, NAV_ASK, NAV_PRODUCE,
     NAV_MY_REQUESTS, NAV_MY_APPROVALS, NAV_ADMIN,
+    NAV_BUNDLE_CREATE, NAV_BUNDLE_BROWSE,
     navigate_to,
 )
 
@@ -92,7 +93,11 @@ def show_sidebar():
         ])
 
         if user.get("permission_level") == "admin":
-            nav_items.append((NAV_ADMIN, "⚙️"))
+            nav_items.extend([
+                (NAV_BUNDLE_CREATE, "🧩"),
+                (NAV_BUNDLE_BROWSE, "📦"),
+                (NAV_ADMIN, "⚙️"),
+            ])
 
         for key, icon in nav_items:
             active = st.session_state[CURRENT_PAGE] == key
@@ -144,6 +149,12 @@ def main():
         render(user_id)
     elif selection == UI[NAV_MY_APPROVALS]:
         from streamlit_app.views.my_approvals import render
+        render(user_id)
+    elif selection == UI[NAV_BUNDLE_CREATE]:
+        from streamlit_app.views.bundle_create import render
+        render(user_id)
+    elif selection == UI[NAV_BUNDLE_BROWSE]:
+        from streamlit_app.views.bundle_browse import render
         render(user_id)
     elif selection == UI[NAV_ADMIN]:
         from streamlit_app.views.admin import render

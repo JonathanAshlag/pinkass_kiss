@@ -1,10 +1,12 @@
 """PostgreSQL implementation of PageRepository."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import String, delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.page import (
@@ -26,6 +28,8 @@ def _orm_to_page(row: PageORM) -> Page:
         parent_id=row.parent_id,
         content=row.content,
         references=refs,
+        aliases=row.aliases or [],
+        tags=row.tags or [],
         classification=classification,
         status=PageStatus(row.status),
         trust_tier=TrustTier(row.trust_tier),
@@ -74,6 +78,8 @@ class PostgresPageRepository(PageRepository):
             updated_at=page.updated_at,
             classification=[c.model_dump(mode="json") for c in page.classification],
             references=[r.model_dump(mode="json") for r in page.references],
+            aliases=page.aliases,
+            tags=page.tags,
         )
         self._s.add(orm)
         for entry in page.history:
@@ -165,21 +171,91 @@ class PostgresPageRepository(PageRepository):
             for row in rows
         ]
 
-    async def search(
+    def _tags_clause(self, tags: list[str]):
+        """WHERE clause matching pages that have at least one of the given tags."""
+        if self._dialect == "postgresql":
+            return PageORM.tags.op("?|")(pg_array(tags))
+        # SQLite's JSON serializer escapes non-ASCII text (ensure_ascii=True),
+        # so match against the same json.dumps() encoding rather than raw text.
+        return or_(*[PageORM.tags.cast(String).like(f"%{json.dumps(t)}%") for t in tags])
+
+    async def fuzzy_search_scored(
         self,
         query: str,
         statuses: list[str],
         limit: int,
         fields: Optional[list[str]] = None,
+        tags: Optional[list[str]] = None,
     ) -> list[dict]:
+        """Fuzzy-search with numeric score. Postgres: real word_similarity, others: rank-based."""
+        from app.search_config import FUZZY_TITLE_THRESHOLD, FUZZY_ALIASES_THRESHOLD
+
         base = select(PageORM).where(PageORM.status.in_(statuses))
+        if tags:
+            base = base.where(self._tags_clause(tags))
+
+        if query and self._dialect == "postgresql":
+            # Real Postgres fuzzy matching with word_similarity scores
+            sim_title = func.word_similarity(query, PageORM.title)
+            sim_aliases = func.word_similarity(query, func.cast(PageORM.aliases, String))
+            sim_max = func.greatest(sim_title, sim_aliases).label("score")
+            stmt = (
+                select(PageORM, sim_max)
+                .where(or_(
+                    sim_title > FUZZY_TITLE_THRESHOLD,
+                    sim_aliases > FUZZY_ALIASES_THRESHOLD,
+                ))
+                .order_by(sim_max.desc())
+                .limit(limit)
+            )
+            result = await self._s.execute(stmt)
+            rows = result.tuples().all()
+            rows_list = [self._row_to_dict(row[0], fields) for row in rows]
+            for i, row in enumerate(rows_list):
+                row["score"] = float(rows[i][1])  # Add the real score
+            return rows_list
+        else:
+            # Fall back to rank-based scoring
+            stmt = base.limit(limit)
+            result = await self._s.execute(stmt)
+            rows = result.scalars().all()
+            rows_list = [self._row_to_dict(row, fields) for row in rows]
+            for i, row in enumerate(rows_list):
+                row["score"] = max(0.0, 1.0 - i * 0.05)
+            return rows_list
+
+    async def list_scannable_pages(
+        self,
+        fields: Optional[list[str]] = None,
+    ) -> list[dict]:
+        """Return all published pages (unfiltered by limit) for caching."""
+        base = select(PageORM).where(PageORM.status == "published")
+        result = await self._s.execute(base)
+        rows = result.scalars().all()
+        return [self._row_to_dict(row, fields) for row in rows]
+
+    async def search_by_name(
+        self,
+        query: str,
+        statuses: list[str],
+        limit: int,
+        fields: Optional[list[str]] = None,
+        tags: Optional[list[str]] = None,
+    ) -> list[dict]:
+        """Match pages by title or alias only (not content/description)."""
+        base = select(PageORM).where(PageORM.status.in_(statuses))
+        if tags:
+            base = base.where(self._tags_clause(tags))
 
         if query and self._dialect == "postgresql":
             tsquery = func.plainto_tsquery("english", query)
             stmt = base.where(PageORM.tsv.op("@@")(tsquery)).limit(limit)
         elif query:
             stmt = base.where(
-                or_(PageORM.title.ilike(f"%{query}%"), PageORM.content.ilike(f"%{query}%"))
+                or_(
+                    PageORM.title.ilike(f"%{query}%"),
+                    PageORM.aliases.cast(String).ilike(f"%{query}%"),
+                )
             ).limit(limit)
         else:
             stmt = base.limit(limit)
@@ -188,28 +264,38 @@ class PostgresPageRepository(PageRepository):
         rows = result.scalars().all()
         return [self._row_to_dict(row, fields) for row in rows]
 
-    async def fuzzy_search(
+    async def fuzzy_search_by_name(
         self,
         query: str,
         statuses: list[str],
         limit: int,
         fields: Optional[list[str]] = None,
+        tags: Optional[list[str]] = None,
     ) -> list[dict]:
-        from app.search_config import FUZZY_TITLE_THRESHOLD, FUZZY_DESCRIPTION_THRESHOLD
+        """Fuzzy-match pages by title or alias only (not content/description)."""
+        from app.search_config import FUZZY_TITLE_THRESHOLD, FUZZY_ALIASES_THRESHOLD
         base = select(PageORM).where(PageORM.status.in_(statuses))
+        if tags:
+            base = base.where(self._tags_clause(tags))
 
         if query and self._dialect == "postgresql":
             sim_title = func.word_similarity(query, PageORM.title)
-            sim_desc = func.word_similarity(query, PageORM.description)
+            sim_aliases = func.word_similarity(query, func.cast(PageORM.aliases, String))
             stmt = (
                 base
-                .where(or_(sim_title > FUZZY_TITLE_THRESHOLD, sim_desc > FUZZY_DESCRIPTION_THRESHOLD))
-                .order_by(func.greatest(sim_title, sim_desc).desc())
+                .where(or_(
+                    sim_title > FUZZY_TITLE_THRESHOLD,
+                    sim_aliases > FUZZY_ALIASES_THRESHOLD,
+                ))
+                .order_by(func.greatest(sim_title, sim_aliases).desc())
                 .limit(limit)
             )
         elif query:
             stmt = base.where(
-                or_(PageORM.title.ilike(f"%{query}%"), PageORM.content.ilike(f"%{query}%"))
+                or_(
+                    PageORM.title.ilike(f"%{query}%"),
+                    PageORM.aliases.cast(String).ilike(f"%{query}%"),
+                )
             ).limit(limit)
         else:
             stmt = base.limit(limit)
@@ -255,6 +341,7 @@ class PostgresPageRepository(PageRepository):
                 "parent_id": row.parent_id,
                 "status": row.status,
                 "classification": row.classification or [],
+                "tags": row.tags or [],
             }
             for row in rows
         ]
@@ -355,6 +442,8 @@ class PostgresPageRepository(PageRepository):
             "inbound_link_count": row.inbound_link_count,
             "classification": row.classification or [],
             "references": row.references or [],
+            "aliases": row.aliases or [],
+            "tags": row.tags or [],
             "created_by": row.created_by,
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,

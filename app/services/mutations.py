@@ -53,6 +53,8 @@ async def apply_page_mutation(
                 description=getattr(data, "description", ""),
                 content=data.content,
                 classification=[c.model_dump(mode="json") for c in data.classification] if data.classification else None,
+                aliases=data.aliases if data.aliases else None,
+                tags=data.tags if data.tags else None,
             )
             req = await create_request(
                 req_type=RequestType.create,
@@ -88,6 +90,8 @@ async def apply_page_mutation(
                 content=data.content,
                 parent_id=data.parent_id,
                 references=[r.model_dump(mode="json") for r in data.references] if data.references else None,
+                aliases=data.aliases,
+                tags=data.tags,
                 classification=[c.model_dump(mode="json") for c in data.classification] if data.classification else None,
                 next_approval_date=data.next_approval_date.isoformat() if data.next_approval_date else None,
             )

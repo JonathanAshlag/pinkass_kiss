@@ -117,14 +117,18 @@ async def run_ingestion_pipeline(
             user.permission_level == PermissionLevel.admin
             and initial_trust_tier == TrustTier.verified.value
         )
-        mutation_result = await apply_page_mutation(
-            RequestType.create,
-            user,
-            page_repo=page_repo,
-            req_repo=req_repo,
-            data=page_data,
-            trust_tier=TrustTier.verified if should_verify else None,
-        )
+        try:
+            mutation_result = await apply_page_mutation(
+                RequestType.create,
+                user,
+                page_repo=page_repo,
+                req_repo=req_repo,
+                data=page_data,
+                trust_tier=TrustTier.verified if should_verify else None,
+            )
+        except ValueError:
+            logger.warning(f"Skipping candidate '{title}': page_id already taken")
+            continue
         results.append(PageIngestOutcome(
             page_id=mutation_result.page["page_id"] if mutation_result.page else "",
             title=title,

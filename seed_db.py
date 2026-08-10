@@ -48,6 +48,63 @@ PAGES = [
         title="בעלי חיים",
         description="מידע על בעלי חיים שונים",
         content="# בעלי חיים\n\nדף זה מכיל מידע על בעלי חיים שונים.\n\n## קטגוריות\n- יונקים\n- ציפורים\n- זוחלים",
+        tags=["זואולוגיה", "כללי"],
+        status=PageStatus.published,
+        created_by="admin1",
+        created_at=_NOW,
+        updated_at=_NOW,
+        history=_init_history(),
+    ),
+    Page(
+        page_id="mammals",
+        title="יונקים",
+        description="מידע על בעלי חיים יונקים",
+        parent_id="animals",
+        content="# יונקים\n\nיונקים הם בעלי חיים בעלי חוליות, שיער או פרווה, ובקיבה חלב להנקת הצאצאים.\n\n## תת-קטגוריות\n- כלביים\n- חתוליים\n- כלעים",
+        references=[Reference(type=ReferenceType.page, page_id="animals")],
+        tags=["זואולוגיה", "חיות בית"],
+        status=PageStatus.published,
+        created_by="admin1",
+        created_at=_NOW,
+        updated_at=_NOW,
+        history=_init_history(),
+    ),
+    Page(
+        page_id="dogs",
+        title="כלבים",
+        description="מידע על כלבים ותת-מינים",
+        parent_id="mammals",
+        content="# כלבים\n\nכלבים הם חיות בעלי חיים מהמשפחה הכלביים, מבויתות וכלביות.\n\n## גזעים פופולריים\n- גרמן שפרד\n- לברדור רטריבר",
+        references=[Reference(type=ReferenceType.page, page_id="mammals")],
+        tags=["יונקים", "חיות בית"],
+        status=PageStatus.published,
+        created_by="admin1",
+        created_at=_NOW,
+        updated_at=_NOW,
+        history=_init_history(),
+    ),
+    Page(
+        page_id="german_shepherd",
+        title="גרמן שפרד",
+        description="גזע כלבים גרמני קלאסי",
+        parent_id="dogs",
+        content="# גרמן שפרד\n\nגרמן שפרד הוא גזע כלבים גדול וחכם, בדרך כלל משמש בשמירה והנחייה.\n\n## מאפיינים\n- אינטליגנציה גבוהה\n- גודל בינוני עד גדול\n- מוצא גרמני",
+        references=[Reference(type=ReferenceType.page, page_id="dogs")],
+        tags=["חיות בית", "יונקים"],
+        status=PageStatus.published,
+        created_by="admin1",
+        created_at=_NOW,
+        updated_at=_NOW,
+        history=_init_history(),
+    ),
+    Page(
+        page_id="labrador",
+        title="לברדור רטריבר",
+        description="גזע כלבים משמש השחזור וחברה",
+        parent_id="dogs",
+        content="# לברדור רטריבר\n\nלברדור הוא גזע כלבים פופולרי, ידוע בתבונתו וחברותיותו.\n\n## מאפיינים\n- כלב משפחתי מאומת\n- אתלטי ופעיל\n- זמין בגוונים שונים",
+        references=[Reference(type=ReferenceType.page, page_id="dogs")],
+        tags=["חיות בית", "יונקים"],
         status=PageStatus.published,
         created_by="admin1",
         created_at=_NOW,
@@ -58,9 +115,11 @@ PAGES = [
         page_id="dog",
         title="כלב",
         description="כלב — Canis lupus familiaris",
-        parent_id="animals",
+        parent_id="mammals",
         content="# כלב\n\nהכלב (Canis lupus familiaris) הוא יונק מבויית ממשפחת הכלביים.\n\n## מאפיינים\n- חיית מחמד נפוצה\n- נאמן לבעליו\n- קיימות מאות גזעים\n\n## שימושים\n- שמירה\n- ציד\n- הנחייה\n- חברה",
-        references=[Reference(type=ReferenceType.page, page_id="animals")],
+        references=[Reference(type=ReferenceType.page, page_id="mammals")],
+        aliases=["Canis lupus familiaris", "כלבלב"],
+        tags=["יונקים", "חיות בית"],
         status=PageStatus.published,
         created_by="admin1",
         created_at=_NOW,
@@ -71,9 +130,11 @@ PAGES = [
         page_id="cat",
         title="חתול",
         description="חתול — Felis catus",
-        parent_id="animals",
+        parent_id="mammals",
         content="# חתול\n\nהחתול (Felis catus) הוא יונק טורף קטן מבויית.\n\n## מאפיינים\n- עצמאי\n- ציד מיומן\n- ראיית לילה מצוינת\n\n## התנהגות\n- ישן 12-16 שעות ביום\n- מטפח את עצמו\n- תקשורת באמצעות מיאו",
-        references=[Reference(type=ReferenceType.page, page_id="animals")],
+        references=[Reference(type=ReferenceType.page, page_id="mammals")],
+        aliases=["Felis catus", "חתולה"],
+        tags=["יונקים", "חיות בית"],
         status=PageStatus.published,
         created_by="admin1",
         created_at=_NOW,
@@ -84,9 +145,10 @@ PAGES = [
         page_id="sheep",
         title="כבשה",
         description="כבשה — Ovis aries",
-        parent_id="animals",
+        parent_id="mammals",
         content="# כבשה\n\nהכבשה (Ovis aries) היא יונק מבויית ממשפחת הפריים.\n\n## מאפיינים\n- גידול צמר\n- חיה חברתית\n- עדרית\n\n## שימושים\n- צמר\n- חלב\n- בשר",
-        references=[Reference(type=ReferenceType.page, page_id="animals")],
+        references=[Reference(type=ReferenceType.page, page_id="mammals")],
+        tags=["יונקים", "חיות משק"],
         status=PageStatus.published,
         created_by="admin1",
         created_at=_NOW,
@@ -160,9 +222,13 @@ async def seed() -> None:
     print("  reader1   - קורא בלבד (read_only)")
     print("\n--- Page Hierarchy ---")
     print("  בעלי חיים (animals)")
-    print("    ├── כלב (dog)")
-    print("    ├── חתול (cat)")
-    print("    └── כבשה (sheep)")
+    print("    └── יונקים (mammals)")
+    print("        ├── כלב (dog)")
+    print("        ├── חתול (cat)")
+    print("        ├── כבשה (sheep)")
+    print("        └── כלבים (dogs)")
+    print("            ├── גרמן שפרד (german_shepherd)")
+    print("            └── לברדור רטריבר (labrador)")
     print("  צמחים (plants)")
 
     if settings.db_backend == "postgres":

@@ -8,7 +8,7 @@ import pytest_asyncio
 from app.models.audit import AuditAction, AuditLogEntry, AuditOutcome, UserContext
 from app.models.page import PageCreate, PageUpdate
 from app.models.user import User, PermissionLevel
-from app.services.audit import emit_audit_log, _write_to_es
+from app.services.event_log import emit_audit_log, _write_to_es
 from app.services.mutations import apply_page_mutation
 from app.models.request import RequestType
 
@@ -126,12 +126,13 @@ class TestEmitAuditLog:
             latency_ms=10.0,
             request_path="/pages",
         )
-        await _write_to_es(entry)
+        await _write_to_es(entry, "audit")
 
         mock_es.index.assert_called_once()
         call_kwargs = mock_es.index.call_args[1]
-        assert call_kwargs["index"].startswith("pinkas-audit-")
+        assert call_kwargs["index"].startswith("pinkas-events-")
         doc = call_kwargs["document"]
+        assert doc["event_kind"] == "audit"
         assert doc["action"] == "create_page"
         assert doc["user_context"]["user_id"] == "editor1"
         assert doc["user_context"]["client_application_id"] == "test-app"
@@ -149,7 +150,7 @@ class TestEmitAuditLog:
             outcome=AuditOutcome.success,
             request_path="/ask",
         )
-        await _write_to_es(entry)
+        await _write_to_es(entry, "audit")
 
 
 class TestAuditIntegration:

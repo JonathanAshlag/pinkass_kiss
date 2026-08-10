@@ -11,7 +11,7 @@ from app.models.request import (
 )
 from app.models.user import User
 from app.storage.base import PageRepository, RequestRepository, SourceFileRepository, WorkflowRepository
-from app.services.pages import compute_content_hash
+from app.services.pages import compute_content_hash, _merge_parent_tags
 from app.services.source_files import cleanup_source_file_for_page
 
 logger = logging.getLogger("pinkas.requests")
@@ -159,6 +159,13 @@ async def _apply_approved_request(
                 update["title"] = pc.title
             if hasattr(pc, "content") and pc.content:
                 update["content"] = pc.content
+            if hasattr(pc, "aliases") and pc.aliases is not None:
+                update["aliases"] = pc.aliases
+            # tags are intentionally not touched here: create_page() already wrote the
+            # correctly-merged tags when the draft was created, and re-merging against
+            # the parent's *current* tags at approval time would leak a parent-tag edit
+            # made while the request was pending — the forward-only inheritance rule
+            # only applies at the moment the child itself is written.
             if req.type == RequestType.review and isinstance(pc, ReviewPayload) and pc.trust_tier == TrustTier.verified.value:
                 page = await page_repo.get(req.page_id)
                 final_content = update.get("content") or (page.content if page else "")
@@ -178,6 +185,13 @@ async def _apply_approved_request(
                     update[key] = val
             if ep.references is not None:
                 update["references"] = ep.references
+            if ep.aliases is not None:
+                update["aliases"] = ep.aliases
+            if ep.tags is not None or ep.parent_id is not None:
+                page = await page_repo.get(req.page_id)
+                base_tags = ep.tags if ep.tags is not None else (page.tags if page else [])
+                new_parent_id = update.get("parent_id", page.parent_id if page else None)
+                update["tags"] = await _merge_parent_tags(base_tags, new_parent_id, page_repo)
         await page_repo.update_with_history(req.page_id, update, page_history)
 
     elif req.type == RequestType.delete:

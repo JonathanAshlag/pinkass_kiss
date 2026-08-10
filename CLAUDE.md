@@ -4,29 +4,66 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Pinkas (פנקס כיס) is a self-hosted organizational knowledge wiki with hierarchical pages, approval workflows, trust-tier verification, LLM-powered Q&A, and document ingestion. It runs as a FastAPI backend + Streamlit frontend, backed by MongoDB and a local OpenAI-compatible LLM server.
+Pinkas (פנקס כיס) is a self-hosted, offline-capable organizational knowledge wiki with hierarchical pages, approval workflows, trust-tier verification, LLM-powered Q&A, and document ingestion. It runs as a FastAPI backend + Streamlit frontend, backed by MongoDB (always required for GridFS file storage) and optionally PostgreSQL for structured data. Q&A and document processing require a local OpenAI-compatible LLM server (vLLM, Ollama, LM Studio, etc.).
+
+## Prerequisites
+
+- **Python** 3.11+
+- **MongoDB** 6.0+ (7.x recommended) — always required for file storage (GridFS)
+- **PostgreSQL** 14+ (optional — default backend is MongoDB; see [Storage Backend](#storage-backend) below)
+- A local **OpenAI-compatible LLM server** (vLLM, Ollama, LM Studio, etc.) for Q&A and document processing features
+
+## Installation
+
+### Standard install
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Offline / air-gapped install
+
+On a machine with internet, pre-download all wheels:
+
+```bash
+pip download -r requirements.txt -d ./wheels
+```
+
+Transfer the `wheels/` directory to the target machine, then:
+
+```bash
+pip install --no-index --find-links=./wheels -r requirements.txt
+```
+
+## Configuration
+
+Environment variables are loaded from `.env` (see `app/config.py` for defaults). Key settings:
+
+- `DB_BACKEND`: `mongodb` (default) or `postgres` — controls where pages, users, workflows are stored
+- `OPENAI_BASE_URL` / `OPENAI_MODEL` — point to a local LLM server (Ollama, vLLM, LM Studio, etc.)
+- `MONGO_URI`, `MONGO_DB` — MongoDB is **always required** for file storage (GridFS), even when using Postgres for structured data
+
+## Storage Backend
+
+MongoDB is **always required** for file uploads (GridFS). The `DB_BACKEND` env var controls where structured data (pages, users, workflows) is stored:
+
+- **MongoDB** (default): all data in MongoDB
+- **Postgres**: structured data in Postgres, files still in MongoDB GridFS
+
+See `.claude/rules/postgres-migrations.md` for migration management and reset procedures.
 
 ## Commands
 
 ```bash
-# Install
+# Install & run
 python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8080    # API (port 8080)
+streamlit run streamlit_app/app.py --server.port 8501  # UI (port 8501)
 
-# Run API server
-uvicorn app.main:app --host 0.0.0.0 --port 8080
-
-# Run Streamlit GUI
-streamlit run streamlit_app/app.py --server.port 8501
-
-# Database setup (indexes + seed data)
-python init_db.py
-python seed_db.py
-
-# Run all tests (uses mongomock — no MongoDB needed)
+# Tests (no external services needed — uses mongomock + SQLite)
 pytest tests/ -v
-
-# Run a single test file or test
-pytest tests/test_workflows.py -v
 pytest tests/test_workflows.py::test_no_workflow_auto_publish -v
 
 # Docker
@@ -39,13 +76,15 @@ docker-compose up -d
 
 **Central mutation seam:** All page create/edit/delete operations flow through `app/services/mutations.py:apply_page_mutation()`. This function decides whether to publish directly or route through a workflow based on the user's `workflow_id`. Trust-tier promotion (verified) and reference persistence also happen here.
 
-**LLM integration (app/llm/):**
-- `client.py` — OpenAI-compatible client setup and generic `_call_llm_json` helper
-- `retrieval.py` — Q&A with tool-calling loop (the LLM calls a `retrieve` tool to search pages)
-- `pipeline.py` — 3-phase document ingestion orchestrator (extract → dedup → create/merge)
-- `ingestion.py` — Individual LLM calls for each pipeline phase
+**LLM integration:**
+- `app/llm/client.py` — OpenAI-compatible client setup and JSON response parsing
+- `app/llm/retrieval.py` — Q&A with tool-calling loop (LLM calls a `retrieve` tool to search pages)
+- `app/llm/pipeline.py` — 3-phase document ingestion orchestrator (extract → dedup → create/merge)
+- `app/llm/ingestion.py` — Individual LLM calls for each pipeline phase
+- `app/routers/produce.py` — HTTP endpoints for document ingestion
+- `app/IP/prompts/` — Prompt templates for ingestion and retrieval workflows
 
-**Permission model:** Hierarchical. Users have `page_permissions` (list of page IDs) granting access to those pages and all descendants. Admins see everything. Resolved in `app/services/permissions.py`.
+**Permission model:** Classification-based. Pages carry a `classification` list of `ClassificationTriangle` objects. Access is resolved via `app/services/permissions.py` using classification matching.
 
 **Trust tiers:** Pages carry `unverified` → `source_checked` (reserved) → `verified`. Verification is pinned to a content hash; content changes set `trust_is_stale`. The retrieval layer sorts by trust tier then inbound link count.
 
@@ -56,8 +95,4 @@ docker-compose up -d
 
 ## Testing
 
-Tests use `pytest-asyncio` with `asyncio_mode = auto`. The `conftest.py` fixture replaces MongoDB with `mongomock-motor` (in-memory), so all tests run without external services. LLM-dependent code paths are not covered by the existing test suite.
-
-## Configuration
-
-Environment variables loaded via pydantic-settings from `.env` (see `app/config.py`). Key vars: `MONGO_URI`, `MONGO_DB`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `SCHEDULER_HOUR`, `SCHEDULER_MINUTE`.
+Tests use `pytest-asyncio` and parametrize across both backends: MongoDB (via mongomock-motor) and Postgres (via SQLite in-memory). No external services needed. LLM-dependent code paths are not covered.

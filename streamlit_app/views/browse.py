@@ -3,37 +3,106 @@
 import streamlit as st
 
 from streamlit_app.strings import UI
-from streamlit_app.helpers import api_get, format_date, get_status_display, API_URL
+from streamlit_app.helpers import api_get, format_date, get_status_display, get_allowed_tags, API_URL
 from streamlit_app.state import (
     USER_DATA, VIEWING_PAGE, EDITING_PAGE, PP_CTX,
+    BROWSE_SELECTED_TAG, BROWSE_EXPANDED_IDS,
     NAV_BROWSE, NAV_CREATE,
     navigate_to,
 )
 
+UNTAGGED = "__untagged__"
 
-def _build_tree(pages: list) -> dict:
-    """Build a nested tree structure from flat page list."""
+
+def _filter_tag_chain(pages: list, selected_tag: str) -> tuple[list, dict]:
+    """Restrict pages to those carrying selected_tag (or untagged) plus their structural ancestors."""
     by_id = {p["page_id"]: p for p in pages}
-    roots = []
-    children = {}
+
+    def qualifies(p: dict) -> bool:
+        tags = p.get("tags") or []
+        return not tags if selected_tag == UNTAGGED else selected_tag in tags
+
+    included_ids: set[str] = set()
     for p in pages:
-        parent = p.get("parent_id")
-        if not parent or parent not in by_id:
-            roots.append(p)
-        else:
-            children.setdefault(parent, []).append(p)
-    return roots, children
+        if not qualifies(p):
+            continue
+        visited: set[str] = set()
+        cur = p
+        while cur and cur["page_id"] not in visited:
+            visited.add(cur["page_id"])
+            included_ids.add(cur["page_id"])
+            parent_id = cur.get("parent_id")
+            cur = by_id.get(parent_id) if parent_id else None
+
+    filtered = [p for p in pages if p["page_id"] in included_ids]
+    children_by_parent: dict = {}
+    for p in filtered:
+        parent_id = p.get("parent_id")
+        if parent_id in included_ids:
+            children_by_parent.setdefault(parent_id, []).append(p)
+    roots = [p for p in filtered if not p.get("parent_id") or p["parent_id"] not in included_ids]
+    return roots, children_by_parent
 
 
-def _render_tree_node(page: dict, children: dict, level: int, user_id: str):
-    """Render a tree node with expander."""
+def _render_tag_tree_node(page: dict, children_by_parent: dict, level: int):
+    """Render a tree node; a single click toggles its children and loads its detail panel."""
+    expanded_ids = st.session_state[BROWSE_EXPANDED_IDS]
+    pid = page["page_id"]
+    kids = children_by_parent.get(pid, [])
     prefix = "─ " * level
-    label = f"{prefix}📄 {page['title']}"
-    if st.button(label, key=f"tree_{page['page_id']}"):
-        st.session_state[VIEWING_PAGE] = page["page_id"]
+    icon = "📂" if kids else "📄"
+    label = f"{prefix}{icon} {page['title']}"
+    if st.button(label, key=f"tagtree_{pid}"):
+        st.session_state[VIEWING_PAGE] = pid
+        if pid in expanded_ids:
+            expanded_ids.discard(pid)
+        else:
+            expanded_ids.add(pid)
         st.rerun()
-    for child in children.get(page["page_id"], []):
-        _render_tree_node(child, children, level + 1, user_id)
+    if pid in expanded_ids:
+        for child in kids:
+            _render_tag_tree_node(child, children_by_parent, level + 1)
+
+
+def _render_layer1(pages: list, user_id: str):
+    """Layer 1: one folder per tag, plus an untagged folder."""
+    st.subheader(UI["tag_folders"])
+    allowed_tags = get_allowed_tags(user_id)
+    counts = {t: 0 for t in allowed_tags}
+    untagged_count = 0
+    for p in pages:
+        p_tags = p.get("tags") or []
+        if not p_tags:
+            untagged_count += 1
+        else:
+            for t in p_tags:
+                if t in counts:
+                    counts[t] += 1
+    for tag in allowed_tags:
+        if st.button(f"📁 {tag} ({counts[tag]})", key=f"tagfolder_{tag}"):
+            st.session_state[BROWSE_SELECTED_TAG] = tag
+            st.session_state[BROWSE_EXPANDED_IDS] = set()
+            st.rerun()
+    if st.button(f"📁 {UI['untagged_folder']} ({untagged_count})", key="tagfolder_untagged"):
+        st.session_state[BROWSE_SELECTED_TAG] = UNTAGGED
+        st.session_state[BROWSE_EXPANDED_IDS] = set()
+        st.rerun()
+
+
+def _render_layer2(pages: list):
+    """Layer 2: the hierarchy chain leading to pages carrying the selected tag."""
+    selected = st.session_state[BROWSE_SELECTED_TAG]
+    label = UI["untagged_folder"] if selected == UNTAGGED else selected
+    if st.button(f"← {UI['back_to_folders']}"):
+        st.session_state[BROWSE_SELECTED_TAG] = None
+        st.session_state[BROWSE_EXPANDED_IDS] = set()
+        st.rerun()
+    st.subheader(f"{UI['page_tree']}: {label}")
+    roots, children_by_parent = _filter_tag_chain(pages, selected)
+    if not roots:
+        st.info(UI["no_pages"])
+    for root in roots:
+        _render_tag_tree_node(root, children_by_parent, 0)
 
 
 def render(user_id: str):
@@ -41,18 +110,22 @@ def render(user_id: str):
 
     if VIEWING_PAGE not in st.session_state:
         st.session_state[VIEWING_PAGE] = None
+    if BROWSE_SELECTED_TAG not in st.session_state:
+        st.session_state[BROWSE_SELECTED_TAG] = None
+    if BROWSE_EXPANDED_IDS not in st.session_state:
+        st.session_state[BROWSE_EXPANDED_IDS] = set()
 
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        st.subheader(UI["page_tree"])
         tree_data = api_get("/pages/tree", user_id=user_id)
-        if tree_data:
-            roots, children = _build_tree(tree_data)
-            for root in roots:
-                _render_tree_node(root, children, 0, user_id)
-        else:
+        if not tree_data:
+            st.subheader(UI["page_tree"])
             st.info(UI["no_pages"])
+        elif st.session_state[BROWSE_SELECTED_TAG] is None:
+            _render_layer1(tree_data, user_id)
+        else:
+            _render_layer2(tree_data)
 
     with col2:
         if st.session_state[VIEWING_PAGE]:

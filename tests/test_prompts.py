@@ -1,8 +1,8 @@
-"""Unit tests for app/prompts/ — pure function coverage, no LLM calls needed."""
+"""Unit tests for app/IP/prompts/ — pure function coverage, no LLM calls needed."""
 
 import pytest
 
-from app.prompts.ingestion import (
+from app.IP.prompts.ingestion import (
     EXTRACT_TOPICS_SYSTEM,
     GENERATE_CONTENT_SYSTEM,
     JUDGE_DUPLICATE_SYSTEM,
@@ -12,7 +12,7 @@ from app.prompts.ingestion import (
     build_judge_duplicate_user,
     build_merge_content_user,
 )
-from app.prompts.retrieval import QA_SYSTEM_PROMPT, RETRIEVE_TOOL
+from app.IP.prompts.retrieval import QA_SYSTEM_PROMPT, RETRIEVE_TOOL
 
 
 # ---------------------------------------------------------------------------

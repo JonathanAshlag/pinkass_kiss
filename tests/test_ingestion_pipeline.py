@@ -149,7 +149,7 @@ async def test_pipeline_ignores_low_confidence_duplicate(editor, page_repo, req_
 
     with (
         patch("app.llm.pipeline.extract_topic_candidates", AsyncMock(return_value=[
-            {"title": "Security Policy", "description": "Maybe related"}
+            {"title": "Security Policy Draft", "description": "Maybe related"}
         ])),
         patch("app.llm.pipeline.judge_duplicate", AsyncMock(return_value={
             "is_duplicate": True,

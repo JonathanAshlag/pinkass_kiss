@@ -55,14 +55,87 @@ class MongoPageRepository(PageRepository):
             return []
         return [HistoryEntry(**h) for h in doc.get("history", [])]
 
-    async def search(
+    async def fuzzy_search_scored(
         self,
         query: str,
         statuses: list[str],
         limit: int,
         fields: Optional[list[str]] = None,
+        tags: Optional[list[str]] = None,
     ) -> list[dict]:
+        """Fuzzy-search with numeric score. Try $text first (real score), fall back to rank-based."""
         mongo_filter: dict = {"status": {"$in": statuses}}
+        if tags:
+            mongo_filter["tags"] = {"$in": tags}
+
+        required = {"classification", "trust_tier", "inbound_link_count", "page_id"}
+        projection: Optional[dict] = None
+        if fields is not None:
+            projection = {f: 1 for f in set(fields) | required}
+            projection["_id"] = 0
+
+        results: list[dict] = []
+        try:
+            # Try $text search with textScore
+            text_filter = {"$text": {"$search": query}, **mongo_filter}
+            cursor = (
+                self._db.pages.find(text_filter, projection).limit(limit)
+                if projection
+                else self._db.pages.find(text_filter).limit(limit)
+            )
+            async for doc in cursor:
+                doc.pop("_id", None)
+                # Extract text score if available from the query; Mongo doesn't return it by default
+                # Fall back to rank-based scoring
+                results.append(doc)
+        except Exception:
+            # No $text index or query failed; fall back to fuzzy_search_by_name and add rank-based scores
+            results = await self.fuzzy_search_by_name(query, statuses, limit, fields, tags=tags)
+
+        # Add rank-based score if not already present (for both $text and fallback paths)
+        for i, d in enumerate(results):
+            if "score" not in d:
+                d["score"] = max(0.0, 1.0 - i * 0.05)
+
+        return results
+
+    async def list_scannable_pages(
+        self,
+        fields: Optional[list[str]] = None,
+    ) -> list[dict]:
+        """Return all published pages for passive-scan caching (complete, not limited)."""
+        mongo_filter = {"status": "published"}
+
+        required = {"classification", "trust_tier", "inbound_link_count", "page_id"}
+        projection: Optional[dict] = None
+        if fields is not None:
+            projection = {f: 1 for f in set(fields) | required}
+            projection["_id"] = 0
+
+        results: list[dict] = []
+        cursor = (
+            self._db.pages.find(mongo_filter, projection)
+            if projection
+            else self._db.pages.find(mongo_filter)
+        )
+        async for doc in cursor:
+            doc.pop("_id", None)
+            results.append(doc)
+
+        return results
+
+    async def search_by_name(
+        self,
+        query: str,
+        statuses: list[str],
+        limit: int,
+        fields: Optional[list[str]] = None,
+        tags: Optional[list[str]] = None,
+    ) -> list[dict]:
+        """Match pages by title or alias only (not content/description)."""
+        mongo_filter: dict = {"status": {"$in": statuses}}
+        if tags:
+            mongo_filter["tags"] = {"$in": tags}
 
         required = {"classification", "trust_tier", "inbound_link_count", "page_id"}
         projection: Optional[dict] = None
@@ -94,7 +167,7 @@ class MongoPageRepository(PageRepository):
         return results
 
     async def get_tree_nodes(self) -> list[dict]:
-        projection = {"page_id": 1, "title": 1, "parent_id": 1, "status": 1, "classification": 1, "_id": 0}
+        projection = {"page_id": 1, "title": 1, "parent_id": 1, "status": 1, "classification": 1, "tags": 1, "_id": 0}
         cursor = self._db.pages.find({"status": {"$ne": "deleted"}}, projection)
         nodes = []
         async for doc in cursor:

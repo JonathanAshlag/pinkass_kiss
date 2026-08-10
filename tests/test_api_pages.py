@@ -14,6 +14,7 @@ from app.container import _page_repo, _user_repo, _workflow_repo, _request_repo,
 from app.models.user import User, PermissionLevel
 from app.models.workflow import WorkflowCreate
 from app.services.workflows import create_workflow
+from app.IP.tags import ALLOWED_TAGS
 
 
 @pytest.fixture
@@ -80,6 +81,23 @@ async def test_create_page_returns_published(client, editor):
     body = resp.json()
     assert body["status"] == "published"
     assert "page_id" in body["page"]
+    assert body["page"]["page_id"] == "Hello"
+
+
+async def test_create_page_with_duplicate_title_returns_409(client, editor):
+    first = await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "Dup Title", "description": "Desc", "content": "Body"},
+    )
+    assert first.status_code == 200
+
+    second = await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "Dup Title", "description": "Other", "content": "Other body"},
+    )
+    assert second.status_code == 409
 
 
 async def test_create_page_with_workflow_returns_pending(client, user_repo, wf_repo):
@@ -220,6 +238,273 @@ async def test_search_returns_published_pages(client, editor):
     )
     assert resp.status_code == 200
     assert any(p["title"] == "Searchable Title" for p in resp.json())
+
+
+async def test_search_matches_alias(client, editor):
+    await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={
+            "title": "Canine Overview",
+            "description": "D",
+            "content": "C",
+            "aliases": ["Canis lupus familiaris"],
+        },
+    )
+    resp = await client.get(
+        "/pages/search",
+        params={"query": "Canis"},
+        headers={"X-User-Id": editor.user_id},
+    )
+    assert resp.status_code == 200
+    assert any(p["title"] == "Canine Overview" for p in resp.json())
+
+
+# ---------------------------------------------------------------------------
+# Aliases
+# ---------------------------------------------------------------------------
+
+async def test_create_and_update_aliases_round_trip(client, editor):
+    create = await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "Aliased", "description": "D", "content": "C", "aliases": ["Alpha", "Beta"]},
+    )
+    page_id = create.json()["page"]["page_id"]
+
+    resp = await client.get(f"/pages/{page_id}", headers={"X-User-Id": editor.user_id})
+    assert resp.json()["aliases"] == ["Alpha", "Beta"]
+
+    await client.put(
+        f"/pages/{page_id}",
+        headers={"X-User-Id": editor.user_id},
+        json={"aliases": ["Gamma"]},
+    )
+    resp = await client.get(f"/pages/{page_id}", headers={"X-User-Id": editor.user_id})
+    assert resp.json()["aliases"] == ["Gamma"]
+
+
+# ---------------------------------------------------------------------------
+# Tags
+# ---------------------------------------------------------------------------
+
+async def test_create_page_with_valid_tags(client, editor):
+    tag_a, tag_b = ALLOWED_TAGS[0], ALLOWED_TAGS[1]
+    create = await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "Tagged", "description": "D", "content": "C", "tags": [tag_a, tag_b]},
+    )
+    page_id = create.json()["page"]["page_id"]
+
+    resp = await client.get(f"/pages/{page_id}", headers={"X-User-Id": editor.user_id})
+    assert resp.json()["tags"] == [tag_a, tag_b]
+
+    tag_c = ALLOWED_TAGS[2]
+    await client.put(
+        f"/pages/{page_id}",
+        headers={"X-User-Id": editor.user_id},
+        json={"tags": [tag_c]},
+    )
+    resp = await client.get(f"/pages/{page_id}", headers={"X-User-Id": editor.user_id})
+    assert resp.json()["tags"] == [tag_c]
+
+
+async def test_create_page_rejects_unknown_tag(client, editor):
+    resp = await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "Bad Tag", "description": "D", "content": "C", "tags": ["not-a-real-tag"]},
+    )
+    assert resp.status_code == 422
+
+
+async def test_search_filters_by_tags(client, editor):
+    tag_match, tag_other = ALLOWED_TAGS[0], ALLOWED_TAGS[1]
+    await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "Tag Match Page", "description": "D", "content": "C", "tags": [tag_match]},
+    )
+    await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "Tag Match Other", "description": "D", "content": "C", "tags": [tag_other]},
+    )
+    resp = await client.get(
+        "/pages/search",
+        params={"query": "Tag Match", "tags": [tag_match]},
+        headers={"X-User-Id": editor.user_id},
+    )
+    assert resp.status_code == 200
+    titles = [p["title"] for p in resp.json()]
+    assert "Tag Match Page" in titles
+    assert "Tag Match Other" not in titles
+
+
+async def test_list_allowed_tags_endpoint(client, editor):
+    resp = await client.get("/pages/tags", headers={"X-User-Id": editor.user_id})
+    assert resp.status_code == 200
+    assert resp.json()["tags"] == ALLOWED_TAGS
+
+
+# ---------------------------------------------------------------------------
+# Tag inheritance
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+async def approver(user_repo):
+    u = User(user_id="approver1", name="Approver", permission_level=PermissionLevel.editor)
+    await user_repo.create(u)
+    return u
+
+
+@pytest.fixture
+async def wf_editor(user_repo, wf_repo, approver):
+    wf = await create_workflow(WorkflowCreate(name="one-step", steps=[approver.user_id]), "admin", wf_repo)
+    u = User(
+        user_id="wf_editor1", name="WF Editor",
+        permission_level=PermissionLevel.editor,
+        workflow_id=wf.workflow_id,
+    )
+    await user_repo.create(u)
+    return u
+
+
+async def test_create_child_inherits_parent_tags(client, editor):
+    tag_a, tag_b = ALLOWED_TAGS[0], ALLOWED_TAGS[1]
+    parent = (await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "Parent", "description": "D", "content": "C", "tags": [tag_a]},
+    )).json()["page"]["page_id"]
+
+    child = (await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "Child", "description": "D", "content": "C", "parent_id": parent, "tags": [tag_b]},
+    )).json()["page"]["page_id"]
+
+    resp = await client.get(f"/pages/{child}", headers={"X-User-Id": editor.user_id})
+    assert sorted(resp.json()["tags"]) == sorted({tag_a, tag_b})
+
+
+async def test_reparent_only_merges_new_parent_tags(client, editor):
+    tag_a, tag_b = ALLOWED_TAGS[0], ALLOWED_TAGS[1]
+    parent = (await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "Parent2", "description": "D", "content": "C", "tags": [tag_a]},
+    )).json()["page"]["page_id"]
+
+    child = (await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "Child2", "description": "D", "content": "C", "tags": [tag_b]},
+    )).json()["page"]["page_id"]
+
+    await client.put(
+        f"/pages/{child}",
+        headers={"X-User-Id": editor.user_id},
+        json={"parent_id": parent},
+    )
+    resp = await client.get(f"/pages/{child}", headers={"X-User-Id": editor.user_id})
+    assert sorted(resp.json()["tags"]) == sorted({tag_a, tag_b})
+
+
+async def test_editing_parent_tags_does_not_cascade_to_existing_children(client, editor):
+    tag_a, tag_c = ALLOWED_TAGS[0], ALLOWED_TAGS[2]
+    parent = (await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "Parent3", "description": "D", "content": "C", "tags": [tag_a]},
+    )).json()["page"]["page_id"]
+
+    child = (await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "Child3", "description": "D", "content": "C", "parent_id": parent},
+    )).json()["page"]["page_id"]
+
+    resp = await client.get(f"/pages/{child}", headers={"X-User-Id": editor.user_id})
+    assert resp.json()["tags"] == [tag_a]
+
+    await client.put(
+        f"/pages/{parent}",
+        headers={"X-User-Id": editor.user_id},
+        json={"tags": [tag_a, tag_c]},
+    )
+    resp = await client.get(f"/pages/{child}", headers={"X-User-Id": editor.user_id})
+    assert resp.json()["tags"] == [tag_a]
+
+
+async def test_workflow_edit_merges_tags_and_reparent_at_approval(client, editor, wf_editor, approver):
+    tag_a, tag_b = ALLOWED_TAGS[0], ALLOWED_TAGS[1]
+    parent = (await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "WFParent", "description": "D", "content": "C", "tags": [tag_a]},
+    )).json()["page"]["page_id"]
+
+    child = (await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "WFChild", "description": "D", "content": "C"},
+    )).json()["page"]["page_id"]
+
+    edit_resp = await client.put(
+        f"/pages/{child}",
+        headers={"X-User-Id": wf_editor.user_id},
+        json={"parent_id": parent, "tags": [tag_b]},
+    )
+    assert edit_resp.json()["status"] == "pending_approval"
+    request_id = edit_resp.json()["request_id"]
+
+    decide = await client.post(
+        f"/approvals/{request_id}/decide",
+        headers={"X-User-Id": approver.user_id},
+        json={"decision": "approve"},
+    )
+    assert decide.status_code == 200
+
+    resp = await client.get(f"/pages/{child}", headers={"X-User-Id": editor.user_id})
+    assert resp.json()["parent_id"] == parent
+    assert sorted(resp.json()["tags"]) == sorted({tag_a, tag_b})
+
+
+async def test_workflow_create_unaffected_by_pending_parent_tag_edit(client, editor, wf_editor, approver):
+    tag_a, tag_b, tag_c = ALLOWED_TAGS[0], ALLOWED_TAGS[1], ALLOWED_TAGS[2]
+    parent = (await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "WFParent2", "description": "D", "content": "C", "tags": [tag_a]},
+    )).json()["page"]["page_id"]
+
+    create_resp = await client.post(
+        "/pages",
+        headers={"X-User-Id": wf_editor.user_id},
+        json={"title": "WFChild2", "description": "D", "content": "C", "parent_id": parent, "tags": [tag_b]},
+    )
+    assert create_resp.json()["status"] == "pending_approval"
+    request_id = create_resp.json()["request_id"]
+    child = create_resp.json()["page"]["page_id"]
+
+    # Parent's tags change while the create request is still pending — must not leak in on approval.
+    await client.put(
+        f"/pages/{parent}",
+        headers={"X-User-Id": editor.user_id},
+        json={"tags": [tag_a, tag_c]},
+    )
+
+    decide = await client.post(
+        f"/approvals/{request_id}/decide",
+        headers={"X-User-Id": approver.user_id},
+        json={"decision": "approve"},
+    )
+    assert decide.status_code == 200
+
+    resp = await client.get(f"/pages/{child}", headers={"X-User-Id": editor.user_id})
+    assert sorted(resp.json()["tags"]) == sorted({tag_a, tag_b})
 
 
 async def test_get_tree_includes_created_page(client, editor):
