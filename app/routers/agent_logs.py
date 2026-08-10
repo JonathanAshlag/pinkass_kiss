@@ -15,17 +15,18 @@ async def get_miss_logs(
     limit: int = Query(50, ge=1, le=200),
     admin: User = Depends(require_admin),
 ) -> dict:
-    """Get recent retrieval misses for admin review. Queries the pinkas-retrieval-* ES indices."""
+    """Get recent retrieval misses for admin review. Queries the pinkas-events-* ES indices."""
     es = get_es()
     if es is None:
         raise HTTPException(status_code=503, detail="Elasticsearch is not available")
 
     try:
         result = await es.search(
-            index="pinkas-retrieval-*",
+            index="pinkas-events-*",
             query={
                 "bool": {
                     "filter": [
+                        {"term": {"event_kind": "retrieval"}},
                         {"term": {"miss": True}},
                         {"range": {"ts": {"gte": f"now-{since_hours}h"}}},
                     ]

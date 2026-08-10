@@ -38,3 +38,4 @@ class AgentRequestContext(BaseModel):
     agent: Agent
     user: object
     session_id: str
+    request_id: str

@@ -48,7 +48,7 @@ async def scan(
     page_repo: PageRepo = None,
 ) -> ScanResponse:
     """Passively scan text for title/alias matches."""
-    return await run_scan(data.text, data.log_raw_text, ctx, page_repo)
+    return await run_scan(data.text, ctx, page_repo)
 
 
 @router.get("/bundles/{name}")

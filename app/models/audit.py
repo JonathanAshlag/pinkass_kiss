@@ -18,6 +18,7 @@ class AuditAction(str, Enum):
     create_page = "create_page"
     edit_page = "edit_page"
     delete_page = "delete_page"
+    agent_auth = "agent_auth"
 
 
 class AuditOutcome(str, Enum):
@@ -30,6 +31,7 @@ class AuditOutcome(str, Enum):
 
 class AuditLogEntry(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    request_id: Optional[str] = None
     action: AuditAction
     user_context: UserContext
     resource_id: Optional[str] = None

@@ -49,7 +49,6 @@ class FetchResponse(BaseModel):
 
 class ScanRequest(BaseModel):
     text: str
-    log_raw_text: bool = False
 
 
 class ScanMatch(BaseModel):
