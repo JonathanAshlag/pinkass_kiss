@@ -3,7 +3,7 @@
 import streamlit as st
 
 from streamlit_app.strings import UI
-from streamlit_app.helpers import api_get, format_date, get_status_display, get_allowed_tags, API_URL
+from streamlit_app.helpers import api_get, api_post, format_date, get_status_display, get_allowed_tags, API_URL
 from streamlit_app.state import (
     USER_DATA, VIEWING_PAGE, EDITING_PAGE, PP_CTX,
     BROWSE_SELECTED_TAG, BROWSE_EXPANDED_IDS,
@@ -181,5 +181,14 @@ def render(user_id: str):
                                 st.success(UI["success"])
                                 st.session_state[VIEWING_PAGE] = None
                                 st.rerun()
+
+                    if page.get("trust_tier") != "verified":
+                        if st.button(UI["request_verification"], key="request_verification_btn"):
+                            result = api_post(f"/pages/{page['page_id']}/request-verification", user_id=user_id)
+                            if result and "error" not in result:
+                                st.toast(UI["verification_requested"], icon="✅")
+                                st.rerun()
+                            else:
+                                st.error(result.get("error", "") if result else "")
             else:
                 st.error("לא ניתן לטעון את הדף")

@@ -15,6 +15,7 @@ beautifulsoup4==4.12.3
 lxml==5.3.0
 streamlit==1.41.1
 requests==2.32.3
+langchain-core==0.3.29
 sqlalchemy[asyncio]==2.0.51
 asyncpg==0.31.0
 aiosqlite>=0.18.0

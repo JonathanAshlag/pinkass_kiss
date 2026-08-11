@@ -399,6 +399,49 @@ External applications can identify themselves by sending optional headers:
 
 These are included in the `user_context` of every audit log entry.
 
+## Agent API
+
+Besides the human-facing page/UI routes, Pinkas exposes a separate **agent-facing consumption API** (`app/routers/agent_api.py`, prefix `/agent`) for AI agent clients to search and fetch wiki content over HTTP — distinct from the Q&A endpoint, which is meant for the built-in LLM retrieval loop.
+
+### Provisioning an agent
+
+An admin creates an agent identity via `POST /agents` (`x-user-id` header, admin permission required):
+
+```bash
+curl -X POST http://localhost:8080/agents -H "x-user-id: admin1" \
+  -H "Content-Type: application/json" -d '{"name": "my-agent"}'
+```
+
+The response includes an `api_key` — it is only ever returned once (only its hash is stored), so save it immediately. If `user_id` is omitted, a new read-only user is created and linked to the agent; pass an existing `user_id` to link to one instead. Other admin routes under `/agents` list/update agents and rotate keys (`POST /agents/{agent_id}/rotate-key`, which invalidates the old key).
+
+### Routes
+
+Every route below requires header `X-API-Key: <api_key>`; all except `/agent/tools` also require `X-Session-Id: <any-client-chosen-session-id>` (used to correlate an agent's calls in retrieval logs).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/agent/tools` | Returns OpenAI-style function-calling schemas for `search`/`fetch`, for tool discovery |
+| `POST` | `/agent/search` | Fuzzy search over pages by `query`; short tier (title + description) |
+| `POST` | `/agent/fetch` | Fetch full content (long tier) for explicit `page_ids` |
+| `POST` | `/agent/scan` | Passively scan arbitrary `text` for page title/alias matches |
+| `GET` | `/agent/bundles/{name}` | Fetch a curated bundle, rendered against current page content |
+
+`/agent/fetch` returns requested ids under either `results` or `unavailable`; each `unavailable` entry carries a `reason` of `not_found` (no such page, or it's deleted) or `forbidden` (the page exists but the caller's classification doesn't grant access).
+
+Bundles are authored by an admin via `PUT /bundles/{name}` (see `app/routers/bundles.py`) before an agent can fetch them.
+
+Every call to `/agent/search`, `/agent/fetch`, `/agent/scan`, and `/agent/bundles/{name}` emits a `RetrievalLogEntry`. Admins can review recent search misses via `GET /agent/logs/misses?since_hours=24&limit=50` (`x-user-id` header, admin permission required).
+
+### Example client
+
+`agent_client_example.py` at the repo root is a runnable, minimal HTTP client demonstrating all four data routes (everything except `/agent/tools`), with example queries matched against `seed_db.py`'s sample data:
+
+```bash
+python seed_db.py   # seed sample pages to search/fetch/scan against
+BASE_URL=http://localhost:8080 API_KEY=... SESSION_ID=demo-session \
+  BUNDLE_NAME=pets python agent_client_example.py
+```
+
 ## Running Tests
 
 ```bash

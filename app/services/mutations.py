@@ -5,12 +5,12 @@ from typing import Literal, Optional, Union
 
 from pydantic import BaseModel
 
-from app.models.page import PageCreate, PageUpdate, TrustTier
+from app.models.page import Page, PageCreate, PageUpdate, TrustTier
 from app.models.request import RequestType, CreatePayload, EditPayload, DeletePayload
 from app.models.user import User
-from app.storage.base import PageRepository, RequestRepository
+from app.storage.base import PageRepository, RequestRepository, UserRepository, WorkflowRepository
 from app.services.pages import create_page, update_page, delete_page, compute_content_hash, set_page_references
-from app.services.requests import create_request
+from app.services.requests import create_request, ensure_workflow_for_user
 
 
 class PublishedResult(BaseModel):
@@ -42,6 +42,9 @@ async def apply_page_mutation(
     data: PageCreate | PageUpdate | None = None,
     page_id: str | None = None,
     trust_tier: TrustTier | None = None,
+    page: Page | None = None,
+    wf_repo: WorkflowRepository | None = None,
+    user_repo: UserRepository | None = None,
 ) -> MutationResult:
     """Apply a page mutation, routing through workflow if the user has one."""
     if req_type == RequestType.create:
@@ -83,7 +86,10 @@ async def apply_page_mutation(
     elif req_type == RequestType.edit:
         assert isinstance(data, PageUpdate), "data must be PageUpdate for edit mutations"
         assert page_id is not None, "page_id required for edit mutations"
-        if user.workflow_id:
+        force_review = page is not None and page.trust_tier == TrustTier.verified
+        if user.workflow_id or force_review:
+            if force_review and not user.workflow_id:
+                await ensure_workflow_for_user(user, wf_repo, user_repo)
             payload = EditPayload(
                 title=data.title,
                 description=getattr(data, "description", None),

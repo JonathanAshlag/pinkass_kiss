@@ -101,12 +101,12 @@ async def run_fetch(
 
     results, unavailable = [], []
     for pid in page_ids:
-        if not await can_view_page(ctx.user, pid, page_repo):
-            unavailable.append(UnavailablePage(page_id=pid, reason="forbidden"))
-            continue
         page = await get_page(pid, page_repo)
         if page is None or page.status == PageStatus.deleted:
             unavailable.append(UnavailablePage(page_id=pid, reason="not_found"))
+            continue
+        if not await can_view_page(ctx.user, pid, page_repo):
+            unavailable.append(UnavailablePage(page_id=pid, reason="forbidden"))
             continue
         results.append(
             FetchHit(

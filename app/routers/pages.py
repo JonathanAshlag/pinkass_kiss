@@ -4,10 +4,10 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.container import PageRepo, RequestRepo, SourceFileRepo
+from app.container import PageRepo, RequestRepo, SourceFileRepo, UserRepo, WorkflowRepo
 from app.IP.tags import ALLOWED_TAGS
 from app.models.audit import AuditAction, AuditLogEntry, AuditOutcome, UserContext
-from app.models.page import Page, PageCreate, PageUpdate, PageStatus
+from app.models.page import Page, PageCreate, PageUpdate, PageStatus, TrustTier
 from app.models.request import RequestType
 from app.models.user import User
 from app.routers.deps import get_current_user, require_editor, get_user_context
@@ -17,6 +17,7 @@ from app.services.pages import (
     get_page, search_pages, fuzzy_search_pages, get_page_tree, get_page_history, is_trust_stale,
 )
 from app.services.permissions import can_view_page
+from app.services.requests import request_page_verification
 from app.services.source_files import cleanup_source_file_for_page
 
 router = APIRouter(prefix="/pages", tags=["pages"])
@@ -117,6 +118,8 @@ async def update_page_endpoint(
     user_context: UserContext = Depends(get_user_context),
     page_repo: PageRepo = None,
     req_repo: RequestRepo = None,
+    wf_repo: WorkflowRepo = None,
+    user_repo: UserRepo = None,
 ):
     t0 = time.perf_counter()
     if not await can_view_page(user, page_id, page_repo):
@@ -140,7 +143,21 @@ async def update_page_endpoint(
             request_path=f"/pages/{page_id}",
             ))
         raise HTTPException(status_code=404, detail="Page not found")
-    result = await apply_page_mutation(RequestType.edit, user, page_repo, req_repo, data=data, page_id=page_id)
+    try:
+        result = await apply_page_mutation(
+            RequestType.edit, user, page_repo, req_repo,
+            data=data, page_id=page_id, page=page, wf_repo=wf_repo, user_repo=user_repo,
+        )
+    except PermissionError as e:
+        emit_audit_log(AuditLogEntry(
+            action=AuditAction.edit_page,
+            user_context=user_context,
+            resource_id=page_id,
+            outcome=AuditOutcome.denied,
+            latency_ms=(time.perf_counter() - t0) * 1000,
+            request_path=f"/pages/{page_id}",
+        ))
+        raise HTTPException(status_code=403, detail=str(e))
     emit_audit_log(AuditLogEntry(
         action=AuditAction.edit_page,
         user_context=user_context,
@@ -197,3 +214,80 @@ async def delete_page_endpoint(
         request_path=f"/pages/{page_id}",
     ))
     return result
+
+
+@router.post("/{page_id}/request-verification")
+async def request_verification_endpoint(
+    page_id: str,
+    user: User = Depends(require_editor),
+    user_context: UserContext = Depends(get_user_context),
+    page_repo: PageRepo = None,
+    req_repo: RequestRepo = None,
+    wf_repo: WorkflowRepo = None,
+    user_repo: UserRepo = None,
+):
+    t0 = time.perf_counter()
+    request_path = f"/pages/{page_id}/request-verification"
+    if not await can_view_page(user, page_id, page_repo):
+        emit_audit_log(AuditLogEntry(
+            action=AuditAction.request_verification,
+            user_context=user_context,
+            resource_id=page_id,
+            outcome=AuditOutcome.denied,
+            latency_ms=(time.perf_counter() - t0) * 1000,
+            request_path=request_path,
+        ))
+        raise HTTPException(status_code=403, detail="No permission to view this page")
+    page = await get_page(page_id, page_repo)
+    if not page or page.status == PageStatus.deleted:
+        emit_audit_log(AuditLogEntry(
+            action=AuditAction.request_verification,
+            user_context=user_context,
+            resource_id=page_id,
+            outcome=AuditOutcome.not_found,
+            latency_ms=(time.perf_counter() - t0) * 1000,
+            request_path=request_path,
+        ))
+        raise HTTPException(status_code=404, detail="Page not found")
+    if page.trust_tier == TrustTier.verified:
+        emit_audit_log(AuditLogEntry(
+            action=AuditAction.request_verification,
+            user_context=user_context,
+            resource_id=page_id,
+            outcome=AuditOutcome.denied,
+            latency_ms=(time.perf_counter() - t0) * 1000,
+            request_path=request_path,
+        ))
+        raise HTTPException(status_code=400, detail="Page is already verified")
+    try:
+        req = await request_page_verification(page, user, page_repo, req_repo, wf_repo, user_repo)
+    except PermissionError as e:
+        emit_audit_log(AuditLogEntry(
+            action=AuditAction.request_verification,
+            user_context=user_context,
+            resource_id=page_id,
+            outcome=AuditOutcome.denied,
+            latency_ms=(time.perf_counter() - t0) * 1000,
+            request_path=request_path,
+        ))
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        emit_audit_log(AuditLogEntry(
+            action=AuditAction.request_verification,
+            user_context=user_context,
+            resource_id=page_id,
+            outcome=AuditOutcome.denied,
+            latency_ms=(time.perf_counter() - t0) * 1000,
+            request_path=request_path,
+        ))
+        raise HTTPException(status_code=400, detail=str(e))
+    emit_audit_log(AuditLogEntry(
+        action=AuditAction.request_verification,
+        user_context=user_context,
+        resource_id=page_id,
+        outcome=AuditOutcome.pending_approval,
+        result=req.model_dump(mode="json"),
+        latency_ms=(time.perf_counter() - t0) * 1000,
+        request_path=request_path,
+    ))
+    return req.model_dump(mode="json")

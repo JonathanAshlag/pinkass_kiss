@@ -222,6 +222,172 @@ async def test_delete_page(client, editor):
 
 
 # ---------------------------------------------------------------------------
+# Request verification
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+async def admin(user_repo):
+    u = User(user_id="admin1", name="Admin", permission_level=PermissionLevel.admin)
+    await user_repo.create(u)
+    return u
+
+
+async def test_request_verification_with_workflow_returns_pending(client, user_repo, wf_repo, editor):
+    wf = await create_workflow(WorkflowCreate(name="v-wf", steps=["approver"]), "admin", wf_repo)
+    wf_editor = User(
+        user_id="wf_ed2", name="WF Editor 2",
+        permission_level=PermissionLevel.editor,
+        workflow_id=wf.workflow_id,
+    )
+    await user_repo.create(wf_editor)
+
+    page_id = (await client.post(
+        "/pages",
+        headers={"X-User-Id": wf_editor.user_id},
+        json={"title": "To Verify", "description": "D", "content": "C"},
+    )).json()["page"]["page_id"]
+
+    resp = await client.post(
+        f"/pages/{page_id}/request-verification",
+        headers={"X-User-Id": wf_editor.user_id},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["type"] == "review"
+    assert resp.json()["status"] == "pending"
+
+
+async def test_request_verification_editor_without_workflow_returns_403(client, editor):
+    page_id = (await client.post(
+        "/pages",
+        headers={"X-User-Id": editor.user_id},
+        json={"title": "No WF Page", "description": "D", "content": "C"},
+    )).json()["page"]["page_id"]
+
+    resp = await client.post(
+        f"/pages/{page_id}/request-verification",
+        headers={"X-User-Id": editor.user_id},
+    )
+    assert resp.status_code == 403
+
+
+async def test_request_verification_admin_without_workflow_self_provisions(client, admin):
+    page_id = (await client.post(
+        "/pages",
+        headers={"X-User-Id": admin.user_id},
+        json={"title": "Admin Page", "description": "D", "content": "C"},
+    )).json()["page"]["page_id"]
+
+    resp = await client.post(
+        f"/pages/{page_id}/request-verification",
+        headers={"X-User-Id": admin.user_id},
+    )
+    assert resp.status_code == 200
+    req = resp.json()
+    assert req["type"] == "review"
+
+    decide = await client.post(
+        f"/approvals/{req['request_id']}/decide",
+        headers={"X-User-Id": admin.user_id},
+        json={"decision": "approve"},
+    )
+    assert decide.status_code == 200
+    assert decide.json()["status"] == "approved"
+
+    page = await client.get(f"/pages/{page_id}", headers={"X-User-Id": admin.user_id})
+    assert page.json()["trust_tier"] == "verified"
+
+
+async def test_request_verification_already_verified_returns_400(client, admin):
+    page_id = (await client.post(
+        "/pages",
+        headers={"X-User-Id": admin.user_id},
+        json={"title": "Twice Verified", "description": "D", "content": "C"},
+    )).json()["page"]["page_id"]
+
+    first = await client.post(
+        f"/pages/{page_id}/request-verification",
+        headers={"X-User-Id": admin.user_id},
+    )
+    await client.post(
+        f"/approvals/{first.json()['request_id']}/decide",
+        headers={"X-User-Id": admin.user_id},
+        json={"decision": "approve"},
+    )
+
+    second = await client.post(
+        f"/pages/{page_id}/request-verification",
+        headers={"X-User-Id": admin.user_id},
+    )
+    assert second.status_code == 400
+
+
+async def test_editing_verified_page_without_workflow_returns_403(client, admin, editor):
+    page_id = (await client.post(
+        "/pages",
+        headers={"X-User-Id": admin.user_id},
+        json={"title": "Locked Down", "description": "D", "content": "C"},
+    )).json()["page"]["page_id"]
+
+    verify_req = (await client.post(
+        f"/pages/{page_id}/request-verification",
+        headers={"X-User-Id": admin.user_id},
+    )).json()
+    await client.post(
+        f"/approvals/{verify_req['request_id']}/decide",
+        headers={"X-User-Id": admin.user_id},
+        json={"decision": "approve"},
+    )
+
+    resp = await client.put(
+        f"/pages/{page_id}",
+        headers={"X-User-Id": editor.user_id},
+        json={"content": "Sneaky edit"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_editing_verified_page_creates_pending_request_and_repins_on_approval(client, admin):
+    page_id = (await client.post(
+        "/pages",
+        headers={"X-User-Id": admin.user_id},
+        json={"title": "Verified And Editable", "description": "D", "content": "Before"},
+    )).json()["page"]["page_id"]
+
+    verify_req = (await client.post(
+        f"/pages/{page_id}/request-verification",
+        headers={"X-User-Id": admin.user_id},
+    )).json()
+    await client.post(
+        f"/approvals/{verify_req['request_id']}/decide",
+        headers={"X-User-Id": admin.user_id},
+        json={"decision": "approve"},
+    )
+
+    resp = await client.put(
+        f"/pages/{page_id}",
+        headers={"X-User-Id": admin.user_id},
+        json={"content": "After"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "pending_approval"
+
+    unchanged = await client.get(f"/pages/{page_id}", headers={"X-User-Id": admin.user_id})
+    assert unchanged.json()["content"] == "Before"
+
+    decide = await client.post(
+        f"/approvals/{resp.json()['request_id']}/decide",
+        headers={"X-User-Id": admin.user_id},
+        json={"decision": "approve"},
+    )
+    assert decide.status_code == 200
+
+    final = await client.get(f"/pages/{page_id}", headers={"X-User-Id": admin.user_id})
+    assert final.json()["content"] == "After"
+    assert final.json()["trust_tier"] == "verified"
+    assert final.json()["trust_is_stale"] is False
+
+
+# ---------------------------------------------------------------------------
 # Search / Tree
 # ---------------------------------------------------------------------------
 

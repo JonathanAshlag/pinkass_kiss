@@ -19,8 +19,10 @@ def render(user_id: str):
         status_display = get_status_display(req.get("status", ""))
         type_display = get_type_display(req.get("type", ""))
 
+        page_name = req.get("page_title") or req.get("page_id", "")
+
         with st.expander(
-            f"{type_display} | {status_display} | {format_date(req.get('created_at', ''))}"
+            f"{page_name} | {type_display} | {status_display} | {format_date(req.get('created_at', ''))}"
         ):
             st.markdown(f"**מזהה בקשה:** `{req['request_id']}`")
             st.markdown(f"**מזהה דף:** `{req['page_id']}`")
@@ -29,12 +31,14 @@ def render(user_id: str):
             # Show proposed content if exists
             proposed = req.get("proposed_content")
             if proposed:
-                if "title" in proposed:
+                if proposed.get("title"):
                     st.markdown(f"**כותרת מוצעת:** {proposed['title']}")
-                if "content" in proposed:
+                if proposed.get("content"):
                     with st.container():
                         st.markdown("**תוכן מוצע:**")
                         st.markdown(proposed["content"][:500])
+                if proposed.get("trust_tier") == "verified":
+                    st.markdown(f"**{UI['trust_tier_requested']}**")
 
             # History
             history = req.get("history", [])

@@ -18,6 +18,7 @@ class AuditAction(str, Enum):
     create_page = "create_page"
     edit_page = "edit_page"
     delete_page = "delete_page"
+    request_verification = "request_verification"
     agent_auth = "agent_auth"
 
 

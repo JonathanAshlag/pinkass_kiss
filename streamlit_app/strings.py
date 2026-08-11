@@ -55,6 +55,10 @@ UI = {
     "save_button": "שמור",
     "delete_button": "מחק",
     "confirm_delete": "האם למחוק את הדף?",
+    "request_verification": "בקש אימות",
+    "verification_requested": "בקשת האימות נשלחה לאישור",
+    "verification_already_pending": "כבר קיימת בקשת אימות ממתינה לדף זה",
+    "trust_tier_requested": "דרגת אמון מבוקשת: מאומת",
 
     # Parent picker
     "parent_search_label": "חיפוש דף אב",
@@ -83,12 +87,16 @@ UI = {
     "no_requests": "אין בקשות",
 
     # Approvals
-    "approvals_title": "אישורים ממתינים",
+    "approvals_title": "אישורים",
     "approve_button": "אשר",
     "reject_button": "דחה",
     "comment_field": "הערה",
-    "no_approvals": "אין אישורים ממתינים",
+    "no_approvals": "אין אישורים",
     "decision_history": "היסטוריית החלטות",
+    "pending_approvals_section": "אישורים ממתינים",
+    "no_pending_approvals": "אין אישורים ממתינים",
+    "recently_approved_section": "אושרו לאחרונה",
+    "no_recently_approved": "אין אישורים שאושרו לאחרונה",
 
     # Admin
     "admin_title": "ניהול מערכת",

@@ -14,6 +14,9 @@ VIEWING_PAGE = "viewing_page"
 BROWSE_SELECTED_TAG = "browse_selected_tag"
 BROWSE_EXPANDED_IDS = "browse_expanded_ids"
 
+# Search
+SEARCH_RESULTS = "_search_results"
+
 # Edit
 EDITING_PAGE = "editing_page"
 
