@@ -13,7 +13,7 @@ from app.models.page import (
     ClassificationTriangle, HistoryEntry, Page, PageStatus, Reference,
     ReferenceType, TrustTier,
 )
-from app.storage.base import PageRepository
+from app.storage.base import PageRepository, with_always_included_fields
 from app.infrastructure.postgres.models import PageORM, PageRefORM, PageRevisionORM
 
 
@@ -451,5 +451,5 @@ class PostgresPageRepository(PageRepository):
         if fields is None:
             return all_fields
         # Always include ranking + classification even if not in requested fields
-        required = {"classification", "trust_tier", "inbound_link_count", "page_id"}
-        return {k: v for k, v in all_fields.items() if k in set(fields) | required}
+        required = with_always_included_fields(fields)
+        return {k: v for k, v in all_fields.items() if k in required}

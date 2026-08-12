@@ -12,6 +12,27 @@ if TYPE_CHECKING:
     from app.models.bundle import Bundle
 
 
+# Fields that downstream code (permission filtering in app/services/permissions.py,
+# trust-tier sorting in app/services/pages.py) always needs present on a page
+# search/list result, regardless of which fields the caller explicitly requested.
+# Lives here — not in app/services/ — so both the service layer and every storage
+# adapter (Mongo, Postgres) can share one definition without adapters depending on
+# the service layer.
+ALWAYS_INCLUDED_FIELDS: frozenset[str] = frozenset(
+    {"classification", "trust_tier", "inbound_link_count", "page_id"}
+)
+
+
+def with_always_included_fields(fields: "list[str] | None") -> "set[str] | None":
+    """Merge caller-requested fields with ALWAYS_INCLUDED_FIELDS.
+
+    `None` is passed through unchanged since it conventionally means "all fields".
+    """
+    if fields is None:
+        return None
+    return set(fields) | ALWAYS_INCLUDED_FIELDS
+
+
 class PageRepository(ABC):
     @abstractmethod
     async def get(self, page_id: str) -> "Page | None": ...

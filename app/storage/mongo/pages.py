@@ -5,7 +5,7 @@ from typing import Optional
 from app.models.page import (
     ClassificationTriangle, HistoryEntry, Page, PageStatus, Reference, TrustTier,
 )
-from app.storage.base import PageRepository
+from app.storage.base import PageRepository, with_always_included_fields
 
 
 class MongoPageRepository(PageRepository):
@@ -68,10 +68,9 @@ class MongoPageRepository(PageRepository):
         if tags:
             mongo_filter["tags"] = {"$in": tags}
 
-        required = {"classification", "trust_tier", "inbound_link_count", "page_id"}
         projection: Optional[dict] = None
         if fields is not None:
-            projection = {f: 1 for f in set(fields) | required}
+            projection = {f: 1 for f in with_always_included_fields(fields)}
             projection["_id"] = 0
 
         results: list[dict] = []
@@ -106,10 +105,9 @@ class MongoPageRepository(PageRepository):
         """Return all published pages for passive-scan caching (complete, not limited)."""
         mongo_filter = {"status": "published"}
 
-        required = {"classification", "trust_tier", "inbound_link_count", "page_id"}
         projection: Optional[dict] = None
         if fields is not None:
-            projection = {f: 1 for f in set(fields) | required}
+            projection = {f: 1 for f in with_always_included_fields(fields)}
             projection["_id"] = 0
 
         results: list[dict] = []
@@ -137,10 +135,9 @@ class MongoPageRepository(PageRepository):
         if tags:
             mongo_filter["tags"] = {"$in": tags}
 
-        required = {"classification", "trust_tier", "inbound_link_count", "page_id"}
         projection: Optional[dict] = None
         if fields is not None:
-            projection = {f: 1 for f in set(fields) | required}
+            projection = {f: 1 for f in with_always_included_fields(fields)}
             projection["_id"] = 0
 
         results: list[dict] = []
