@@ -69,7 +69,13 @@ async def get_page(page_id: str, repo: PageRepository) -> Optional[Page]:
     return await repo.get(page_id)
 
 
-async def update_page(page_id: str, data: PageUpdate, user: User, repo: PageRepository) -> Optional[Page]:
+async def update_page(
+    page_id: str,
+    data: PageUpdate,
+    user: User,
+    repo: PageRepository,
+    trust_tier: Optional[TrustTier] = None,
+) -> Optional[Page]:
     page = await repo.get(page_id)
     if not page:
         return None
@@ -96,6 +102,14 @@ async def update_page(page_id: str, data: PageUpdate, user: User, repo: PageRepo
     if data.next_approval_date is not None:
         update_fields["next_approval_date"] = data.next_approval_date.isoformat()
     update_fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    if trust_tier == TrustTier.verified:
+        # Deferred import: mutations.py imports create_page/update_page/etc. from this
+        # module at load time, so importing back at module level would be circular.
+        # By the time update_page() actually runs, both modules are fully loaded.
+        from app.services.mutations import build_verification_fields
+        final_content = update_fields.get("content", page.content)
+        update_fields.update(build_verification_fields(final_content, user.user_id))
 
     history_entry = HistoryEntry(
         user_id=user.user_id,

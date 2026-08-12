@@ -14,7 +14,7 @@ from app.models.workflow import WorkflowCreate
 from app.storage.base import (
     PageRepository, RequestRepository, SourceFileRepository, UserRepository, WorkflowRepository,
 )
-from app.services.pages import compute_content_hash, _merge_parent_tags
+from app.services.pages import _merge_parent_tags
 from app.services.source_files import cleanup_source_file_for_page
 from app.services.users import assign_workflow
 from app.services.workflows import create_workflow
@@ -197,6 +197,10 @@ async def _apply_approved_request(
     page_repo: PageRepository,
     source_file_repo: Optional[SourceFileRepository] = None,
 ) -> None:
+    # Deferred import: mutations.py imports create_request/ensure_workflow_for_user from
+    # this module at load time, so importing back at module level would be circular.
+    from app.services.mutations import build_verification_fields
+
     page_history = HistoryEntry(user_id=approver_id, action="approve", comment=comment)
 
     if req.type in (RequestType.create, RequestType.review):
@@ -217,10 +221,7 @@ async def _apply_approved_request(
             if req.type == RequestType.review and isinstance(pc, ReviewPayload) and pc.trust_tier == TrustTier.verified.value:
                 page = await page_repo.get(req.page_id)
                 final_content = update.get("content") or (page.content if page else "")
-                update["trust_tier"] = TrustTier.verified.value
-                update["verified_content_hash"] = compute_content_hash(final_content)
-                update["verified_at"] = datetime.now(timezone.utc).isoformat()
-                update["verified_by"] = approver_id
+                update.update(build_verification_fields(final_content, approver_id))
         await page_repo.update_with_history(req.page_id, update, page_history)
 
     elif req.type == RequestType.edit:
@@ -242,9 +243,7 @@ async def _apply_approved_request(
                 update["tags"] = await _merge_parent_tags(base_tags, new_parent_id, page_repo)
         if page and page.trust_tier == TrustTier.verified:
             final_content = update.get("content") or page.content
-            update["verified_content_hash"] = compute_content_hash(final_content)
-            update["verified_at"] = datetime.now(timezone.utc).isoformat()
-            update["verified_by"] = approver_id
+            update.update(build_verification_fields(final_content, approver_id))
         await page_repo.update_with_history(req.page_id, update, page_history)
 
     elif req.type == RequestType.delete:
