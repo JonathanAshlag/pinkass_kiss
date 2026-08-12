@@ -29,7 +29,29 @@ async def create_request(
     req_repo: RequestRepository,
     page_repo: PageRepository,
     proposed_content=None,
+    actor_id: Optional[str] = None,
+    comment: Optional[str] = None,
+    set_pending_status: bool = True,
 ) -> ApprovalRequest:
+    """Create an approval request plus its initial "submitted" history entry.
+
+    `user` supplies `requested_by` and `workflow_id` (whose approval chain governs
+    the request) — for system-initiated requests (e.g. scheduler jobs) this is still
+    the page's real owner, since that's who the workflow belongs to and who should
+    see the request under "my requests".
+
+    `actor_id` overrides who is recorded as having *submitted* the request in the
+    history entry — defaults to `user.user_id` for ordinary user-initiated requests.
+    Scheduler jobs pass the "system" sentinel here, matching the existing convention
+    used for `HistoryEntry(user_id="system", ...)` elsewhere in this codebase.
+
+    `set_pending_status` controls whether create/review requests flip the page's
+    status to `pending_approval` (which hides it from default published listings
+    and Q&A retrieval). Defaults to True to match the original behavior for
+    user-initiated requests and expired-page review. Verification-drift review
+    requests pass False: a page that's merely flagged for re-verification should
+    stay visible/published while the review is pending, not disappear.
+    """
     req = ApprovalRequest(
         type=req_type,
         page_id=page_id,
@@ -40,13 +62,13 @@ async def create_request(
         status=RequestStatus.pending,
     )
     req.history.append(RequestHistoryEntry(
-        user_id=user.user_id,
+        user_id=actor_id or user.user_id,
         decision="submitted",
-        comment=f"Request type: {req_type.value}",
+        comment=comment or f"Request type: {req_type.value}",
     ))
     await req_repo.create(req)
 
-    if req_type in (RequestType.create, RequestType.review):
+    if set_pending_status and req_type in (RequestType.create, RequestType.review):
         await page_repo.update_fields(page_id, {"status": PageStatus.pending_approval.value})
 
     return req

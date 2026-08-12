@@ -7,9 +7,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import settings
 from app.container import background_repos
-from app.models.page import HistoryEntry, PageStatus, TrustTier
-from app.models.request import ApprovalRequest, RequestStatus, RequestType, RequestHistoryEntry, ReviewPayload
+from app.models.page import HistoryEntry, TrustTier
+from app.models.request import RequestType, ReviewPayload
 from app.services.pages import compute_content_hash
+from app.services.requests import create_request
 
 logger = logging.getLogger("pinkas.scheduler")
 
@@ -34,27 +35,21 @@ async def check_expired_pages() -> int:
             if existing:
                 continue
 
-            req = ApprovalRequest(
-                type=RequestType.review,
+            await create_request(
+                req_type=RequestType.review,
                 page_id=page_id,
-                requested_by=created_by,
+                user=user,
+                req_repo=repos.requests,
+                page_repo=repos.pages,
                 proposed_content=ReviewPayload(
                     title=doc.get("title"),
                     content=doc.get("content"),
                 ),
-                workflow_id=user.workflow_id,
-                current_step=0,
-                status=RequestStatus.pending,
-            )
-            req.history.append(RequestHistoryEntry(
-                user_id="system",
-                decision="submitted",
+                actor_id="system",
                 comment="Automatic review: page approval date expired",
-            ))
-            await repos.requests.create(req)
-            await repos.pages.update_with_history(
+            )
+            await repos.pages.append_history(
                 page_id,
-                {"status": PageStatus.pending_approval.value},
                 HistoryEntry(
                     user_id="system",
                     action="review_requested",
@@ -88,25 +83,21 @@ async def check_verification_drift() -> int:
             if not user or not user.workflow_id:
                 continue
 
-            req = ApprovalRequest(
-                type=RequestType.review,
+            await create_request(
+                req_type=RequestType.review,
                 page_id=page_id,
-                requested_by=doc.get("created_by", ""),
+                user=user,
+                req_repo=repos.requests,
+                page_repo=repos.pages,
                 proposed_content=ReviewPayload(
                     title=doc.get("title"),
                     content=doc.get("content"),
                     trust_tier=TrustTier.verified.value,
                 ),
-                workflow_id=user.workflow_id,
-                current_step=0,
-                status=RequestStatus.pending,
-            )
-            req.history.append(RequestHistoryEntry(
-                user_id="system",
-                decision="submitted",
+                actor_id="system",
                 comment="Automatic review: verified page content has drifted from verified hash",
-            ))
-            await repos.requests.create(req)
+                set_pending_status=False,
+            )
             await repos.pages.append_history(
                 page_id,
                 HistoryEntry(
