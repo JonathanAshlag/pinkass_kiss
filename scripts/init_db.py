@@ -1,13 +1,17 @@
 """Initialize the database for Pinkas.
 
 Run this script once before starting the application:
-    python init_db.py
+    python scripts/init_db.py
 
 Respects DB_BACKEND env var (mongodb / postgres).
 """
 
 import asyncio
 import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import settings
 

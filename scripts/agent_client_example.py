@@ -11,19 +11,19 @@ GET /agent/tools, which just returns tool schemas). Every call needs:
 
 `GET /agent/bundles/{name}` additionally needs a bundle that already exists
 (created via `PUT /bundles/{name}` as an admin, see app/routers/bundles.py), e.g.
-against the `seed_db.py` sample data:
+against the `scripts/seed_db.py` sample data:
 
   curl -X PUT $BASE_URL/bundles/pets -H "x-user-id: admin1" \
     -H "Content-Type: application/json" \
     -d '{"entries": [{"page_id": "dog", "content_form": "full_info"}, \
                       {"page_id": "cat", "content_form": "description"}]}'
 
-The demo queries below are written to match `seed_db.py`'s sample pages
-(run `python seed_db.py` first to have real data to search/fetch/scan against).
+The demo queries below are written to match `scripts/seed_db.py`'s sample pages
+(run `python scripts/seed_db.py` first to have real data to search/fetch/scan against).
 Configure via env vars and run:
 
   BASE_URL=http://localhost:8080 API_KEY=... SESSION_ID=demo-session \
-    BUNDLE_NAME=pets python agent_client_example.py
+    BUNDLE_NAME=pets python scripts/agent_client_example.py
 """
 
 import json
@@ -164,7 +164,7 @@ def get_bundle(name: str) -> str:
 
 if __name__ == "__main__":
     print(f"== search ==")
-    print(search.invoke({"query": "ho"}))  # matches the "dogs" page title in seed_db.py
+    print(search.invoke({"query": "ho"}))  # matches the "dogs" page title in scripts/seed_db.py
 
     print(f"\n== fetch (page_id=dogs) ==")
     print(fetch.invoke({"page_ids": ["dos"]}))

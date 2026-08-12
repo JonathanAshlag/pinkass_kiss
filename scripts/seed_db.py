@@ -5,12 +5,16 @@ Creates:
 - 1 workflow: two-step approval
 - Page hierarchy: Animals -> Dog, Cat, Sheep, Plants
 
-Run: python seed_db.py
+Run: python scripts/seed_db.py
 Respects DB_BACKEND env var (mongodb / postgres).
 """
 
 import asyncio
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import settings
 from app.container import background_repos

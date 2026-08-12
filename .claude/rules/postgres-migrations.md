@@ -2,7 +2,7 @@
 paths:
   - app/infrastructure/postgres/migrations/**
   - app/infrastructure/postgres/models.py
-  - init_db.py
+  - scripts/init_db.py
 ---
 
 # Postgres migrations
@@ -27,7 +27,7 @@ async def main():
 
 asyncio.run(main())
 "
-python init_db.py
+python scripts/init_db.py
 ```
 
 This is destructive — only when Postgres data is disposable.

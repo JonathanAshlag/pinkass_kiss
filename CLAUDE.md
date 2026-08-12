@@ -64,7 +64,7 @@ streamlit run streamlit_app/app.py --server.port 8501  # UI (port 8501)
 
 # Tests (no external services needed — uses mongomock + SQLite)
 pytest tests/ -v
-pytest tests/test_workflows.py::test_no_workflow_auto_publish -v
+pytest tests/integration/test_workflows.py::test_no_workflow_auto_publish -v
 
 # Docker
 docker-compose up -d

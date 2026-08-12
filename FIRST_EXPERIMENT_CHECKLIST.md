@@ -65,11 +65,27 @@ system prompts — also placeholder/demo content by the same convention as tags.
 ## 4. Reset schema / delete the toy run
 
 Per `.claude/rules/postgres-migrations.md`, this app is pre-launch, so a hard reset
-is the sanctioned path — no data to preserve from the toy run.
+is the sanctioned path — no data to preserve from the toy run. MongoDB always holds
+file blobs (GridFS) regardless of `DB_BACKEND`, so it gets wiped either way; the
+Postgres step only applies if that's your structured-data backend. Every command
+below reads config straight from `.env` via `app.config.settings` — run them from
+the repo root, no need to `export`/`source` anything first.
 
-**If staying on Postgres:**
+**If `DB_BACKEND=postgres`** — copy-paste the whole block:
 
 ```bash
+python -c "
+import asyncio
+from motor.motor_asyncio import AsyncIOMotorClient
+from app.config import settings
+
+async def main():
+    client = AsyncIOMotorClient(settings.mongo_uri)
+    await client.drop_database(settings.mongo_db)
+    client.close()
+
+asyncio.run(main())
+"
 python -c "
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -83,21 +99,37 @@ async def main():
 
 asyncio.run(main())
 "
-python init_db.py
+python scripts/init_db.py
+python scripts/create_admin.py <your_user_id> "<your name>"
 ```
 
-**If switching to / staying on MongoDB:** there's no destructive step required by
-the app itself. If you want a fully clean slate (drop the toy collections too):
+**If `DB_BACKEND=mongodb`** — copy-paste the whole block:
 
 ```bash
-# only if you want to wipe existing toy documents, not just re-ensure indexes
-mongosh "$MONGO_URI" --eval "db.getSiblingDB('$MONGO_DB').dropDatabase()"
-python init_db.py
+python -c "
+import asyncio
+from motor.motor_asyncio import AsyncIOMotorClient
+from app.config import settings
+
+async def main():
+    client = AsyncIOMotorClient(settings.mongo_uri)
+    await client.drop_database(settings.mongo_db)
+    client.close()
+
+asyncio.run(main())
+"
+python scripts/init_db.py
+python scripts/create_admin.py <your_user_id> "<your name>"
 ```
 
-- [ ] Do **not** run `seed_db.py` against this setup — it's demo/toy content
+- [ ] Replace `<your_user_id>` / `"<your name>"` in the block above with your real
+      values before running — that's the identity you'll log in with (auth is the
+      trusted `X-User-Id` header; see `app/routers/deps.py`).
+- [ ] Do **not** run `scripts/seed_db.py` against this setup — it's demo/toy content
       (same category as the placeholder tags/prompts), not something you want mixed
-      into real company IP.
+      into real company IP. It's also destructive on its own terms: it unconditionally
+      deletes every existing user/workflow/page/request before reseeding, so running
+      it here would immediately wipe the admin user you just created.
 - [ ] Confirm `MONGO_DB` in `.env` is the real database name you want, not the
       leftover toy value (`pinkass_kiss`).
 
@@ -113,9 +145,19 @@ Config lives in `app/config.py:20-25` / `.env`.
 - [ ] Rotate/replace whatever password is currently sitting in `.env` — it looks
       like a leftover from the toy run and shouldn't be reused for the real cluster.
 - [ ] Set `ES_AUDIT_ENABLED=true`.
-- [ ] Pinkas writes to `pinkas-audit-YYYY.MM` (monthly rotation) but does **not**
-      create an index template or ILM policy itself — if your org enforces ILM,
-      set that up on the ES side before traffic starts flowing.
+- [ ] Pinkas writes both audit and agent-retrieval events to `pinkas-events-YYYY.MM`
+      (monthly rotation, `event_kind` field distinguishes the two) but does **not**
+      create an index template or ILM policy itself. Dynamic mapping will work without
+      one, but the app runs exact-match `term` filters on fields like `event_kind` and
+      `mode` (`app/routers/agent_logs.py`) that need `keyword` typing to be reliable
+      across every monthly rotation — apply `es_index_template.json` once, before
+      traffic starts flowing:
+      ```bash
+      curl -X PUT "$ES_HOSTS/_index_template/pinkas-events" \
+        -H "Content-Type: application/json" \
+        --data-binary @es_index_template.json
+      ```
+      If your org enforces ILM, set that up on the ES side too, same timing.
 - [ ] `.env` is already gitignored (`.gitignore` — `.env`, `.env.*`, keeps
       `.env.example`) — don't override that.
 
@@ -123,15 +165,15 @@ Config lives in `app/config.py:20-25` / `.env`.
 
 ```bash
 # with mongo, postgres (if used), elasticsearch, and your LLM server all reachable
-python init_db.py
+python scripts/init_db.py
 uvicorn app.main:app --host 0.0.0.0 --port 8080 &
 streamlit run streamlit_app/app.py --server.port 8501
 ```
 
 - [ ] Create one real page using a real tag; confirm `GET /pages/tags` returns your
       real taxonomy (not the animal-themed placeholder list).
-- [ ] Confirm an audit doc lands in `pinkas-audit-<current-YYYY.MM>` in your real ES
-      cluster after that page create.
+- [ ] Confirm an audit doc lands in `pinkas-events-<current-YYYY.MM>` (filter on
+      `event_kind: audit`) in your real ES cluster after that page create.
 - [ ] If classification is enabled: create one classified page and verify a user
       without the matching triangle is denied, and one with it is allowed.
 - [ ] Confirm `OPENAI_BASE_URL`/`OPENAI_MODEL` in `.env` still point at a reachable

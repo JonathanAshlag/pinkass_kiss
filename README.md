@@ -93,9 +93,16 @@ DB_BACKEND=mongodb  # or omit — mongodb is the default
 Initialize indexes and seed demo data:
 
 ```bash
-python init_db.py   # creates indexes
-python seed_db.py   # creates sample users, workflow, and page hierarchy
+python scripts/init_db.py   # creates indexes
+python scripts/seed_db.py   # creates sample users, workflow, and page hierarchy
 ```
+
+> ⚠️ **`scripts/seed_db.py` is destructive.** It unconditionally deletes *every* existing
+> user, workflow, page, and request before inserting the demo data — not just data it
+> seeded on a previous run. Only run it against a database you're fine wiping. For a real
+> deployment, use `scripts/create_admin.py` instead (see [First Experiment
+> Checklist](FIRST_EXPERIMENT_CHECKLIST.md)) — it provisions one admin user and touches
+> nothing else.
 
 ### PostgreSQL
 
@@ -118,13 +125,14 @@ alembic upgrade head
 Create MongoDB indexes (GridFS needs this even in Postgres mode):
 
 ```bash
-python init_db.py
+python scripts/init_db.py
 ```
 
-Seed demo data (uses the same script — reads `DB_BACKEND` from `.env`):
+Seed demo data (uses the same script — reads `DB_BACKEND` from `.env`; ⚠️ destructive,
+see warning above):
 
 ```bash
-python seed_db.py
+python scripts/seed_db.py
 ```
 
 The PostgreSQL schema normalizes page history into a `page_revisions` table and page references into a `page_refs` table (for efficient backlink queries). Classification and metadata are stored as JSONB. Full-text search uses a generated `tsvector` column with a GIN index.
@@ -153,10 +161,10 @@ async def main():
 
 asyncio.run(main())
 "
-python init_db.py
+python scripts/init_db.py
 ```
 
-This is destructive — only do it when the Postgres data is disposable. Once the schema is stable in production, migrations should be added as new revisions instead of rewritten in place.
+⚠️ **Destructive** — `DROP SCHEMA ... CASCADE` deletes all Postgres tables and data. Only do this when the Postgres data is disposable. Once the schema is stable in production, migrations should be added as new revisions instead of rewritten in place.
 
 ## Running
 
@@ -236,9 +244,10 @@ sudo systemctl start pinkas-api pinkas-ui
 
 ## Quick-Start Walkthrough
 
-1. **Seed the database:**
+1. **Seed the database** (⚠️ destructive — wipes existing users/workflows/pages/requests
+   first; see [Storage Backend](#storage-backend)):
    ```bash
-   python seed_db.py
+   python scripts/seed_db.py
    ```
 
 2. **Start the API and UI** (in separate terminals or via systemd)
@@ -373,10 +382,19 @@ ES_CLOUD_ID=my-deployment:dXMtY2VudHJhbC...
 
 ### Index pattern
 
-Audit documents are indexed to `pinkas-audit-YYYY.MM` (monthly rotation). Each document contains:
+Audit documents are indexed to `pinkas-events-YYYY.MM` (monthly rotation) — the same
+index also receives agent-retrieval log entries (see [Agent API](#agent-api)); an
+`event_kind` field (`audit` / `retrieval`) distinguishes the two. Pinkas doesn't create
+an index template itself; apply `es_index_template.json` (repo root) once via `PUT
+_index_template/pinkas-events` before traffic starts flowing — dynamic mapping works
+without it, but the app runs exact-match `term` filters on fields like `event_kind` and
+`mode` that need `keyword` typing to stay reliable across every monthly rotation.
+
+Audit documents (`event_kind: audit`) contain:
 
 | Field | Description |
 |-------|-------------|
+| `event_kind` | Always `audit` for these documents |
 | `timestamp` | UTC ISO-8601 timestamp |
 | `action` | `ask`, `create_page`, `edit_page`, `delete_page` |
 | `user_context.user_id` | The acting user |
@@ -434,12 +452,12 @@ Every call to `/agent/search`, `/agent/fetch`, `/agent/scan`, and `/agent/bundle
 
 ### Example client
 
-`agent_client_example.py` at the repo root is a runnable, minimal HTTP client demonstrating all four data routes (everything except `/agent/tools`), with example queries matched against `seed_db.py`'s sample data:
+`scripts/agent_client_example.py` is a runnable, minimal HTTP client demonstrating all four data routes (everything except `/agent/tools`), with example queries matched against `scripts/seed_db.py`'s sample data:
 
 ```bash
-python seed_db.py   # seed sample pages to search/fetch/scan against
+python scripts/seed_db.py   # ⚠️ destructive — seed sample pages to search/fetch/scan against
 BASE_URL=http://localhost:8080 API_KEY=... SESSION_ID=demo-session \
-  BUNDLE_NAME=pets python agent_client_example.py
+  BUNDLE_NAME=pets python scripts/agent_client_example.py
 ```
 
 ## Running Tests
@@ -510,10 +528,15 @@ pinkas/
 │   ├── strings.py               # Hebrew UI strings
 │   ├── helpers.py               # API client + RTL helpers
 │   └── views/                   # browse.py, search.py, create_edit.py, ask_page.py, …
+├── scripts/                     # Standalone operational scripts (see below)
+│   ├── init_db.py                # Create MongoDB indexes / run Postgres migrations
+│   ├── seed_db.py                # ⚠️ destructive — wipes existing data, seeds demo users/workflow/pages
+│   ├── create_admin.py           # Create a single real admin user (no demo data)
+│   ├── bulk_upload_terms.py      # Bulk-import a JSON list of terms as pages
+│   └── agent_client_example.py   # Minimal example client for the agent-api
 ├── tests/                       # pytest suite (each test runs against both backends)
-├── init_db.py                   # Create MongoDB indexes
-├── seed_db.py                   # Seed demo data
 ├── alembic.ini                  # Points to app/infrastructure/postgres/migrations/
+├── es_index_template.json       # Optional index template for pinkas-events-* (see Audit Logging)
 ├── requirements.txt
 ├── .env.example
 ├── docker-compose.yml

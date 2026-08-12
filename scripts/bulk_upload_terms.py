@@ -25,7 +25,7 @@ user has one). Re-running against the same file is safe — pages already create
 (title already taken -> 409) are reported as skipped, not failed.
 
 Usage:
-  ADMIN_USER_ID=admin1 BASE_URL=http://localhost:8080 python bulk_upload_terms.py terms.json
+  ADMIN_USER_ID=admin1 BASE_URL=http://localhost:8080 python scripts/bulk_upload_terms.py terms.json
 """
 
 import json
@@ -130,7 +130,7 @@ def upload_term(user_id: str, term: dict) -> str:
 
 def main() -> None:
     if len(sys.argv) != 2:
-        sys.exit("usage: python bulk_upload_terms.py <terms.json>")
+        sys.exit("usage: python scripts/bulk_upload_terms.py <terms.json>")
 
     terms = load_terms(sys.argv[1])
     user_id = ensure_import_user()

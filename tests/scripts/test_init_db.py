@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from mongomock_motor import AsyncMongoMockClient
 
-import init_db
+from scripts import init_db
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,57 @@
+{
+  "index_patterns": ["pinkas-events-*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 1
+    },
+    "mappings": {
+      "properties": {
+        "event_kind": { "type": "keyword" },
+
+        "timestamp": { "type": "date" },
+        "request_id": { "type": "keyword" },
+        "action": { "type": "keyword" },
+        "user_context": {
+          "properties": {
+            "user_id": { "type": "keyword" },
+            "client_application_id": { "type": "keyword" },
+            "client_session_id": { "type": "keyword" }
+          }
+        },
+        "resource_id": { "type": "keyword" },
+        "outcome": { "type": "keyword" },
+        "result": { "type": "flattened" },
+        "request_path": { "type": "keyword" },
+
+        "ts": { "type": "date" },
+        "agent_id": { "type": "keyword" },
+        "session_id": { "type": "keyword" },
+        "mode": { "type": "keyword" },
+        "query": { "type": "text" },
+        "matched_spans": { "type": "text" },
+        "page_ids": { "type": "keyword" },
+        "tiers": { "type": "keyword" },
+        "scores": { "type": "float" },
+        "candidates_not_returned": {
+          "properties": {
+            "page_id": { "type": "keyword" },
+            "title": { "type": "text" },
+            "score": { "type": "float" }
+          }
+        },
+        "unavailable": {
+          "properties": {
+            "page_id": { "type": "keyword" },
+            "reason": { "type": "text" }
+          }
+        },
+        "bundle_name": { "type": "keyword" },
+        "miss": { "type": "boolean" },
+        "error": { "type": "text" },
+
+        "latency_ms": { "type": "float" }
+      }
+    }
+  }
+}
