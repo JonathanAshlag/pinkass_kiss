@@ -29,16 +29,27 @@ ALLOWED_TAGS: list[str] = [
 ]
 ```
 
-- [ ] Replace `ALLOWED_TAGS` with the real list.
+- [ ] Replace `ALLOWED_TAGS` with the real list. This has no dependency on
+      `scripts/init_db.py` or the database — tags aren't stored anywhere, they're a
+      plain Python list loaded into memory, so you can edit this file independently,
+      before or after resetting the DB.
 - [ ] Tags are a **closed vocabulary** — `PageCreate`/`PageUpdate` reject anything not
       in this list with HTTP 422 (`app/models/page.py:74-121`). Get the list right
       before anyone starts creating real pages, or edits will bounce.
+- [ ] **Restart the API process after every edit to this file.** `ALLOWED_TAGS` is
+      imported once at process startup (`app/models/page.py:10`,
+      `app/routers/pages.py:8`) — since uvicorn isn't run with `--reload` in the
+      standard setup, changes here won't take effect until you restart it.
+- [ ] Removing/renaming a tag isn't retroactive-safe: existing pages keep the old tag
+      value untouched, but the *next* edit to one of those pages will fail validation
+      (`PageUpdate` re-validates the full submitted tag list) unless that edit also
+      updates its tags.
 - [ ] Remember tag inheritance is **forward-only**: child pages inherit a parent's
       tags at write time only; changing a parent's tags later does not retroactively
       touch existing descendants.
 - [ ] `GET /pages/tags` serves this list to the Streamlit tag pickers and the
-      folder-style "עיון" browse UI — no separate UI config needed once you change
-      the Python list.
+      folder-style "עיון" browse UI — reflects the new list as soon as the API process
+      is back up, no separate UI config needed.
 
 ## 2. (Optional) Review the other `app/IP/` content
 
