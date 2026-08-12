@@ -10,7 +10,7 @@ from app.models.page import (
     PageUpdate, Reference, TrustTier,
 )
 from app.models.user import User
-from app.storage.base import PageRepository
+from app.storage.base import PageRepository, with_always_included_fields
 from app.services.classification import get_user_triangles, user_satisfies_classification
 
 logger = logging.getLogger("pinkas.pages")
@@ -131,9 +131,7 @@ async def _find_raw_docs(
     effective_fields: Optional[list[str]] = None
     if fields is not None:
         strip_classification = "classification" not in fields
-        required = ["classification", "trust_tier", "inbound_link_count"]
-        extra = [f for f in required if f not in fields]
-        effective_fields = fields + extra
+        effective_fields = list(with_always_included_fields(fields))
 
     results = await repo.search_by_name(query, status_list, limit, fields=effective_fields, tags=tags)
 
@@ -178,9 +176,7 @@ async def _find_raw_docs_fuzzy(
     effective_fields: Optional[list[str]] = None
     if fields is not None:
         strip_classification = "classification" not in fields
-        required = ["classification", "trust_tier", "inbound_link_count"]
-        extra = [f for f in required if f not in fields]
-        effective_fields = fields + extra
+        effective_fields = list(with_always_included_fields(fields))
 
     results = await repo.fuzzy_search_by_name(query, status_list, limit, fields=effective_fields, tags=tags)
 
@@ -288,9 +284,7 @@ async def _find_raw_docs_fuzzy_scored(
     effective_fields: Optional[list[str]] = None
     if fields is not None:
         strip_classification = "classification" not in fields
-        required = ["classification", "trust_tier", "inbound_link_count"]
-        extra = [f for f in required if f not in fields]
-        effective_fields = fields + extra
+        effective_fields = list(with_always_included_fields(fields))
 
     results = await repo.fuzzy_search_scored(query, status_list, limit, fields=effective_fields, tags=tags)
 
