@@ -276,7 +276,7 @@ All mutations (create/edit/delete) go through `apply_page_mutation()` in `app/se
 | `PendingResult` | `"pending_approval"` | `request_id`; `page` present for create, absent for edit/delete |
 | `DeletedResult` | `"deleted"` | *(none)* |
 
-`apply_page_mutation` also accepts an optional `trust_tier` parameter. When `trust_tier=verified` and the create mutation is published directly (no workflow), the seam promotes the page's trust tier inline — recording the content hash, `verified_at`, and `verified_by` — so the pipeline never needs to reach around the seam with raw DB writes.
+`apply_page_mutation` also accepts an optional `trust_tier` parameter. When `trust_tier=verified` and a create or edit mutation is published directly (no workflow), the seam promotes the page's trust tier inline via `build_verification_fields()` — recording the content hash, `verified_at`, and `verified_by` — so callers never need to reach around the seam with raw DB writes. Today only the document-ingestion pipeline (`app/llm/pipeline.py`, admin self-certified uploads) passes `trust_tier` on create; no API surface exposes it on edit, since every other path to `verified` is required to go through a `review` approval request (see below).
 
 When an edit mutation is routed through a workflow, `apply_page_mutation` immediately persists any `references` on the `PageUpdate` regardless of approval state. Source provenance is always recorded; only content changes wait for approval.
 
@@ -499,6 +499,7 @@ pinkas/
 │   │   │                        # cited_pages returns page titles
 │   │   ├── ingestion.py         # Per-phase LLM calls (extract → dedup → generate/merge);
 │   │   │                        # prompt structure optimised for vLLM prefix-cache reuse
+│   │   ├── extraction.py        # Document text/image extraction (PDF/DOCX/XLSX/PPTX/HTML)
 │   │   └── pipeline.py          # 3-phase ingestion orchestrator; returns list[PageIngestOutcome]
 │   └── scheduler/               # APScheduler daily jobs
 │       └── jobs.py              # check_expired_pages, check_verification_drift,

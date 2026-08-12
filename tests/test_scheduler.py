@@ -9,10 +9,11 @@ import pytest_asyncio
 from datetime import date, timedelta
 
 from app.models.user import User, PermissionLevel
-from app.models.page import Page, PageStatus
+from app.models.page import Page, PageStatus, TrustTier
 from app.models.workflow import WorkflowCreate
 from app.services.workflows import create_workflow
-from app.scheduler.jobs import check_expired_pages
+from app.services.pages import compute_content_hash
+from app.scheduler.jobs import check_expired_pages, check_verification_drift
 
 
 @pytest_asyncio.fixture
@@ -120,4 +121,111 @@ async def test_page_without_workflow_owner_skipped(mock_db):
     ))
 
     processed = await check_expired_pages()
+    assert processed == 0
+
+
+@pytest_asyncio.fixture
+async def drift_setup(mock_db):
+    """Set up verified pages with workflow using MongoDB repos directly."""
+    from app.storage.mongo.workflows import MongoWorkflowRepository
+    from app.storage.mongo.users import MongoUserRepository
+    from app.storage.mongo.pages import MongoPageRepository
+
+    wf_repo = MongoWorkflowRepository(mock_db)
+    user_repo = MongoUserRepository(mock_db)
+    page_repo = MongoPageRepository(mock_db)
+
+    wf = await create_workflow(
+        WorkflowCreate(name="Review WF", steps=["reviewer1"]),
+        "admin",
+        wf_repo,
+    )
+
+    await user_repo.create(User(user_id="reviewer1", name="Reviewer", permission_level=PermissionLevel.editor))
+    owner = User(
+        user_id="owner1", name="Owner",
+        permission_level=PermissionLevel.editor,
+        workflow_id=wf.workflow_id,
+    )
+    await user_repo.create(owner)
+
+    await page_repo.create(Page(
+        page_id="drifted_page", title="Drifted Page", description="",
+        content="New content", status=PageStatus.published,
+        trust_tier=TrustTier.verified,
+        verified_content_hash=compute_content_hash("Old content"),
+        created_by="owner1",
+    ))
+    await page_repo.create(Page(
+        page_id="stable_page", title="Stable Page", description="",
+        content="Stable content", status=PageStatus.published,
+        trust_tier=TrustTier.verified,
+        verified_content_hash=compute_content_hash("Stable content"),
+        created_by="owner1",
+    ))
+
+    return {"workflow": wf, "owner": owner}
+
+
+@pytest.mark.asyncio
+async def test_drifted_page_gets_review_request_and_stays_published(mock_db, drift_setup):
+    processed = await check_verification_drift()
+    assert processed == 1
+
+    req = await mock_db.requests.find_one({"page_id": "drifted_page"})
+    assert req is not None
+    assert req["type"] == "review"
+    assert req["status"] == "pending"
+    assert req["proposed_content"]["trust_tier"] == TrustTier.verified.value
+
+    # A drift-flagged page must stay visible/published while the review is
+    # pending, unlike an expired-page review request (regression guard for
+    # set_pending_status=False in check_verification_drift).
+    page = await mock_db.pages.find_one({"page_id": "drifted_page"})
+    assert page["status"] == PageStatus.published.value
+
+
+@pytest.mark.asyncio
+async def test_stable_verified_page_not_affected(mock_db, drift_setup):
+    await check_verification_drift()
+
+    req = await mock_db.requests.find_one({"page_id": "stable_page"})
+    assert req is None
+
+    page = await mock_db.pages.find_one({"page_id": "stable_page"})
+    assert page["status"] == PageStatus.published.value
+
+
+@pytest.mark.asyncio
+async def test_no_duplicate_drift_requests(mock_db, drift_setup):
+    await check_verification_drift()
+    await check_verification_drift()
+
+    cursor = mock_db.requests.find({"page_id": "drifted_page"})
+    count = 0
+    async for _ in cursor:
+        count += 1
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_drifted_page_without_workflow_owner_skipped(mock_db):
+    from app.storage.mongo.users import MongoUserRepository
+    from app.storage.mongo.pages import MongoPageRepository
+
+    user_repo = MongoUserRepository(mock_db)
+    page_repo = MongoPageRepository(mock_db)
+
+    owner = User(user_id="no_wf_owner", name="NoWF", permission_level=PermissionLevel.editor)
+    await user_repo.create(owner)
+
+    await page_repo.create(Page(
+        page_id="orphan_drifted", title="Orphan Drifted", description="",
+        content="New content", status=PageStatus.published,
+        trust_tier=TrustTier.verified,
+        verified_content_hash=compute_content_hash("Old content"),
+        created_by="no_wf_owner",
+    ))
+
+    processed = await check_verification_drift()
     assert processed == 0
