@@ -9,7 +9,8 @@ Expected input JSON — a list of objects:
       "description": "...",
       "body": "...",
       "tag": "...",          # must be one of GET /pages/tags
-      "confidence": "..."    # free text, e.g. "high" / "low" / "0.8"
+      "confidence": "...",   # free text, e.g. "high" / "low" / "0.8"
+      "aliases": ["..."]     # optional, list of alternate titles
     },
     ...
   ]
@@ -91,6 +92,21 @@ def load_terms(path: str) -> list[dict]:
     return terms
 
 
+def validate_aliases(terms: list[dict]) -> None:
+    errors = []
+    for i, term in enumerate(terms):
+        aliases = term.get("aliases")
+        if aliases is None:
+            continue
+        if not isinstance(aliases, list) or not all(isinstance(a, str) and a.strip() for a in aliases):
+            errors.append(
+                f"  term[{i}] ({term.get('title', '<no title>')!r}): "
+                f"aliases must be a JSON list of non-empty strings, got {aliases!r}"
+            )
+    if errors:
+        sys.exit("Invalid aliases:\n" + "\n".join(errors))
+
+
 def validate_tags(terms: list[dict], allowed_tags: set[str]) -> None:
     errors = [
         f"  term[{i}] ({term['title']!r}): tag {term['tag']!r} not in allowed tags"
@@ -114,6 +130,7 @@ def build_payload(term: dict) -> dict:
         "description": term["description"],
         "content": content,
         "tags": [term["tag"]],
+        "aliases": term.get("aliases") or [],
     }
 
 
@@ -133,6 +150,7 @@ def main() -> None:
         sys.exit("usage: python scripts/bulk_upload_terms.py <terms.json>")
 
     terms = load_terms(sys.argv[1])
+    validate_aliases(terms)
     user_id = ensure_import_user()
     allowed_tags = fetch_allowed_tags(user_id)
     validate_tags(terms, allowed_tags)
