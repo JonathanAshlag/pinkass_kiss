@@ -417,6 +417,87 @@ External applications can identify themselves by sending optional headers:
 
 These are included in the `user_context` of every audit log entry.
 
+## Dashboards
+
+`dashboards/pinkas-ops.json` is a self-contained Kibana dashboard for agent usage: interaction
+volume, search miss rate, and latency broken down per agent, plus a recent-activity table. Every
+panel is an inline ES|QL visualization defined by value — no library visualizations, no saved data
+views, no `ref_id` references. The whole dashboard is one portable JSON document.
+
+Git is the source of truth. Editing the dashboard in the Kibana UI is fine for exploration, but
+those changes are **not** persisted anywhere — the next `./deploy.sh` run overwrites them with
+whatever is committed in `dashboards/pinkas-ops.json`. To make a lasting change, edit the JSON
+file and redeploy.
+
+### Deploying
+
+Requires Kibana 9.4+ (inline ES|QL dashboard panels aren't available on older versions) and the
+target Elasticsearch cluster already receiving `pinkas-events-*` documents (see
+[Audit Logging](#audit-logging)).
+
+```bash
+KIBANA_URL=https://kibana.example.com \
+KIBANA_API_KEY=your-api-key \
+./deploy.sh
+```
+
+Or with basic auth (e.g. local dev):
+
+```bash
+KIBANA_URL=http://localhost:5601 \
+KIBANA_USERNAME=elastic \
+KIBANA_PASSWORD=changeme \
+./deploy.sh
+```
+
+`deploy.sh` upserts via `PUT /api/dashboards/pinkas-ops` — safe to re-run, it always
+updates the same dashboard ID in place rather than creating a new one. It then GETs the
+dashboard back and fails closed if any external saved-object reference (`ref_id`, `references`,
+a data view) is found in the deployed result.
+
+### Redeploying to a different cluster
+
+The index name appears in exactly one place: the `INDEX_PREFIX` env var (default
+`pinkas-events`, queried as `${INDEX_PREFIX}-*`). If a target cluster uses a different index
+name, set `INDEX_PREFIX` — no need to touch the dashboard JSON itself:
+
+```bash
+KIBANA_URL=https://kibana.example.com \
+KIBANA_API_KEY=your-api-key \
+INDEX_PREFIX=my-other-events \
+./deploy.sh
+```
+
+### What's on it
+
+- **KPIs:** total interactions, active agents, search miss rate, average latency (all over the
+  dashboard's time range).
+- **Interactions over time, split by agent** — one line per agent.
+- **Per-agent breakdowns:** interaction volume by mode (search/fetch/scan/bundle), search miss
+  rate, fetch unavailable rate, average latency, distinct sessions.
+- **Recent agent activity** — the last 20 retrieval events (query, pages touched, hit/miss,
+  latency), for spot-checking what agents are actually doing.
+
+`miss` is not a uniform signal across modes, so it's only ever logged where it's meaningful
+(`app/models/retrieval_log.py` — `miss: Optional[bool] = None`, omitted entirely from the ES
+document when unset). **Search** misses (no confident match) are the only case that reflects a
+real retrieval gap — both the "miss rate" KPI and the search miss-rate panel filter to
+`mode == "search"` regardless, since historical data predating this change may still carry stale
+values on other modes. **Fetch** failures (`unavailable`, e.g. page not found/forbidden) are
+tracked separately as "fetch unavailable rate" — that's closer to a bug/permissions signal than a
+content gap, and fetch never sets `miss`. **Bundle** fetches can't miss (they either resolve or
+raise an error, captured in `error`), so bundle never sets it either. **Scan** used to set `miss`
+whenever it found zero matches in the scanned text, but that's also true for text that simply
+contains no wiki terms — not distinguishable from a real gap using only the event — so scan no
+longer sets `miss` at all; `len(page_ids) == 0` is the raw fact, with that same caveat attached.
+
+Agents are identified by `agent_name`, denormalized onto each retrieval log entry at write time
+(`app/services/agent_consumption.py`) so the dashboard never needs a live reference into
+Mongo/Postgres to resolve a name — it stays a single portable ES|QL query. This means the name
+shown is a point-in-time snapshot: renaming an agent won't relabel its historical events, and
+events logged before this field existed (or by an agent that's since been deleted) show up as an
+unlabeled bucket rather than a name.
+
 ## Agent API
 
 Besides the human-facing page/UI routes, Pinkas exposes a separate **agent-facing consumption API** (`app/routers/agent_api.py`, prefix `/agent`) for AI agent clients to search and fetch wiki content over HTTP — distinct from the Q&A endpoint, which is meant for the built-in LLM retrieval loop.
@@ -439,8 +520,8 @@ Every route below requires header `X-API-Key: <api_key>`; all except `/agent/too
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/agent/tools` | Returns OpenAI-style function-calling schemas for `search`/`fetch`, for tool discovery |
-| `POST` | `/agent/search` | Fuzzy search over pages by `query`; short tier (title + description) |
-| `POST` | `/agent/fetch` | Fetch full content (long tier) for explicit `page_ids` |
+| `POST` | `/agent/search` | Fuzzy search over pages by `query`; `description` tier (title + description) |
+| `POST` | `/agent/fetch` | Fetch full content (`full_info` tier) for explicit `page_ids` |
 | `POST` | `/agent/scan` | Passively scan arbitrary `text` for page title/alias matches |
 | `GET` | `/agent/bundles/{name}` | Fetch a curated bundle, rendered against current page content |
 
@@ -535,6 +616,9 @@ pinkas/
 │   ├── bulk_upload_terms.py      # Bulk-import a JSON list of terms as pages
 │   └── agent_client_example.py   # Minimal example client for the agent-api
 ├── tests/                       # pytest suite (each test runs against both backends)
+├── dashboards/
+│   └── pinkas-ops.json          # Kibana agent-usage dashboard, deployed via deploy.sh (see Dashboards)
+├── deploy.sh                    # Upserts dashboards/pinkas-ops.json to Kibana
 ├── alembic.ini                  # Points to app/infrastructure/postgres/migrations/
 ├── es_index_template.json       # Optional index template for pinkas-events-* (see Audit Logging)
 ├── requirements.txt

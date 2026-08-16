@@ -7,7 +7,7 @@ not enforce context-window constraints it cannot see.
 
 import time
 
-from app.models.bundle import Bundle
+from app.models.bundle import Bundle, ContentForm
 from app.models.consumption import SearchResponse, SearchHit, FetchResponse, FetchHit, UnavailablePage, ScanResponse, ScanMatch
 from app.models.retrieval_log import RetrievalLogEntry, ConsumptionMode, MissCandidate, UnavailablePageLog
 from app.models.agent import AgentRequestContext
@@ -26,7 +26,7 @@ async def run_search(
     ctx: AgentRequestContext,
     page_repo: PageRepository,
 ) -> SearchResponse:
-    """Search for a term. Returns short-tier results with scores."""
+    """Search for a term. Returns description-tier results with scores."""
     t0 = time.perf_counter()
 
     # Search with scores
@@ -55,6 +55,7 @@ async def run_search(
         log_entry = RetrievalLogEntry(
             request_id=ctx.request_id,
             agent_id=ctx.agent.agent_id,
+            agent_name=ctx.agent.name,
             session_id=ctx.session_id,
             mode=ConsumptionMode.search,
             query=query,
@@ -77,11 +78,12 @@ async def run_search(
         log_entry = RetrievalLogEntry(
             request_id=ctx.request_id,
             agent_id=ctx.agent.agent_id,
+            agent_name=ctx.agent.name,
             session_id=ctx.session_id,
             mode=ConsumptionMode.search,
             query=query,
             page_ids=[h.page_id for h in hits],
-            tiers=["short"] * len(hits),
+            tiers=[ContentForm.description.value] * len(hits),
             scores=[h.score for h in hits],
             miss=False,
             latency_ms=(time.perf_counter() - t0) * 1000,
@@ -96,7 +98,7 @@ async def run_fetch(
     ctx: AgentRequestContext,
     page_repo: PageRepository,
 ) -> FetchResponse:
-    """Fetch long-tier (full content) for explicit page ids."""
+    """Fetch full_info-tier (full content) for explicit page ids."""
     t0 = time.perf_counter()
 
     results, unavailable = [], []
@@ -121,10 +123,11 @@ async def run_fetch(
         RetrievalLogEntry(
             request_id=ctx.request_id,
             agent_id=ctx.agent.agent_id,
+            agent_name=ctx.agent.name,
             session_id=ctx.session_id,
             mode=ConsumptionMode.fetch,
             page_ids=[r.page_id for r in results],
-            tiers=["long"] * len(results),
+            tiers=[ContentForm.full_info.value] * len(results),
             unavailable=[
                 UnavailablePageLog(page_id=u.page_id, reason=u.reason) for u in unavailable
             ],
@@ -147,12 +150,12 @@ async def run_scan(
         RetrievalLogEntry(
             request_id=ctx.request_id,
             agent_id=ctx.agent.agent_id,
+            agent_name=ctx.agent.name,
             session_id=ctx.session_id,
             mode=ConsumptionMode.scan,
             matched_spans=spans,
             page_ids=[m["page_id"] for m in matches],
-            tiers=["short"] * len(matches),
-            miss=(len(matches) == 0),
+            tiers=[ContentForm.description.value] * len(matches),
             latency_ms=(time.perf_counter() - t0) * 1000,
         )
     )
@@ -186,6 +189,7 @@ async def run_bundle_fetch(
             RetrievalLogEntry(
                 request_id=ctx.request_id,
                 agent_id=ctx.agent.agent_id,
+                agent_name=ctx.agent.name,
                 session_id=ctx.session_id,
                 mode=ConsumptionMode.bundle,
                 bundle_name=name,
@@ -199,6 +203,7 @@ async def run_bundle_fetch(
         RetrievalLogEntry(
             request_id=ctx.request_id,
             agent_id=ctx.agent.agent_id,
+            agent_name=ctx.agent.name,
             session_id=ctx.session_id,
             mode=ConsumptionMode.bundle,
             bundle_name=name,

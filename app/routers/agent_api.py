@@ -27,7 +27,7 @@ async def search(
     ctx: AgentRequestContext = Depends(get_agent_request_context),
     page_repo: PageRepo = None,
 ) -> SearchResponse:
-    """Search for a term (short tier: title + description)."""
+    """Search for a term (description tier: title + description)."""
     return await run_search(data.query, ctx, page_repo)
 
 
@@ -37,7 +37,7 @@ async def fetch(
     ctx: AgentRequestContext = Depends(get_agent_request_context),
     page_repo: PageRepo = None,
 ) -> FetchResponse:
-    """Fetch full content (long tier) for explicit page ids."""
+    """Fetch full content (full_info tier) for explicit page ids."""
     return await run_fetch(data.page_ids, ctx, page_repo)
 
 

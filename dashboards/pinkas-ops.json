@@ -1,0 +1,267 @@
+{
+  "title": "Pinkas Ops — Agent Usage",
+  "description": "Agent interactions with Pinkas (search / fetch / scan / bundle retrieval events), plus general volume metrics. Source of truth is Git — redeploy via deploy.sh; UI edits get overwritten on next deploy.",
+  "time_range": { "from": "now-30d", "to": "now" },
+  "panels": [
+    {
+      "type": "vis",
+      "id": "kpi-total-interactions",
+      "grid": { "x": 0, "y": 0, "w": 12, "h": 4 },
+      "config": {
+        "title": "",
+        "type": "metric",
+        "data_source": {
+          "type": "esql",
+          "query": "FROM __INDEX_PATTERN__ | WHERE event_kind == \"retrieval\" AND ts <= ?_tend AND ts > ?_tstart | STATS `Total Interactions` = COUNT()"
+        },
+        "metrics": [{ "type": "primary", "column": "Total Interactions", "label": "Total Interactions" }]
+      }
+    },
+    {
+      "type": "vis",
+      "id": "kpi-active-agents",
+      "grid": { "x": 12, "y": 0, "w": 12, "h": 4 },
+      "config": {
+        "title": "",
+        "type": "metric",
+        "data_source": {
+          "type": "esql",
+          "query": "FROM __INDEX_PATTERN__ | WHERE event_kind == \"retrieval\" AND ts <= ?_tend AND ts > ?_tstart | STATS `Active Agents` = COUNT_DISTINCT(agent_name)"
+        },
+        "metrics": [{ "type": "primary", "column": "Active Agents", "label": "Active Agents" }]
+      }
+    },
+    {
+      "type": "vis",
+      "id": "kpi-miss-rate",
+      "grid": { "x": 24, "y": 0, "w": 12, "h": 4 },
+      "config": {
+        "title": "",
+        "type": "metric",
+        "data_source": {
+          "type": "esql",
+          "query": "FROM __INDEX_PATTERN__ | WHERE event_kind == \"retrieval\" AND mode == \"search\" AND ts <= ?_tend AND ts > ?_tstart | STATS misses = COUNT(CASE(miss, 1, NULL)), total = COUNT() | EVAL `Search Miss Rate` = ROUND(misses * 100.0 / total, 1) | KEEP `Search Miss Rate`"
+        },
+        "metrics": [
+          {
+            "type": "primary",
+            "column": "Search Miss Rate",
+            "label": "Search Miss Rate",
+            "format": { "type": "number", "decimals": 1, "suffix": "%" }
+          }
+        ]
+      }
+    },
+    {
+      "type": "vis",
+      "id": "kpi-avg-latency",
+      "grid": { "x": 36, "y": 0, "w": 12, "h": 4 },
+      "config": {
+        "title": "",
+        "type": "metric",
+        "data_source": {
+          "type": "esql",
+          "query": "FROM __INDEX_PATTERN__ | WHERE event_kind == \"retrieval\" AND ts <= ?_tend AND ts > ?_tstart | STATS `Avg Latency` = ROUND(AVG(latency_ms), 2)"
+        },
+        "metrics": [
+          {
+            "type": "primary",
+            "column": "Avg Latency",
+            "label": "Avg Latency",
+            "format": { "type": "number", "decimals": 2, "suffix": " ms" }
+          }
+        ]
+      }
+    },
+    {
+      "type": "vis",
+      "id": "interactions-over-time-by-agent",
+      "grid": { "x": 0, "y": 4, "w": 48, "h": 10 },
+      "config": {
+        "title": "Agent Interactions Over Time",
+        "type": "xy",
+        "axis": {
+          "x": {
+            "title": { "visible": false },
+            "scale": "temporal",
+            "domain": { "type": "fit", "rounding": false }
+          },
+          "y": { "title": { "visible": false } }
+        },
+        "layers": [
+          {
+            "type": "line",
+            "data_source": {
+              "type": "esql",
+              "query": "FROM __INDEX_PATTERN__ | WHERE event_kind == \"retrieval\" AND ts <= ?_tend AND ts > ?_tstart | STATS count = COUNT() BY BUCKET(ts, 75, ?_tstart, ?_tend), agent_name"
+            },
+            "x": { "column": "BUCKET(ts, 75, ?_tstart, ?_tend)", "label": "ts" },
+            "y": [{ "column": "count", "label": "Interactions" }],
+            "breakdown_by": { "column": "agent_name" }
+          }
+        ]
+      }
+    },
+    {
+      "type": "vis",
+      "id": "volume-mode-by-agent",
+      "grid": { "x": 0, "y": 14, "w": 24, "h": 8 },
+      "config": {
+        "title": "Interaction Volume & Mode Mix by Agent",
+        "type": "xy",
+        "axis": {
+          "x": { "title": { "visible": false } },
+          "y": { "title": { "visible": false } }
+        },
+        "layers": [
+          {
+            "type": "bar_horizontal_stacked",
+            "data_source": {
+              "type": "esql",
+              "query": "FROM __INDEX_PATTERN__ | WHERE event_kind == \"retrieval\" AND ts <= ?_tend AND ts > ?_tstart | STATS count = COUNT() BY agent_name, mode"
+            },
+            "x": { "column": "agent_name" },
+            "y": [{ "column": "count", "label": "Interactions" }],
+            "breakdown_by": { "column": "mode" }
+          }
+        ]
+      }
+    },
+    {
+      "type": "vis",
+      "id": "miss-rate-by-agent",
+      "grid": { "x": 24, "y": 14, "w": 24, "h": 8 },
+      "config": {
+        "title": "Search Miss Rate by Agent",
+        "type": "xy",
+        "axis": {
+          "x": { "title": { "visible": false } },
+          "y": { "title": { "visible": false } }
+        },
+        "layers": [
+          {
+            "type": "bar_horizontal",
+            "data_source": {
+              "type": "esql",
+              "query": "FROM __INDEX_PATTERN__ | WHERE event_kind == \"retrieval\" AND mode == \"search\" AND ts <= ?_tend AND ts > ?_tstart | STATS misses = COUNT(CASE(miss, 1, NULL)), total = COUNT() BY agent_name | EVAL miss_rate = ROUND(misses * 100.0 / total, 1) | KEEP agent_name, miss_rate"
+            },
+            "x": { "column": "agent_name" },
+            "y": [
+              {
+                "column": "miss_rate",
+                "label": "Search Miss Rate",
+                "format": { "type": "number", "decimals": 1, "suffix": "%" }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "vis",
+      "id": "fetch-unavailable-rate-by-agent",
+      "grid": { "x": 0, "y": 22, "w": 24, "h": 8 },
+      "config": {
+        "title": "Fetch Unavailable Rate by Agent",
+        "type": "xy",
+        "axis": {
+          "x": { "title": { "visible": false } },
+          "y": { "title": { "visible": false } }
+        },
+        "layers": [
+          {
+            "type": "bar_horizontal",
+            "data_source": {
+              "type": "esql",
+              "query": "FROM __INDEX_PATTERN__ | WHERE event_kind == \"retrieval\" AND mode == \"fetch\" AND ts <= ?_tend AND ts > ?_tstart | STATS unavailable_events = COUNT(CASE(MV_COUNT(unavailable.reason) > 0, 1, NULL)), total = COUNT() BY agent_name | EVAL unavailable_rate = ROUND(unavailable_events * 100.0 / total, 1) | KEEP agent_name, unavailable_rate"
+            },
+            "x": { "column": "agent_name" },
+            "y": [
+              {
+                "column": "unavailable_rate",
+                "label": "Unavailable Rate",
+                "format": { "type": "number", "decimals": 1, "suffix": "%" }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "vis",
+      "id": "avg-latency-by-agent",
+      "grid": { "x": 24, "y": 22, "w": 24, "h": 8 },
+      "config": {
+        "title": "Average Latency by Agent",
+        "type": "xy",
+        "axis": {
+          "x": { "title": { "visible": false } },
+          "y": { "title": { "visible": false } }
+        },
+        "layers": [
+          {
+            "type": "bar_horizontal",
+            "data_source": {
+              "type": "esql",
+              "query": "FROM __INDEX_PATTERN__ | WHERE event_kind == \"retrieval\" AND ts <= ?_tend AND ts > ?_tstart | STATS avg_latency = ROUND(AVG(latency_ms), 2) BY agent_name"
+            },
+            "x": { "column": "agent_name" },
+            "y": [
+              {
+                "column": "avg_latency",
+                "label": "Avg Latency",
+                "format": { "type": "number", "decimals": 2, "suffix": " ms" }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "vis",
+      "id": "sessions-by-agent",
+      "grid": { "x": 0, "y": 30, "w": 48, "h": 8 },
+      "config": {
+        "title": "Distinct Sessions by Agent",
+        "type": "xy",
+        "axis": {
+          "x": { "title": { "visible": false } },
+          "y": { "title": { "visible": false } }
+        },
+        "layers": [
+          {
+            "type": "bar_horizontal",
+            "data_source": {
+              "type": "esql",
+              "query": "FROM __INDEX_PATTERN__ | WHERE event_kind == \"retrieval\" AND ts <= ?_tend AND ts > ?_tstart | STATS sessions = COUNT_DISTINCT(session_id) BY agent_name"
+            },
+            "x": { "column": "agent_name" },
+            "y": [{ "column": "sessions", "label": "Sessions" }]
+          }
+        ]
+      }
+    },
+    {
+      "type": "vis",
+      "id": "recent-agent-activity",
+      "grid": { "x": 0, "y": 38, "w": 48, "h": 10 },
+      "config": {
+        "title": "Recent Agent Activity",
+        "type": "data_table",
+        "data_source": {
+          "type": "esql",
+          "query": "FROM __INDEX_PATTERN__ | WHERE event_kind == \"retrieval\" AND ts <= ?_tend AND ts > ?_tstart | SORT ts DESC | LIMIT 20 | KEEP ts, agent_name, mode, query, page_ids, miss, latency_ms"
+        },
+        "rows": [
+          { "column": "ts" },
+          { "column": "agent_name" },
+          { "column": "mode" },
+          { "column": "query" },
+          { "column": "page_ids" },
+          { "column": "miss" }
+        ],
+        "metrics": [{ "column": "latency_ms", "label": "Latency (ms)" }]
+      }
+    }
+  ]
+}

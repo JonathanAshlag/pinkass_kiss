@@ -44,7 +44,7 @@ async def _write_to_es(entry: EventEntry, kind: str) -> None:
         if es is None:
             return
         index = f"pinkas-events-{datetime.now(timezone.utc):%Y.%m}"
-        document = entry.model_dump(mode="json")
+        document = entry.model_dump(mode="json", exclude_none=True)
         document["event_kind"] = kind
         await es.index(index=index, document=document)
     except Exception as e:

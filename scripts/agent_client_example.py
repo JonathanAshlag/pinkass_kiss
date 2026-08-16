@@ -56,7 +56,7 @@ HEADERS = {"X-API-Key": API_KEY, "X-Session-Id": SESSION_ID}
 
 @tool
 def search(query: str) -> str:
-    """POST /agent/search - fuzzy search over pages (short tier: title + description). Returns plain text for agent context.
+    """POST /agent/search - fuzzy search over pages (description tier: title + description). Returns plain text for agent context.
 
     Args:
         query: Term, acronym, or entity to look up.
@@ -79,7 +79,7 @@ def search(query: str) -> str:
 
 @tool
 def fetch(page_ids: list[str]) -> str:
-    """POST /agent/fetch - fetch full content (long tier) for explicit page ids. Returns plain text for agent context.
+    """POST /agent/fetch - fetch full content (full_info tier) for explicit page ids. Returns plain text for agent context.
 
     Args:
         page_ids: Explicit page ids from a prior search result.

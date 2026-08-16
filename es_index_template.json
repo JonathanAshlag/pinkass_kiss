@@ -26,6 +26,7 @@
 
         "ts": { "type": "date" },
         "agent_id": { "type": "keyword" },
+        "agent_name": { "type": "keyword" },
         "session_id": { "type": "keyword" },
         "mode": { "type": "keyword" },
         "query": { "type": "text" },

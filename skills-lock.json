@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "elasticsearch-esql": {
+      "source": "elastic/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/elasticsearch/elasticsearch-esql/SKILL.md",
+      "computedHash": "e256313e4652f0de4aab465ac5bf25d9f022a5bbadb43fb320c9964e093d0a76"
+    },
+    "kibana-dashboards": {
+      "source": "elastic/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/kibana/kibana-dashboards/SKILL.md",
+      "computedHash": "28afa27c7a9d1f95dc928065e1afb30c8ebf8d242f5f51ccb49dea783f0669b2"
+    }
+  }
+}

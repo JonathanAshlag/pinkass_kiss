@@ -172,7 +172,40 @@ Config lives in `app/config.py:20-25` / `.env`.
 - [ ] `.env` is already gitignored (`.gitignore` — `.env`, `.env.*`, keeps
       `.env.example`) — don't override that.
 
-## 6. Bring it all up and verify end-to-end
+## 6. Deploy the Kibana agent-usage dashboard
+
+`dashboards/pinkas-ops.json` is a self-contained agent-usage dashboard (per-agent
+interaction volume, miss rate, latency, plus a recent-activity table) — every panel
+is inline ES|QL, no saved data views, no library visualizations. See the
+[Dashboards](README.md#dashboards) section in the README for full details.
+
+- [ ] Confirm the index template step in section 5 above is done — the dashboard's
+      per-agent breakdowns rely on `event_kind`/`mode` staying reliably typed across
+      monthly index rotations, same as the rest of the app.
+- [ ] Point it at a Kibana **9.4+** instance connected to the same Elasticsearch
+      cluster from section 5 (inline ES|QL dashboard panels aren't available on
+      older Kibana versions).
+- [ ] Deploy:
+      ```bash
+      KIBANA_URL=https://your-kibana.example.com \
+      KIBANA_API_KEY=your-api-key \
+      INDEX_PREFIX=pinkas-events \
+      ./deploy.sh
+      ```
+      (`INDEX_PREFIX` only needs to change if your real cluster uses a different
+      index name than `pinkas-events-*`.)
+- [ ] `deploy.sh` upserts dashboard ID `pinkas-ops` and exits non-zero if the
+      deploy fails or if the round-tripped dashboard turns out to contain any
+      external saved-object reference — no manual verification needed beyond
+      checking the script's exit code.
+- [ ] Git is the source of truth for this dashboard: editing it in the Kibana UI is
+      fine for exploration, but the next `./deploy.sh` run overwrites those changes
+      with whatever is committed in `dashboards/pinkas-ops.json`.
+- [ ] Panels are agent-scoped (`event_kind: retrieval`) — they'll be empty until
+      real agents exist and start making search/fetch/scan/bundle calls, same
+      prerequisite as any other agent-facing feature in this checklist.
+
+## 7. Bring it all up and verify end-to-end
 
 ```bash
 # with mongo, postgres (if used), elasticsearch, and your LLM server all reachable

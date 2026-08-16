@@ -29,6 +29,7 @@ class RetrievalLogEntry(BaseModel):
     ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     request_id: Optional[str] = None
     agent_id: str
+    agent_name: str
     session_id: str
     mode: ConsumptionMode
     query: Optional[str] = None
@@ -40,5 +41,5 @@ class RetrievalLogEntry(BaseModel):
     unavailable: list[UnavailablePageLog] = Field(default_factory=list)
     latency_ms: Optional[float] = None
     bundle_name: Optional[str] = None
-    miss: bool = False
+    miss: Optional[bool] = None
     error: Optional[str] = None
