@@ -132,7 +132,10 @@ def render(user_id: str):
             page = api_get(f"/pages/{st.session_state[VIEWING_PAGE]}", user_id=user_id)
             if page:
                 st.subheader(page["title"])
-                st.caption(f"{UI['page_status']}: {get_status_display(page.get('status', ''))}")
+                if page.get("status") != "published":
+                    st.caption(f"{UI['page_status']}: {get_status_display(page.get('status', ''))}")
+                if page.get("description"):
+                    st.info(f"**{UI['description_field']}:** {page['description']}")
                 st.markdown(page.get("content", ""))
 
                 # References
