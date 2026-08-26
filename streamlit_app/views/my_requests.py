@@ -36,7 +36,7 @@ def render(user_id: str):
                 if proposed.get("content"):
                     with st.container():
                         st.markdown("**תוכן מוצע:**")
-                        st.markdown(proposed["content"][:500])
+                        st.markdown(proposed["content"])
                 if proposed.get("trust_tier") == "verified":
                     st.markdown(f"**{UI['trust_tier_requested']}**")
 

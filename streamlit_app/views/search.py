@@ -23,8 +23,14 @@ def render(user_id: str):
     if results:
         st.subheader(f"{UI['search_results']} ({len(results)})")
         for page in results:
-            with st.expander(f"📄 {page['title']} — {get_status_display(page.get('status', ''))}"):
-                st.markdown(page.get("content", "")[:500])
+            status = page.get("status", "")
+            label = f"📄 {page['title']}"
+            if status != "published":
+                label += f" — {get_status_display(status)}"
+            with st.expander(label):
+                if page.get("description"):
+                    st.info(f"**{UI['description_field']}:** {page['description']}")
+                st.markdown(page.get("content", ""))
                 if st.button("פתח דף", key=f"open_{page['page_id']}"):
                     st.session_state[SEARCH_RESULTS] = None
                     navigate_to(NAV_BROWSE, **{VIEWING_PAGE: page["page_id"]})

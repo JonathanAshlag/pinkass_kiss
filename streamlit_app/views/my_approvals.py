@@ -32,7 +32,7 @@ def _render_request(req: dict, user_id: str, is_pending: bool):
                 st.markdown(f"**כותרת:** {proposed['title']}")
             if proposed.get("content"):
                 st.markdown("**תוכן מוצע:**")
-                st.markdown(proposed["content"][:500])
+                st.markdown(proposed["content"])
             if proposed.get("trust_tier") == "verified":
                 st.markdown(f"**{UI['trust_tier_requested']}**")
 
