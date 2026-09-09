@@ -258,9 +258,14 @@ async def search_pages(query: str, user: User, repo: PageRepository, tags: Optio
 async def fuzzy_search_pages(
     query: str, user: User, repo: PageRepository, tags: Optional[list[str]] = None,
 ) -> list[Page]:
-    from app.search_config import FUZZY_SEARCH_LIMIT
-    docs = await _find_raw_docs_fuzzy(query, user=user, repo=repo, limit=FUZZY_SEARCH_LIMIT, tags=tags)
-    return [Page(**doc) for doc in docs]
+    """Same page selection as /agent/search's run_search (scored, sorted, miss-thresholded,
+    capped at ACTIVE_SEARCH_TOP_N) so the UI and the agent API surface identical results
+    in identical order for the same query."""
+    from app.search_config import ACTIVE_SEARCH_CANDIDATE_POOL, ACTIVE_SEARCH_MISS_THRESHOLD, ACTIVE_SEARCH_TOP_N
+    docs = await _find_raw_docs_fuzzy_scored(query, user=user, repo=repo, limit=ACTIVE_SEARCH_CANDIDATE_POOL, tags=tags)
+    docs.sort(key=lambda d: d["score"], reverse=True)
+    good = [d for d in docs if d["score"] >= ACTIVE_SEARCH_MISS_THRESHOLD][:ACTIVE_SEARCH_TOP_N]
+    return [Page(**doc) for doc in good]
 
 
 async def find_page_docs_fuzzy(
