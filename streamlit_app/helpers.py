@@ -1,5 +1,6 @@
 """Shared helpers for the Streamlit app."""
 
+import html as _html
 import os
 
 import streamlit as st
@@ -163,6 +164,22 @@ def get_status_display(status: str) -> str:
     return mapping.get(status, status)
 
 
+def render_alias_chips(aliases: list[str] | None) -> None:
+    """Render a page's aliases as small rounded pill badges. No-op if empty."""
+    if not aliases:
+        return
+    from streamlit_app.strings import UI
+    chip_style = ("display:inline-block;background:#eef1f5;color:#333;"
+                  "border-radius:999px;padding:2px 10px;font-size:0.82em;"
+                  "border:1px solid #d7dbe3;white-space:nowrap;")
+    chips = "".join(f'<span style="{chip_style}">{_html.escape(a)}</span>' for a in aliases)
+    label = f'<span style="font-size:0.82em;color:#666;">{UI["aliases_label"]}:</span>'
+    st.markdown(
+        f'<div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:4px 0;">{label} {chips}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def get_allowed_tags(user_id: str) -> list[str]:
     """Fetch the allowed-tags vocabulary once per session."""
     if "allowed_tags_cache" not in st.session_state:
@@ -182,7 +199,8 @@ def load_bundle_into_editor(user_id: str, name: str) -> None:
         for e in existing.get("entries", []):
             page = api_get(f"/pages/{e['page_id']}", user_id=user_id)
             title = page.get("title", e["page_id"]) if page else e["page_id"]
-            entries.append({"page_id": e["page_id"], "title": title, "content_form": e["content_form"]})
+            aliases = page.get("aliases") or [] if page else []
+            entries.append({"page_id": e["page_id"], "title": title, "aliases": aliases, "content_form": e["content_form"]})
     st.session_state[BUNDLE_EDITOR_ENTRIES] = entries
     st.session_state[BUNDLE_SEARCH_RESULTS] = None
 

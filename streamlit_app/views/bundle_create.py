@@ -3,7 +3,7 @@
 import streamlit as st
 
 from streamlit_app.strings import UI
-from streamlit_app.helpers import api_get, api_put, load_bundle_into_editor
+from streamlit_app.helpers import api_get, api_put, load_bundle_into_editor, render_alias_chips
 from streamlit_app.state import BUNDLE_EDITOR_NAME, BUNDLE_EDITOR_ENTRIES, BUNDLE_SEARCH_RESULTS
 
 
@@ -39,6 +39,7 @@ def render(user_id: str):
             with c1:
                 form_label = UI["bundle_form_description"] if e["content_form"] == "description" else UI["bundle_form_full_info"]
                 st.write(f"📄 {e['title']} — {form_label}")
+                render_alias_chips(e.get("aliases"))
             with c2:
                 if st.button(UI["bundle_remove"], key=f"bundle_rm_{i}"):
                     st.session_state[BUNDLE_EDITOR_ENTRIES].pop(i)
@@ -76,6 +77,7 @@ def render(user_id: str):
         if results:
             for page in results[:8]:
                 with st.expander(f"📄 {page['title']}"):
+                    render_alias_chips(page.get("aliases"))
                     st.markdown(f"**{UI['bundle_form_description']}:** {page.get('description', '')}")
                     st.divider()
                     st.markdown(f"**{UI['bundle_form_full_info']}:**")
@@ -85,13 +87,15 @@ def render(user_id: str):
                     with c1:
                         if st.button(UI["bundle_add_description"], key=f"bundle_add_description_{page['page_id']}"):
                             st.session_state[BUNDLE_EDITOR_ENTRIES].append(
-                                {"page_id": page["page_id"], "title": page["title"], "content_form": "description"}
+                                {"page_id": page["page_id"], "title": page["title"],
+                                 "aliases": page.get("aliases") or [], "content_form": "description"}
                             )
                             st.rerun()
                     with c2:
                         if st.button(UI["bundle_add_full_info"], key=f"bundle_add_full_info_{page['page_id']}"):
                             st.session_state[BUNDLE_EDITOR_ENTRIES].append(
-                                {"page_id": page["page_id"], "title": page["title"], "content_form": "full_info"}
+                                {"page_id": page["page_id"], "title": page["title"],
+                                 "aliases": page.get("aliases") or [], "content_form": "full_info"}
                             )
                             st.rerun()
         else:

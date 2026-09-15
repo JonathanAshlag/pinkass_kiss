@@ -3,8 +3,20 @@
 import streamlit as st
 
 from streamlit_app.strings import UI
-from streamlit_app.helpers import api_get, get_status_display, get_allowed_tags
+from streamlit_app.helpers import api_get, get_status_display, get_allowed_tags, render_alias_chips
 from streamlit_app.state import VIEWING_PAGE, NAV_BROWSE, SEARCH_RESULTS, navigate_to
+
+
+def _matching_alias(query: str, page: dict) -> str | None:
+    """Return the first alias matching the query, unless the title already matches."""
+    q = query.strip().lower()
+    if not q or q in (page.get("title") or "").lower():
+        return None
+    for alias in page.get("aliases") or []:
+        a = alias.lower()
+        if q in a or a in q:
+            return alias
+    return None
 
 
 def render(user_id: str):
@@ -30,6 +42,10 @@ def render(user_id: str):
             with st.expander(label):
                 if page.get("description"):
                     st.info(f"**{UI['description_field']}:** {page['description']}")
+                render_alias_chips(page.get("aliases"))
+                matched_alias = _matching_alias(query, page)
+                if matched_alias:
+                    st.caption(f'🔎 {UI["alias_match_hint"]}: "{matched_alias}"')
                 st.markdown(page.get("content", ""))
                 if st.button("פתח דף", key=f"open_{page['page_id']}"):
                     st.session_state[SEARCH_RESULTS] = None

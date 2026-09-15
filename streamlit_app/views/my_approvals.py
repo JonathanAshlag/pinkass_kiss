@@ -4,7 +4,7 @@ import streamlit as st
 
 from streamlit_app.strings import UI
 from streamlit_app.helpers import (
-    api_get, api_post, format_date, get_status_display, get_type_display
+    api_get, api_post, format_date, get_status_display, get_type_display, render_alias_chips
 )
 
 
@@ -30,6 +30,8 @@ def _render_request(req: dict, user_id: str, is_pending: bool):
         if proposed:
             if proposed.get("title"):
                 st.markdown(f"**כותרת:** {proposed['title']}")
+            if proposed.get("aliases"):
+                render_alias_chips(proposed["aliases"])
             if proposed.get("content"):
                 st.markdown("**תוכן מוצע:**")
                 st.markdown(proposed["content"])

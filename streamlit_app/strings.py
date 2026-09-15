@@ -50,6 +50,8 @@ UI = {
     "description_field": "תיאור קצר",
     "content_field": "תוכן (Markdown)",
     "aliases_field": "כינויים (מופרדים בפסיק)",
+    "aliases_label": "כינויים",
+    "alias_match_hint": "נמצא לפי כינוי",
     "tags_field": "תגיות",
     "approval_date": "תאריך אישור הבא",
     "save_button": "שמור",

@@ -3,7 +3,7 @@
 import streamlit as st
 
 from streamlit_app.strings import UI
-from streamlit_app.helpers import api_get, api_post, format_date, get_status_display, get_allowed_tags, API_URL
+from streamlit_app.helpers import api_get, api_post, format_date, get_status_display, get_allowed_tags, render_alias_chips, API_URL
 from streamlit_app.state import (
     USER_DATA, VIEWING_PAGE, EDITING_PAGE, PP_CTX,
     BROWSE_SELECTED_TAG, BROWSE_EXPANDED_IDS,
@@ -132,6 +132,7 @@ def render(user_id: str):
             page = api_get(f"/pages/{st.session_state[VIEWING_PAGE]}", user_id=user_id)
             if page:
                 st.subheader(page["title"])
+                render_alias_chips(page.get("aliases"))
                 if page.get("status") != "published":
                     st.caption(f"{UI['page_status']}: {get_status_display(page.get('status', ''))}")
                 if page.get("description"):
