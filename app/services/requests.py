@@ -269,7 +269,6 @@ async def _apply_approved_request(
         await page_repo.update_with_history(req.page_id, update, page_history)
 
     elif req.type == RequestType.delete:
-        await page_repo.append_history(req.page_id, page_history)
-        await page_repo.delete(req.page_id)
+        await page_repo.archive(req.page_id, approver_id)
         if source_file_repo is not None:
             await cleanup_source_file_for_page(req.page_id, source_file_repo)

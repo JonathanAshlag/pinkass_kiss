@@ -67,6 +67,7 @@ class Page(BaseModel):
     verified_by: Optional[str] = None            # user_id or "system"
     classification: list[ClassificationTriangle] = Field(default_factory=list)
     inbound_link_count: int = 0                  # cached by scheduler; not user-editable
+    current_version_number: int = 0               # counter for PageVersion.version_number; not user-editable
     created_by: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

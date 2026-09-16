@@ -200,7 +200,10 @@ def load_bundle_into_editor(user_id: str, name: str) -> None:
             page = api_get(f"/pages/{e['page_id']}", user_id=user_id)
             title = page.get("title", e["page_id"]) if page else e["page_id"]
             aliases = page.get("aliases") or [] if page else []
-            entries.append({"page_id": e["page_id"], "title": title, "aliases": aliases, "content_form": e["content_form"]})
+            entries.append({
+                "page_id": e["page_id"], "title": title, "aliases": aliases,
+                "content_form": e["content_form"], "version_id": e.get("version_id"),
+            })
     st.session_state[BUNDLE_EDITOR_ENTRIES] = entries
     st.session_state[BUNDLE_SEARCH_RESULTS] = None
 

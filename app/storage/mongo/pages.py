@@ -1,16 +1,46 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional
 
 from app.models.page import (
     ClassificationTriangle, HistoryEntry, Page, PageStatus, Reference, TrustTier,
 )
+from app.models.page_version import PageVersion
 from app.storage.base import PageRepository, with_always_included_fields
 
 
 class MongoPageRepository(PageRepository):
     def __init__(self, db) -> None:
         self._db = db
+
+    async def _create_version(self, page: Page, action: str, user_id: str, comment: Optional[str]) -> None:
+        """Insert the next full-content snapshot for a page that just went live
+        (status == published) and bump its current_version_number counter."""
+        version_number = page.current_version_number + 1
+        version = PageVersion(
+            version_id=f"{page.page_id}-v{version_number}",
+            page_id=page.page_id,
+            version_number=version_number,
+            action=action,
+            user_id=user_id,
+            comment=comment,
+            title=page.title,
+            description=page.description,
+            content=page.content,
+            parent_id=page.parent_id,
+            references=page.references,
+            aliases=page.aliases,
+            tags=page.tags,
+            classification=page.classification,
+            status=page.status,
+            trust_tier=page.trust_tier,
+        )
+        await self._db.page_versions.insert_one(version.model_dump(mode="json"))
+        await self._db.pages.update_one(
+            {"page_id": page.page_id},
+            {"$set": {"current_version_number": version_number}},
+        )
 
     async def get(self, page_id: str) -> Optional[Page]:
         doc = await self._db.pages.find_one({"page_id": page_id})
@@ -28,6 +58,8 @@ class MongoPageRepository(PageRepository):
 
     async def create(self, page: Page) -> None:
         await self._db.pages.insert_one(page.model_dump(mode="json"))
+        if page.status == PageStatus.published:
+            await self._create_version(page, action="create", user_id=page.created_by, comment=None)
 
     async def update_fields(self, page_id: str, fields: dict) -> None:
         await self._db.pages.update_one({"page_id": page_id}, {"$set": fields})
@@ -37,6 +69,13 @@ class MongoPageRepository(PageRepository):
             {"page_id": page_id},
             {"$set": fields, "$push": {"history": entry.model_dump(mode="json")}},
         )
+        merged = await self._db.pages.find_one({"page_id": page_id})
+        if merged and merged.get("status") == PageStatus.published.value:
+            merged.pop("_id", None)
+            merged["history"] = []  # not needed for the snapshot, avoid re-validating the whole log
+            await self._create_version(
+                Page(**merged), action=entry.action, user_id=entry.user_id, comment=entry.comment,
+            )
 
     async def append_history(self, page_id: str, entry: HistoryEntry) -> None:
         await self._db.pages.update_one(
@@ -61,6 +100,67 @@ class MongoPageRepository(PageRepository):
         if not doc:
             return []
         return [HistoryEntry(**h) for h in doc.get("history", [])]
+
+    async def get_versions(self, page_id: str) -> list[PageVersion]:
+        cursor = self._db.page_versions.find({"page_id": page_id}).sort("version_number", 1)
+        results = []
+        async for doc in cursor:
+            doc.pop("_id", None)
+            results.append(PageVersion(**doc))
+        return results
+
+    async def get_version(self, version_id: str) -> Optional[PageVersion]:
+        doc = await self._db.page_versions.find_one({"version_id": version_id})
+        if not doc:
+            return None
+        doc.pop("_id", None)
+        return PageVersion(**doc)
+
+    async def archive(self, page_id: str, deleted_by: str) -> None:
+        page_doc = await self._db.pages.find_one({"page_id": page_id})
+        if not page_doc:
+            return
+        page_doc.pop("_id", None)
+
+        versions: list[dict] = []
+        async for v in self._db.page_versions.find({"page_id": page_id}):
+            v.pop("_id", None)
+            versions.append(v)
+
+        archive_doc = {
+            "page_id": page_id,
+            "page": page_doc,
+            "versions": versions,
+            "history": page_doc.get("history", []),
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+            "deleted_by": deleted_by,
+        }
+        await self._db.deleted_pages.update_one(
+            {"page_id": page_id}, {"$set": archive_doc}, upsert=True,
+        )
+        await self._db.page_versions.delete_many({"page_id": page_id})
+        await self._db.pages.delete_one({"page_id": page_id})
+
+    async def list_deleted_pages(self) -> list[dict]:
+        cursor = self._db.deleted_pages.find(
+            {}, {"page_id": 1, "deleted_at": 1, "deleted_by": 1, "page.title": 1, "_id": 0},
+        )
+        results = []
+        async for doc in cursor:
+            results.append({
+                "page_id": doc["page_id"],
+                "title": doc.get("page", {}).get("title", ""),
+                "deleted_at": doc.get("deleted_at"),
+                "deleted_by": doc.get("deleted_by"),
+            })
+        return results
+
+    async def get_deleted_page(self, page_id: str) -> Optional[dict]:
+        doc = await self._db.deleted_pages.find_one({"page_id": page_id})
+        if not doc:
+            return None
+        doc.pop("_id", None)
+        return doc
 
     async def fuzzy_search_scored(
         self,

@@ -11,6 +11,7 @@ CURRENT_PAGE = "current_page"
 
 # Browse
 VIEWING_PAGE = "viewing_page"
+VIEWING_VERSION = "viewing_version"
 BROWSE_SELECTED_TAG = "browse_selected_tag"
 BROWSE_EXPANDED_IDS = "browse_expanded_ids"
 

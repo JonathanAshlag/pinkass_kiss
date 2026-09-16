@@ -38,7 +38,8 @@ def render(user_id: str):
             c1, c2 = st.columns([5, 1])
             with c1:
                 form_label = UI["bundle_form_description"] if e["content_form"] == "description" else UI["bundle_form_full_info"]
-                st.write(f"📄 {e['title']} — {form_label}")
+                pin_label = UI["version_latest"] if not e.get("version_id") else e["version_id"]
+                st.write(f"📄 {e['title']} — {form_label} — {pin_label}")
                 render_alias_chips(e.get("aliases"))
             with c2:
                 if st.button(UI["bundle_remove"], key=f"bundle_rm_{i}"):
@@ -48,7 +49,10 @@ def render(user_id: str):
         st.caption(UI["bundle_no_entries"])
 
     if name and st.button(UI["bundle_save"], key="bundle_save_btn"):
-        payload = {"entries": [{"page_id": e["page_id"], "content_form": e["content_form"]} for e in entries]}
+        payload = {"entries": [
+            {"page_id": e["page_id"], "content_form": e["content_form"], "version_id": e.get("version_id")}
+            for e in entries
+        ]}
         result = api_put(f"/bundles/{name}", user_id=user_id, json_data=payload)
         if result and "error" not in result:
             st.success(UI["success"])
@@ -83,19 +87,33 @@ def render(user_id: str):
                     st.markdown(f"**{UI['bundle_form_full_info']}:**")
                     st.markdown(page.get("content", ""))
 
+                    versions = api_get(f"/pages/{page['page_id']}/versions", user_id=user_id) or []
+                    version_labels = {"latest": UI["version_latest"]}
+                    for v in versions:
+                        version_labels[v["version_id"]] = f"v{v['version_number']}"
+                    selected_version = st.selectbox(
+                        UI["version_pin_to"],
+                        options=["latest"] + [v["version_id"] for v in versions],
+                        format_func=lambda vid: version_labels.get(vid, vid),
+                        key=f"bundle_version_select_{page['page_id']}",
+                    )
+                    pin_version_id = None if selected_version == "latest" else selected_version
+
                     c1, c2 = st.columns(2)
                     with c1:
                         if st.button(UI["bundle_add_description"], key=f"bundle_add_description_{page['page_id']}"):
                             st.session_state[BUNDLE_EDITOR_ENTRIES].append(
                                 {"page_id": page["page_id"], "title": page["title"],
-                                 "aliases": page.get("aliases") or [], "content_form": "description"}
+                                 "aliases": page.get("aliases") or [], "content_form": "description",
+                                 "version_id": pin_version_id}
                             )
                             st.rerun()
                     with c2:
                         if st.button(UI["bundle_add_full_info"], key=f"bundle_add_full_info_{page['page_id']}"):
                             st.session_state[BUNDLE_EDITOR_ENTRIES].append(
                                 {"page_id": page["page_id"], "title": page["title"],
-                                 "aliases": page.get("aliases") or [], "content_form": "full_info"}
+                                 "aliases": page.get("aliases") or [], "content_form": "full_info",
+                                 "version_id": pin_version_id}
                             )
                             st.rerun()
         else:

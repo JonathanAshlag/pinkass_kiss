@@ -128,9 +128,7 @@ async def update_page(
 
 
 async def delete_page(page_id: str, user: User, repo: PageRepository) -> None:
-    history_entry = HistoryEntry(user_id=user.user_id, action="delete")
-    await repo.append_history(page_id, history_entry)
-    await repo.delete(page_id)
+    await repo.archive(page_id, user.user_id)
 
 
 _TIER_RANK = {"verified": 3, "source_checked": 2, "unverified": 1}

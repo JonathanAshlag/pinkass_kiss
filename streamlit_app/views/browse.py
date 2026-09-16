@@ -5,7 +5,7 @@ import streamlit as st
 from streamlit_app.strings import UI
 from streamlit_app.helpers import api_get, api_post, format_date, get_status_display, get_allowed_tags, render_alias_chips, API_URL
 from streamlit_app.state import (
-    USER_DATA, VIEWING_PAGE, EDITING_PAGE, PP_CTX,
+    USER_DATA, VIEWING_PAGE, VIEWING_VERSION, EDITING_PAGE, PP_CTX,
     BROWSE_SELECTED_TAG, BROWSE_EXPANDED_IDS,
     NAV_BROWSE, NAV_CREATE,
     navigate_to,
@@ -54,6 +54,7 @@ def _render_tag_tree_node(page: dict, children_by_parent: dict, level: int):
     label = f"{prefix}{icon} {page['title']}"
     if st.button(label, key=f"tagtree_{pid}"):
         st.session_state[VIEWING_PAGE] = pid
+        st.session_state[VIEWING_VERSION] = None
         if pid in expanded_ids:
             expanded_ids.discard(pid)
         else:
@@ -110,6 +111,8 @@ def render(user_id: str):
 
     if VIEWING_PAGE not in st.session_state:
         st.session_state[VIEWING_PAGE] = None
+    if VIEWING_VERSION not in st.session_state:
+        st.session_state[VIEWING_VERSION] = None
     if BROWSE_SELECTED_TAG not in st.session_state:
         st.session_state[BROWSE_SELECTED_TAG] = None
     if BROWSE_EXPANDED_IDS not in st.session_state:
@@ -129,70 +132,113 @@ def render(user_id: str):
 
     with col2:
         if st.session_state[VIEWING_PAGE]:
-            page = api_get(f"/pages/{st.session_state[VIEWING_PAGE]}", user_id=user_id)
+            page_id = st.session_state[VIEWING_PAGE]
+            page = api_get(f"/pages/{page_id}", user_id=user_id)
             if page:
-                st.subheader(page["title"])
-                render_alias_chips(page.get("aliases"))
-                if page.get("status") != "published":
-                    st.caption(f"{UI['page_status']}: {get_status_display(page.get('status', ''))}")
-                if page.get("description"):
-                    st.info(f"**{UI['description_field']}:** {page['description']}")
-                st.markdown(page.get("content", ""))
+                viewing_version_id = st.session_state.get(VIEWING_VERSION)
+                version = None
+                if viewing_version_id:
+                    version = api_get(f"/pages/{page_id}/versions/{viewing_version_id}", user_id=user_id)
 
-                # References
-                refs = page.get("references", [])
-                if refs:
-                    st.divider()
-                    st.markdown(f"**{UI['page_references']}:**")
-                    for ref in refs:
-                        if ref["type"] == "file" and ref.get("file_id"):
-                            st.markdown(f"📎 [{UI['file_reference']}]({API_URL}/files/{ref['file_id']})")
-                        elif ref["type"] == "page" and ref.get("page_id"):
-                            if st.button(f"📄 {UI['linked_page']}: {ref['page_id'][:8]}...", key=f"ref_{ref['page_id']}"):
-                                st.session_state[VIEWING_PAGE] = ref["page_id"]
-                                st.rerun()
+                if version:
+                    st.warning(f"{UI['viewing_version']} {version.get('version_number')} — {UI['read_only']}")
+                    if st.button(f"← {UI['back_to_live']}", key="back_to_live_btn"):
+                        st.session_state[VIEWING_VERSION] = None
+                        st.rerun()
+                    st.subheader(version["title"])
+                    render_alias_chips(version.get("aliases"))
+                    if version.get("description"):
+                        st.info(f"**{UI['description_field']}:** {version['description']}")
+                    st.markdown(version.get("content", ""))
+                else:
+                    st.session_state[VIEWING_VERSION] = None
+                    st.subheader(page["title"])
+                    render_alias_chips(page.get("aliases"))
+                    if page.get("status") != "published":
+                        st.caption(f"{UI['page_status']}: {get_status_display(page.get('status', ''))}")
+                    if page.get("description"):
+                        st.info(f"**{UI['description_field']}:** {page['description']}")
+                    st.markdown(page.get("content", ""))
 
-                # History
-                with st.expander(UI["page_history"]):
-                    history = api_get(f"/pages/{st.session_state[VIEWING_PAGE]}/history", user_id=user_id)
-                    if history:
-                        for entry in reversed(history):
-                            st.markdown(
-                                f"**{format_date(entry.get('timestamp'))}** | "
-                                f"{entry.get('user_id', '')} | "
-                                f"{entry.get('action', '')} | "
-                                f"{entry.get('comment', '')}"
-                            )
-                    else:
-                        st.info("אין היסטוריה")
+                    # References
+                    refs = page.get("references", [])
+                    if refs:
+                        st.divider()
+                        st.markdown(f"**{UI['page_references']}:**")
+                        for ref in refs:
+                            if ref["type"] == "file" and ref.get("file_id"):
+                                st.markdown(f"📎 [{UI['file_reference']}]({API_URL}/files/{ref['file_id']})")
+                            elif ref["type"] == "page" and ref.get("page_id"):
+                                if st.button(f"📄 {UI['linked_page']}: {ref['page_id'][:8]}...", key=f"ref_{ref['page_id']}"):
+                                    st.session_state[VIEWING_PAGE] = ref["page_id"]
+                                    st.session_state[VIEWING_VERSION] = None
+                                    st.rerun()
 
-                # Edit/Delete buttons
-                user_data = st.session_state[USER_DATA]
-                if user_data and user_data.get("permission_level") in ("editor", "admin"):
-                    st.divider()
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        if st.button(UI["edit_page"], key="edit_btn"):
-                            navigate_to(NAV_CREATE, **{
-                                EDITING_PAGE: page["page_id"],
-                                PP_CTX: None,
-                            })
-                    with c2:
-                        if st.button(UI["delete_button"], key="delete_btn"):
-                            from streamlit_app.helpers import api_delete
-                            result = api_delete(f"/pages/{page['page_id']}", user_id=user_id)
-                            if result and "error" not in result:
-                                st.success(UI["success"])
-                                st.session_state[VIEWING_PAGE] = None
-                                st.rerun()
+                    # History + Versions — merged: the audit log drives the rows, and any
+                    # row backed by a full-content snapshot gets a "view" button. Snapshots
+                    # only exist for "create"/"edit"/"approve" entries (never "reject"), and
+                    # pairing is done from the newest entry backward so it stays correct even
+                    # for pages backfilled with a single v1 predating older history entries.
+                    with st.expander(UI["page_history"]):
+                        history = api_get(f"/pages/{page_id}/history", user_id=user_id)
+                        versions = api_get(f"/pages/{page_id}/versions", user_id=user_id)
+                        version_by_history_idx = {}
+                        if history and versions:
+                            versioned_idxs = [
+                                i for i, e in enumerate(history)
+                                if e.get("action") in ("create", "edit", "approve")
+                            ]
+                            for offset, hist_idx in enumerate(reversed(versioned_idxs)):
+                                if offset >= len(versions):
+                                    break
+                                version_by_history_idx[hist_idx] = versions[-(offset + 1)]
 
-                    if page.get("trust_tier") != "verified":
-                        if st.button(UI["request_verification"], key="request_verification_btn"):
-                            result = api_post(f"/pages/{page['page_id']}/request-verification", user_id=user_id)
-                            if result and "error" not in result:
-                                st.toast(UI["verification_requested"], icon="✅")
-                                st.rerun()
-                            else:
-                                st.error(result.get("error", "") if result else "")
+                        if history:
+                            for idx in reversed(range(len(history))):
+                                entry = history[idx]
+                                hc1, hc2 = st.columns([4, 1])
+                                with hc1:
+                                    st.markdown(
+                                        f"**{format_date(entry.get('timestamp'))}** | "
+                                        f"{entry.get('user_id', '')} | "
+                                        f"{entry.get('action', '')} | "
+                                        f"{entry.get('comment', '')}"
+                                    )
+                                v = version_by_history_idx.get(idx)
+                                with hc2:
+                                    if v and st.button(UI["view_version"], key=f"view_version_{v['version_id']}"):
+                                        st.session_state[VIEWING_VERSION] = v["version_id"]
+                                        st.rerun()
+                        else:
+                            st.info("אין היסטוריה")
+
+                    # Edit/Delete buttons
+                    user_data = st.session_state[USER_DATA]
+                    if user_data and user_data.get("permission_level") in ("editor", "admin"):
+                        st.divider()
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            if st.button(UI["edit_page"], key="edit_btn"):
+                                navigate_to(NAV_CREATE, **{
+                                    EDITING_PAGE: page["page_id"],
+                                    PP_CTX: None,
+                                })
+                        with c2:
+                            if st.button(UI["delete_button"], key="delete_btn"):
+                                from streamlit_app.helpers import api_delete
+                                result = api_delete(f"/pages/{page['page_id']}", user_id=user_id)
+                                if result and "error" not in result:
+                                    st.success(UI["success"])
+                                    st.session_state[VIEWING_PAGE] = None
+                                    st.rerun()
+
+                        if page.get("trust_tier") != "verified":
+                            if st.button(UI["request_verification"], key="request_verification_btn"):
+                                result = api_post(f"/pages/{page['page_id']}/request-verification", user_id=user_id)
+                                if result and "error" not in result:
+                                    st.toast(UI["verification_requested"], icon="✅")
+                                    st.rerun()
+                                else:
+                                    st.error(result.get("error", "") if result else "")
             else:
                 st.error("לא ניתן לטעון את הדף")

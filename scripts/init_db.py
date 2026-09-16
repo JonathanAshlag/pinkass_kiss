@@ -45,6 +45,9 @@ async def init_mongo() -> None:
     await db.agents.create_index("agent_id", unique=True, name="agents_agent_id")
     await db.agents.create_index("api_key_hash", unique=True, name="agents_api_key_hash")
     await db.bundles.create_index("name", unique=True, name="bundles_name")
+    await db.page_versions.create_index("version_id", unique=True, name="page_versions_version_id")
+    await db.page_versions.create_index("page_id", name="page_versions_page_id")
+    await db.deleted_pages.create_index("page_id", unique=True, name="deleted_pages_page_id")
 
     print("✓ All MongoDB indexes created successfully")
     print(f"  Database: {settings.mongo_db}")

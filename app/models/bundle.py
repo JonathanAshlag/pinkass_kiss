@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -14,6 +15,7 @@ class ContentForm(str, Enum):
 class BundleEntry(BaseModel):
     page_id: str
     content_form: ContentForm
+    version_id: Optional[str] = None  # None = always latest (live page); set = frozen to that exact snapshot
 
 
 class Bundle(BaseModel):

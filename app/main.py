@@ -11,7 +11,7 @@ from app.infrastructure.mongo import init_client, close_client
 from app.infrastructure.postgres.engine import init_engine, close_engine
 from app.infrastructure.elasticsearch import init_es, close_es
 from app.scheduler import setup_scheduler
-from app.routers import pages, ask, produce, workflows, users, approvals, agents, bundles, agent_api, agent_logs
+from app.routers import pages, ask, produce, workflows, users, approvals, agents, bundles, agent_api, agent_logs, admin
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,6 +70,7 @@ app.include_router(agents.router)
 app.include_router(bundles.router)
 app.include_router(agent_api.router)
 app.include_router(agent_logs.router)
+app.include_router(admin.router)
 
 
 @app.get("/health")

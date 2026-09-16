@@ -110,6 +110,47 @@ async def get_history(
     return await get_page_history(page_id, page_repo)
 
 
+@router.get("/{page_id}/versions")
+async def list_versions(
+    page_id: str,
+    user: User = Depends(get_current_user),
+    page_repo: PageRepo = None,
+):
+    """Lightweight list of a page's full-content versions (newest-last), for the
+    history UI. Same permission gate as /history — viewing an old version requires
+    the same access as viewing the live page today."""
+    if not await can_view_page(user, page_id, page_repo):
+        raise HTTPException(status_code=403, detail="No permission to view this page")
+    versions = await page_repo.get_versions(page_id)
+    return [
+        {
+            "version_id": v.version_id,
+            "version_number": v.version_number,
+            "action": v.action,
+            "user_id": v.user_id,
+            "timestamp": v.timestamp.isoformat(),
+            "comment": v.comment,
+        }
+        for v in versions
+    ]
+
+
+@router.get("/{page_id}/versions/{version_id}")
+async def get_version(
+    page_id: str,
+    version_id: str,
+    user: User = Depends(get_current_user),
+    page_repo: PageRepo = None,
+):
+    """Full read-only snapshot of one past version."""
+    if not await can_view_page(user, page_id, page_repo):
+        raise HTTPException(status_code=403, detail="No permission to view this page")
+    version = await page_repo.get_version(version_id)
+    if not version or version.page_id != page_id:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return version.model_dump(mode="json")
+
+
 @router.put("/{page_id}", response_model=MutationResult)
 async def update_page_endpoint(
     page_id: str,

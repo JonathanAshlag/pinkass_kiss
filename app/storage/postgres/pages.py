@@ -13,8 +13,12 @@ from app.models.page import (
     ClassificationTriangle, HistoryEntry, Page, PageStatus, Reference,
     ReferenceType, TrustTier,
 )
+from app.models.page_version import PageVersion
 from app.storage.base import PageRepository, with_always_included_fields
-from app.infrastructure.postgres.models import PageORM, PageRefORM, PageRevisionORM
+from app.infrastructure.postgres.models import (
+    DeletedPageORM, DeletedPageRevisionORM, DeletedPageVersionORM,
+    PageORM, PageRefORM, PageRevisionORM, PageVersionORM,
+)
 
 
 def _orm_to_page(row: PageORM) -> Page:
@@ -38,6 +42,7 @@ def _orm_to_page(row: PageORM) -> Page:
         verified_at=row.verified_at,
         verified_by=row.verified_by,
         inbound_link_count=row.inbound_link_count,
+        current_version_number=row.current_version_number,
         created_by=row.created_by,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -45,10 +50,59 @@ def _orm_to_page(row: PageORM) -> Page:
     )
 
 
+def _orm_to_version(row: PageVersionORM) -> PageVersion:
+    return PageVersion(
+        version_id=row.version_id,
+        page_id=row.page_id,
+        version_number=row.version_number,
+        action=row.action,
+        user_id=row.user_id,
+        timestamp=row.timestamp,
+        comment=row.comment,
+        title=row.title,
+        description=row.description,
+        content=row.content,
+        parent_id=row.parent_id,
+        references=[Reference(**r) for r in (row.references or [])],
+        aliases=row.aliases or [],
+        tags=row.tags or [],
+        classification=[ClassificationTriangle(**c) for c in (row.classification or [])],
+        status=PageStatus(row.status),
+        trust_tier=TrustTier(row.trust_tier),
+    )
+
+
 class PostgresPageRepository(PageRepository):
     def __init__(self, session: AsyncSession, *, dialect: str = "postgresql") -> None:
         self._s = session
         self._dialect = dialect
+
+    async def _create_version(self, row: PageORM, action: str, user_id: str, comment: Optional[str]) -> None:
+        """Insert the next full-content snapshot for a page that just went live
+        (status == published) and bump its current_version_number counter."""
+        version_number = row.current_version_number + 1
+        self._s.add(PageVersionORM(
+            version_id=f"{row.page_id}-v{version_number}",
+            page_id=row.page_id,
+            version_number=version_number,
+            action=action,
+            user_id=user_id,
+            comment=comment,
+            title=row.title,
+            description=row.description,
+            content=row.content,
+            parent_id=row.parent_id,
+            references=row.references or [],
+            aliases=row.aliases or [],
+            tags=row.tags or [],
+            classification=row.classification or [],
+            status=row.status,
+            trust_tier=row.trust_tier,
+        ))
+        await self._s.execute(
+            update(PageORM).where(PageORM.page_id == row.page_id).values(current_version_number=version_number)
+        )
+        await self._s.flush()
 
     async def get(self, page_id: str) -> Optional[Page]:
         result = await self._s.execute(select(PageORM).where(PageORM.page_id == page_id))
@@ -82,6 +136,7 @@ class PostgresPageRepository(PageRepository):
             verified_at=page.verified_at,
             verified_by=page.verified_by,
             inbound_link_count=page.inbound_link_count,
+            current_version_number=page.current_version_number,
             created_by=page.created_by,
             created_at=page.created_at,
             updated_at=page.updated_at,
@@ -111,6 +166,8 @@ class PostgresPageRepository(PageRepository):
                 file_id=ref.file_id if ref.type == ReferenceType.file else None,
             ))
         await self._s.flush()
+        if page.status == PageStatus.published:
+            await self._create_version(orm, action="create", user_id=page.created_by, comment=None)
 
     async def update_fields(self, page_id: str, fields: dict) -> None:
         if not fields:
@@ -123,6 +180,10 @@ class PostgresPageRepository(PageRepository):
     async def update_with_history(self, page_id: str, fields: dict, entry: HistoryEntry) -> None:
         await self.update_fields(page_id, fields)
         await self.append_history(page_id, entry)
+        result = await self._s.execute(select(PageORM).where(PageORM.page_id == page_id))
+        row = result.scalar_one_or_none()
+        if row and row.status == PageStatus.published.value:
+            await self._create_version(row, action=entry.action, user_id=entry.user_id, comment=entry.comment)
 
     async def append_history(self, page_id: str, entry: HistoryEntry) -> None:
         rev = PageRevisionORM(
@@ -179,6 +240,147 @@ class PostgresPageRepository(PageRepository):
             )
             for row in rows
         ]
+
+    async def get_versions(self, page_id: str) -> list[PageVersion]:
+        result = await self._s.execute(
+            select(PageVersionORM)
+            .where(PageVersionORM.page_id == page_id)
+            .order_by(PageVersionORM.version_number)
+        )
+        return [_orm_to_version(row) for row in result.scalars().all()]
+
+    async def get_version(self, version_id: str) -> Optional[PageVersion]:
+        result = await self._s.execute(
+            select(PageVersionORM).where(PageVersionORM.version_id == version_id)
+        )
+        row = result.scalar_one_or_none()
+        return _orm_to_version(row) if row else None
+
+    async def archive(self, page_id: str, deleted_by: str) -> None:
+        result = await self._s.execute(select(PageORM).where(PageORM.page_id == page_id))
+        row = result.scalar_one_or_none()
+        if not row:
+            return
+
+        self._s.add(DeletedPageORM(
+            page_id=row.page_id, title=row.title, description=row.description, parent_id=row.parent_id,
+            content=row.content, status=row.status, trust_tier=row.trust_tier,
+            next_approval_date=row.next_approval_date, verified_content_hash=row.verified_content_hash,
+            verified_at=row.verified_at, verified_by=row.verified_by, inbound_link_count=row.inbound_link_count,
+            current_version_number=row.current_version_number, created_by=row.created_by,
+            created_at=row.created_at, updated_at=row.updated_at, classification=row.classification or [],
+            references=row.references or [], aliases=row.aliases or [], tags=row.tags or [],
+            meta=row.meta or {}, deleted_by=deleted_by,
+        ))
+
+        versions_result = await self._s.execute(select(PageVersionORM).where(PageVersionORM.page_id == page_id))
+        for v in versions_result.scalars().all():
+            self._s.add(DeletedPageVersionORM(
+                version_id=v.version_id, page_id=page_id, version_number=v.version_number, action=v.action,
+                user_id=v.user_id, timestamp=v.timestamp, comment=v.comment, title=v.title,
+                description=v.description, content=v.content, parent_id=v.parent_id,
+                references=v.references or [], aliases=v.aliases or [], tags=v.tags or [],
+                classification=v.classification or [], status=v.status, trust_tier=v.trust_tier,
+            ))
+
+        revisions_result = await self._s.execute(select(PageRevisionORM).where(PageRevisionORM.page_id == page_id))
+        for rev in revisions_result.scalars().all():
+            self._s.add(DeletedPageRevisionORM(
+                page_id=page_id, user_id=rev.user_id, action=rev.action, diff=rev.diff,
+                snapshot=rev.snapshot, comment=rev.comment, created_at=rev.created_at,
+            ))
+
+        await self._s.flush()
+        # Explicit deletes rather than relying on the ON DELETE CASCADE FKs: those are
+        # real on Postgres but SQLite (used in tests) doesn't enforce them without a
+        # pragma, and ORM relationship cascade only fires for session.delete(), not
+        # this bulk delete() statement.
+        await self._s.execute(delete(PageVersionORM).where(PageVersionORM.page_id == page_id))
+        await self._s.execute(delete(PageRevisionORM).where(PageRevisionORM.page_id == page_id))
+        await self._s.execute(delete(PageRefORM).where(PageRefORM.from_page_id == page_id))
+        await self._s.execute(delete(PageORM).where(PageORM.page_id == page_id))
+        await self._s.flush()
+
+    async def list_deleted_pages(self) -> list[dict]:
+        result = await self._s.execute(select(DeletedPageORM))
+        return [
+            {
+                "page_id": row.page_id,
+                "title": row.title,
+                "deleted_at": row.deleted_at.isoformat() if row.deleted_at else None,
+                "deleted_by": row.deleted_by,
+            }
+            for row in result.scalars().all()
+        ]
+
+    async def get_deleted_page(self, page_id: str) -> Optional[dict]:
+        result = await self._s.execute(select(DeletedPageORM).where(DeletedPageORM.page_id == page_id))
+        row = result.scalar_one_or_none()
+        if not row:
+            return None
+
+        page_dict = {
+            "page_id": row.page_id,
+            "title": row.title,
+            "description": row.description,
+            "parent_id": row.parent_id,
+            "content": row.content,
+            "status": row.status,
+            "trust_tier": row.trust_tier,
+            "next_approval_date": row.next_approval_date,
+            "verified_content_hash": row.verified_content_hash,
+            "verified_at": row.verified_at.isoformat() if row.verified_at else None,
+            "verified_by": row.verified_by,
+            "inbound_link_count": row.inbound_link_count,
+            "current_version_number": row.current_version_number,
+            "classification": row.classification or [],
+            "references": row.references or [],
+            "aliases": row.aliases or [],
+            "tags": row.tags or [],
+            "created_by": row.created_by,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
+
+        versions_result = await self._s.execute(
+            select(DeletedPageVersionORM)
+            .where(DeletedPageVersionORM.page_id == page_id)
+            .order_by(DeletedPageVersionORM.version_number)
+        )
+        versions = [
+            {
+                "version_id": v.version_id, "page_id": v.page_id, "version_number": v.version_number,
+                "action": v.action, "user_id": v.user_id,
+                "timestamp": v.timestamp.isoformat() if v.timestamp else None, "comment": v.comment,
+                "title": v.title, "description": v.description, "content": v.content, "parent_id": v.parent_id,
+                "references": v.references or [], "aliases": v.aliases or [], "tags": v.tags or [],
+                "classification": v.classification or [], "status": v.status, "trust_tier": v.trust_tier,
+            }
+            for v in versions_result.scalars().all()
+        ]
+
+        revisions_result = await self._s.execute(
+            select(DeletedPageRevisionORM)
+            .where(DeletedPageRevisionORM.page_id == page_id)
+            .order_by(DeletedPageRevisionORM.created_at)
+        )
+        history = [
+            {
+                "timestamp": rev.created_at.isoformat() if rev.created_at else None,
+                "user_id": rev.user_id, "action": rev.action, "diff": rev.diff,
+                "snapshot": rev.snapshot, "comment": rev.comment,
+            }
+            for rev in revisions_result.scalars().all()
+        ]
+
+        return {
+            "page_id": row.page_id,
+            "page": page_dict,
+            "versions": versions,
+            "history": history,
+            "deleted_at": row.deleted_at.isoformat() if row.deleted_at else None,
+            "deleted_by": row.deleted_by,
+        }
 
     def _tags_clause(self, tags: list[str]):
         """WHERE clause matching pages that have at least one of the given tags."""

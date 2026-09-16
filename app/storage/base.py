@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.models.page import Page, HistoryEntry, Reference, ClassificationTriangle
+    from app.models.page_version import PageVersion
     from app.models.user import User
     from app.models.workflow import Workflow
     from app.models.request import ApprovalRequest, RequestHistoryEntry
@@ -60,6 +61,32 @@ class PageRepository(ABC):
 
     @abstractmethod
     async def get_history(self, page_id: str) -> "list[HistoryEntry]": ...
+
+    @abstractmethod
+    async def get_versions(self, page_id: str) -> "list[PageVersion]":
+        """List all versions for a page, ordered oldest-first by version_number."""
+        ...
+
+    @abstractmethod
+    async def get_version(self, version_id: str) -> "PageVersion | None": ...
+
+    @abstractmethod
+    async def archive(self, page_id: str, deleted_by: str) -> None:
+        """Move a page — its live row, full version chain, and HistoryEntry log — into
+        archive storage, then hard-remove it from every live table/collection. Replaces
+        the old append_history()+delete() pattern; callers must not call delete()
+        directly for a user-initiated deletion."""
+        ...
+
+    @abstractmethod
+    async def list_deleted_pages(self) -> list[dict]:
+        """Lightweight list of archived pages (page_id, title, deleted_at, deleted_by)."""
+        ...
+
+    @abstractmethod
+    async def get_deleted_page(self, page_id: str) -> "dict | None":
+        """Full archived record: {page, versions, history, deleted_at, deleted_by}."""
+        ...
 
     @abstractmethod
     async def search_by_name(

@@ -14,7 +14,10 @@ router = APIRouter(prefix="/bundles", tags=["bundles"])
 def _bundle_dict(bundle) -> dict:
     return {
         "name": bundle.name,
-        "entries": [{"page_id": e.page_id, "content_form": e.content_form.value} for e in bundle.entries],
+        "entries": [
+            {"page_id": e.page_id, "content_form": e.content_form.value, "version_id": e.version_id}
+            for e in bundle.entries
+        ],
         "created_by": bundle.created_by,
         "created_at": bundle.created_at.isoformat(),
         "updated_at": bundle.updated_at.isoformat(),
@@ -89,5 +92,8 @@ async def preview_bundle(
     return {
         "bundle_name": name,
         "rendered_text": rendered,
-        "entries": [{"page_id": e.page_id, "content_form": e.content_form.value} for e in bundle.entries],
+        "entries": [
+            {"page_id": e.page_id, "content_form": e.content_form.value, "version_id": e.version_id}
+            for e in bundle.entries
+        ],
     }

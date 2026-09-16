@@ -1,6 +1,7 @@
 """One-time migration: reassign every page's page_id from the old "page_id == title"
 scheme to the new Slack-style {normalized-title}-{suffix} scheme, and rewrite every
-place that references the old id.
+place that references the old id — including bundle entries (bundles.entries[].page_id),
+so a bundle pinned/pointing at a page doesn't silently start 404ing after this runs.
 
 Respects DB_BACKEND env var (mongodb / postgres).
 
@@ -67,7 +68,20 @@ async def _migrate_mongo(apply: bool) -> None:
         if changed:
             await db.pages.update_one({"_id": doc["_id"]}, {"$set": {"references": refs}})
 
-    print(f"\n✓ Migrated {len(mapping)} page(s) and their embedded references in MongoDB.")
+    bundles_updated = 0
+    async for doc in db.bundles.find({}):
+        entries = doc.get("entries") or []
+        changed = False
+        for entry in entries:
+            if entry.get("page_id") in mapping:
+                entry["page_id"] = mapping[entry["page_id"]]
+                changed = True
+        if changed:
+            await db.bundles.update_one({"_id": doc["_id"]}, {"$set": {"entries": entries}})
+            bundles_updated += 1
+
+    print(f"\n✓ Migrated {len(mapping)} page(s), their embedded references, "
+          f"and {bundles_updated} bundle(s) in MongoDB.")
     client.close()
 
 
@@ -166,9 +180,28 @@ async def _migrate_postgres(apply: bool) -> None:
                 f'FOREIGN KEY ({column_name}) REFERENCES {SCHEMA}.pages(page_id) ON DELETE {delete_rule}'
             ))
 
+        # bundles.entries is a JSON column (no FK) embedding page_id values — rewrite those too.
+        bundle_rows = (await session.execute(text(f'SELECT name, entries FROM {SCHEMA}.bundles'))).all()
+        bundles_updated = 0
+        for name, entries in bundle_rows:
+            if not entries:
+                continue
+            changed = False
+            for entry in entries:
+                if entry.get("page_id") in mapping:
+                    entry["page_id"] = mapping[entry["page_id"]]
+                    changed = True
+            if changed:
+                await session.execute(
+                    text(f'UPDATE {SCHEMA}.bundles SET entries = :entries WHERE name = :name'),
+                    {"entries": json.dumps(entries), "name": name},
+                )
+                bundles_updated += 1
+
         await session.commit()
 
-    print(f"\n✓ Migrated {len(mapping)} page(s) and their references in PostgreSQL.")
+    print(f"\n✓ Migrated {len(mapping)} page(s), their references, "
+          f"and {bundles_updated} bundle(s) in PostgreSQL.")
     await close_engine()
 
 

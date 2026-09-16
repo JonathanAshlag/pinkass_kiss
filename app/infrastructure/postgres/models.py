@@ -45,6 +45,7 @@ class PageORM(Base):
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     verified_by: Mapped[str | None] = mapped_column(String, nullable=True)
     inbound_link_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    current_version_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_by: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False,
@@ -69,6 +70,9 @@ class PageORM(Base):
     )
 
     revisions: Mapped[list[PageRevisionORM]] = relationship(
+        back_populates="page", cascade="all, delete-orphan", lazy="noload"
+    )
+    versions: Mapped[list[PageVersionORM]] = relationship(
         back_populates="page", cascade="all, delete-orphan", lazy="noload"
     )
     refs: Mapped[list[PageRefORM]] = relationship(
@@ -111,6 +115,123 @@ class PageRevisionORM(Base):
 
     __table_args__ = (
         Index("ix_page_revisions_page_id_created_at", "page_id", "created_at"),
+    )
+
+
+class PageVersionORM(Base):
+    """Full-content snapshot, created whenever a mutation makes new content live.
+    Separate from PageRevisionORM (the human-readable action/diff/comment audit log)."""
+    __tablename__ = "page_versions"
+
+    version_id: Mapped[str] = mapped_column(String, primary_key=True)
+    page_id: Mapped[str] = mapped_column(
+        String, ForeignKey("pages.page_id", ondelete="CASCADE"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    parent_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    references: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    aliases: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    tags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    classification: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    trust_tier: Mapped[str] = mapped_column(String, nullable=False)
+
+    page: Mapped[PageORM] = relationship(back_populates="versions")
+
+    __table_args__ = (
+        Index("ix_page_versions_page_id_version_number", "page_id", "version_number"),
+    )
+
+
+class DeletedPageORM(Base):
+    """Archive copy of a deleted page's live row. Own PK/table — not a live `pages`
+    row, so nothing in normal queries can ever reach it."""
+    __tablename__ = "deleted_pages"
+
+    page_id: Mapped[str] = mapped_column(String, primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    parent_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    trust_tier: Mapped[str] = mapped_column(String, nullable=False, default="unverified")
+    next_approval_date: Mapped[str | None] = mapped_column(String, nullable=True)
+    verified_content_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verified_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    inbound_link_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    current_version_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    classification: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    references: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    aliases: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    tags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    meta: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    deleted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    deleted_by: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class DeletedPageVersionORM(Base):
+    """Archive copy of a deleted page's PageVersionORM rows."""
+    __tablename__ = "deleted_page_versions"
+
+    version_id: Mapped[str] = mapped_column(String, primary_key=True)
+    page_id: Mapped[str] = mapped_column(
+        String, ForeignKey("deleted_pages.page_id", ondelete="CASCADE"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    parent_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    references: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    aliases: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    tags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    classification: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    trust_tier: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        Index("ix_deleted_page_versions_page_id", "page_id"),
+    )
+
+
+class DeletedPageRevisionORM(Base):
+    """Archive copy of a deleted page's PageRevisionORM rows (the HistoryEntry audit log)."""
+    __tablename__ = "deleted_page_revisions"
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    page_id: Mapped[str] = mapped_column(
+        String, ForeignKey("deleted_pages.page_id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(String, nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    diff: Mapped[str | None] = mapped_column(Text, nullable=True)
+    snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_deleted_page_revisions_page_id", "page_id"),
     )
 
 
