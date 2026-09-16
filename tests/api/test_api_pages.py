@@ -81,7 +81,9 @@ async def test_create_page_returns_published(client, editor):
     body = resp.json()
     assert body["status"] == "published"
     assert "page_id" in body["page"]
-    assert body["page"]["page_id"] == "Hello"
+    # page_id is a Slack-style normalized-title + random suffix, not the raw title.
+    assert body["page"]["page_id"] != "Hello"
+    assert body["page"]["page_id"].startswith("hello-")
 
 
 async def test_create_page_with_duplicate_title_returns_409(client, editor):
@@ -143,10 +145,11 @@ async def test_partial_update_preserves_untouched_fields(client, editor):
     await client.put(
         f"/pages/{page_id}",
         headers={"X-User-Id": editor.user_id},
-        json={"title": "New Title"},
+        json={"description": "New Description"},
     )
     body = (await client.get(f"/pages/{page_id}", headers={"X-User-Id": editor.user_id})).json()
-    assert body["title"] == "New Title"
+    assert body["title"] == "Original Title"
+    assert body["description"] == "New Description"
     assert body["content"] == "Content"
 
 
@@ -194,7 +197,7 @@ async def test_omitting_parent_id_in_update_preserves_existing_parent(client, ed
     await client.put(
         f"/pages/{child_id}",
         headers={"X-User-Id": editor.user_id},
-        json={"title": "New Title"},
+        json={"description": "New Description"},
     )
 
     body = (await client.get(f"/pages/{child_id}", headers={"X-User-Id": editor.user_id})).json()

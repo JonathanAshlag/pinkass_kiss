@@ -47,7 +47,7 @@ async def test_delete_removes_page(editor, page_repo):
 async def test_multiple_edits_accumulate(editor, page_repo):
     page = await create_page(PageCreate(title="Multi", description="Multi page", content="V1"), editor, page_repo)
     await update_page(page.page_id, PageUpdate(content="V2"), editor, page_repo)
-    await update_page(page.page_id, PageUpdate(title="Multi Updated"), editor, page_repo)
+    await update_page(page.page_id, PageUpdate(description="Updated desc"), editor, page_repo)
     await update_page(page.page_id, PageUpdate(content="V3"), editor, page_repo)
 
     page = await get_page(page.page_id, page_repo)

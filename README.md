@@ -260,7 +260,9 @@ sudo systemctl start pinkas-api pinkas-ui
 
 6. **Ask a question:** Go to "שאל שאלה", type a question about the wiki content. The LLM searches and composes an answer, preferring verified pages and noting when it relies on unverified content. The response includes a `cited_pages` list of page **titles** used as context. Only pages the requesting user has access to (per classification triangles) are included as context.
 
-7. **Produce from a file:** Go to "העלאת מסמך", upload a PDF, DOCX, XLSX, PPTX, HTML, or TXT file. The system extracts text and any embedded images (up to 20 per document) and generates wiki pages using multimodal LLM calls. Admin users can pass `initial_trust_tier=verified` via the API to self-certify the upload. The raw file is kept in GridFS and reference-counted against the pages it produced — it is purged automatically once the last generated page is deleted.
+7. **Produce from a file (two-phase review):** Go to "העלאת מסמך", upload one or more PDF, DOCX, XLSX, PPTX, HTML, or TXT files, and optionally type free-text **ingestion guidance** (e.g. "focus only on the security sections") that steers every LLM call for that batch. Uploading returns immediately with a `batch_id`; the UI polls for progress ("extracted N candidates...", "candidate matches existing page X — checking for new information...", etc.) while a background task runs the extract → dedup → generate/merge pipeline. **Nothing is written to the wiki during this phase** — each extracted topic becomes a create/merge/link *candidate* held in an in-memory, per-process batch store scoped to the uploading user (not persisted; lost if the API restarts).
+
+   Once generation finishes, candidates appear as collapsed rows (title + type) grouped by source file. Opening one shows a page-view rendering of the proposal — single-pane for a new page, side-by-side original-vs-proposed for a merge into an existing page, a simple "link this file to page X?" confirmation when the document doesn't add new information — with an Edit toggle for inline title/description/content/alias changes before deciding. Approve/reject individually or in bulk ("אשר הכל" / "דחה הכל"); only an approval calls `apply_page_mutation`, so an edit-workflow user's approved merge still lands in `pending_approval` instead of publishing directly. Admin users can pass `initial_trust_tier=verified` via the API to self-certify created pages. If any LLM call in the batch fails (bad response, timeout, unparseable JSON), the whole batch is marked `error` and zero candidates are ever shown — the pipeline does not fall back to placeholder content. The raw file is kept in GridFS and reference-counted against the pages it produced (purged automatically if none of its candidates are approved, or once the last generated page is deleted).
 
 8. **Verify a page:** Submit a `review` approval request with `proposed_content.type = "review"` and `trust_tier = "verified"`. Once the workflow approves it, the page is stamped as human-verified, a SHA-256 content hash is recorded, and `verified_at`/`verified_by` are set. Any subsequent content change triggers an automatic re-verification request the next morning.
 
@@ -285,9 +287,30 @@ All mutations (create/edit/delete) go through `apply_page_mutation()` in `app/se
 | `PendingResult` | `"pending_approval"` | `request_id`; `page` present for create, absent for edit/delete |
 | `DeletedResult` | `"deleted"` | *(none)* |
 
-`apply_page_mutation` also accepts an optional `trust_tier` parameter. When `trust_tier=verified` and a create or edit mutation is published directly (no workflow), the seam promotes the page's trust tier inline via `build_verification_fields()` — recording the content hash, `verified_at`, and `verified_by` — so callers never need to reach around the seam with raw DB writes. Today only the document-ingestion pipeline (`app/llm/pipeline.py`, admin self-certified uploads) passes `trust_tier` on create; no API surface exposes it on edit, since every other path to `verified` is required to go through a `review` approval request (see below).
+`apply_page_mutation` also accepts an optional `trust_tier` parameter. When `trust_tier=verified` and a create or edit mutation is published directly (no workflow), the seam promotes the page's trust tier inline via `build_verification_fields()` — recording the content hash, `verified_at`, and `verified_by` — so callers never need to reach around the seam with raw DB writes. Today only the document-ingestion approval endpoint (`app/routers/produce.py`, admin self-certified uploads — decided by the batch's `initial_trust_tier` at approval time) passes `trust_tier` on create; no API surface exposes it on edit, since every other path to `verified` is required to go through a `review` approval request (see below).
 
 When an edit mutation is routed through a workflow, `apply_page_mutation` immediately persists any `references` on the `PageUpdate` regardless of approval state. Source provenance is always recorded; only content changes wait for approval.
+
+> `title` shown in the `edit`/`review` payload shapes above is a schema leftover, not an editable field in practice — see [Page Identity](#page-identity) below. It's only ever meaningfully set on `create`.
+
+## Page Identity
+
+A page's `title` is fixed at creation and is **immutable** afterward. `PUT /pages/{id}` — and any edit routed through a workflow — rejects a request that tries to change it, before an approval request is ever created. To rename a page, create a new one and retire the old one.
+
+`page_id` is generated once at creation as `{normalized-title}-{suffix}` (Slack-channel style) instead of being the raw title itself:
+
+- The title is slugified (`app/services/page_id.py::normalize_title_for_id`): whitespace and punctuation collapse to hyphens and diacritics/Hebrew niqqud are stripped, but the underlying script (Hebrew, Latin, etc.) is kept as-is.
+- A random 4-character suffix is appended, drawn from a Crockford-safe alphabet (no `i`/`l`/`o`, to avoid transcription mistakes when a person or an LLM retypes it) and retried up to 5 times on collision.
+- Duplicate titles are still rejected with `409` on create, independent of the `page_id` scheme (`PageRepository.get_by_title`).
+
+Because `page_id` never changes after creation, it's safe to treat as a stable, permanent reference everywhere — page-to-page links, the LLM `fetch` tool, external bookmarks.
+
+**Upgrading an existing install:** installs created before this scheme used `page_id == title`. `scripts/migrate_page_ids.py` reassigns every existing page to the new id format and rewrites every place that references the old id (Postgres FKs on `page_refs`/`page_revisions`/`requests`, and Mongo's embedded `references[]`):
+
+```bash
+python scripts/migrate_page_ids.py            # dry run — prints the id mapping only, writes nothing
+python scripts/migrate_page_ids.py --apply    # writes the changes
+```
 
 ## Trust Tier System
 
@@ -561,7 +584,8 @@ pinkas/
 │   ├── routers/                 # REST endpoints
 │   │   ├── pages.py
 │   │   ├── ask.py               # Q&A
-│   │   ├── produce.py           # Document ingestion (PDF/DOCX/XLSX/PPTX/HTML/TXT)
+│   │   ├── produce.py           # Document ingestion: upload → background candidate generation;
+│   │   │                        # list/approve/reject batch candidates (two-phase review)
 │   │   ├── workflows.py
 │   │   ├── users.py
 │   │   ├── approvals.py
@@ -571,6 +595,7 @@ pinkas/
 │   │   │                        # through workflows; returns typed MutationResult
 │   │   │                        # (PublishedResult | PendingResult | DeletedResult)
 │   │   ├── pages.py
+│   │   ├── page_id.py           # Slack-style page_id generation (normalized-title + random suffix)
 │   │   ├── classification.py    # Triangle access control + external API client
 │   │   ├── workflows.py
 │   │   ├── users.py
@@ -593,13 +618,18 @@ pinkas/
 │   │       ├── models.py        # ORM table definitions
 │   │       └── migrations/      # Alembic migrations
 │   ├── llm/                     # LLM integration
-│   │   ├── client.py            # OpenAI-compatible client (persistent singleton, 600 s timeout)
+│   │   ├── client.py            # OpenAI-compatible client (persistent singleton, 600 s timeout);
+│   │   │                        # _call_llm_json raises on any error — no fallback defaults
 │   │   ├── retrieval.py         # Q&A with tool-calling loop; classification-aware search;
 │   │   │                        # cited_pages returns page titles
-│   │   ├── ingestion.py         # Per-phase LLM calls (extract → dedup → generate/merge);
+│   │   ├── ingestion.py         # Per-phase LLM calls (extract → dedup → generate/merge), each
+│   │   │                        # taking an optional ingestion_context to steer that run;
 │   │   │                        # prompt structure optimised for vLLM prefix-cache reuse
 │   │   ├── extraction.py        # Document text/image extraction (PDF/DOCX/XLSX/PPTX/HTML)
-│   │   └── pipeline.py          # 3-phase ingestion orchestrator; returns list[PageIngestOutcome]
+│   │   ├── pipeline.py          # 3-phase ingestion orchestrator; proposes candidates into the
+│   │   │                        # batch store only — no direct DB writes
+│   │   └── batch_store.py       # In-memory, per-process store of ingestion batches/candidates
+│   │                            # awaiting review (not persisted; scoped to the uploading user)
 │   └── scheduler/               # APScheduler daily jobs
 │       └── jobs.py              # check_expired_pages, check_verification_drift,
 │                                # update_inbound_link_counts
@@ -613,6 +643,7 @@ pinkas/
 │   ├── init_db.py                # Create MongoDB indexes / run Postgres migrations
 │   ├── seed_db.py                # ⚠️ destructive — wipes existing data, seeds demo users/workflow/pages
 │   ├── create_admin.py           # Create a single real admin user (no demo data)
+│   ├── migrate_page_ids.py       # One-time: reassign pre-existing pages to the new page_id scheme
 │   ├── bulk_upload_terms.py      # Bulk-import a JSON list of terms as pages
 │   └── agent_client_example.py   # Minimal example client for the agent-api
 ├── tests/                       # pytest suite (each test runs against both backends)

@@ -59,6 +59,15 @@ class PostgresPageRepository(PageRepository):
         page.history = await self.get_history(page_id)
         return page
 
+    async def get_by_title(self, title: str) -> Optional[Page]:
+        result = await self._s.execute(select(PageORM).where(PageORM.title == title))
+        row = result.scalar_one_or_none()
+        if not row:
+            return None
+        page = _orm_to_page(row)
+        page.history = await self.get_history(row.page_id)
+        return page
+
     async def create(self, page: Page) -> None:
         orm = PageORM(
             page_id=page.page_id,
@@ -300,31 +309,6 @@ class PostgresPageRepository(PageRepository):
         else:
             stmt = base.limit(limit)
 
-        result = await self._s.execute(stmt)
-        rows = result.scalars().all()
-        return [self._row_to_dict(row, fields) for row in rows]
-
-    async def find_similar_for_dedup(
-        self,
-        title: str,
-        description: str,
-        threshold: float,
-        limit: int,
-        fields: Optional[list[str]] = None,
-    ) -> list[dict]:
-        if self._dialect != "postgresql":
-            return await super().find_similar_for_dedup(title, description, threshold, limit, fields)
-        sim = func.greatest(
-            func.word_similarity(title, PageORM.title),
-            func.word_similarity(description, PageORM.description),
-        )
-        stmt = (
-            select(PageORM)
-            .where(PageORM.status != PageStatus.deleted.value)
-            .where(sim >= threshold)
-            .order_by(sim.desc())
-            .limit(limit)
-        )
         result = await self._s.execute(stmt)
         rows = result.scalars().all()
         return [self._row_to_dict(row, fields) for row in rows]

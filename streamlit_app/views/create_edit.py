@@ -127,9 +127,9 @@ def render_edit(user_id: str):
         return
 
     st.header(UI["edit_page_existing"])
-    st.caption(page.get("title", ""))
 
-    title = st.text_input(UI["title_field"], value=page.get("title", ""))
+    st.text_input(UI["title_field"], value=page.get("title", ""), disabled=True)
+    st.caption(UI["title_immutable_hint"])
     description = st.text_input(UI["description_field"], value=page.get("description", "") or "")
     parent_id = _render_parent_picker(
         user_id,
@@ -156,8 +156,6 @@ def render_edit(user_id: str):
     with col1:
         if st.button(UI["save_button"]):
             data = {}
-            if title != page.get("title"):
-                data["title"] = title
             if description != (page.get("description") or ""):
                 data["description"] = description
             if content != page.get("content"):

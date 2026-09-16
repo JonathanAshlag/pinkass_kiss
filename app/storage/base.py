@@ -38,6 +38,9 @@ class PageRepository(ABC):
     async def get(self, page_id: str) -> "Page | None": ...
 
     @abstractmethod
+    async def get_by_title(self, title: str) -> "Page | None": ...
+
+    @abstractmethod
     async def create(self, page: "Page") -> None: ...
 
     @abstractmethod
@@ -80,18 +83,6 @@ class PageRepository(ABC):
     ) -> list[dict]:
         """Fuzzy-match pages by title or alias only (not content/description)."""
         return await self.search_by_name(query, statuses, limit, fields, tags=tags)
-
-    async def find_similar_for_dedup(
-        self,
-        title: str,
-        description: str,
-        threshold: float,
-        limit: int,
-        fields: "list[str] | None" = None,
-    ) -> list[dict]:
-        from app.models.page import PageStatus
-        statuses = [s.value for s in PageStatus if s != PageStatus.deleted]
-        return await self.search_by_name(f"{title} {description}", statuses, limit, fields)
 
     async def fuzzy_search_scored(
         self,

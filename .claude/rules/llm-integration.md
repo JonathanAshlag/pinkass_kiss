@@ -17,13 +17,17 @@ The LLM layer separates orchestration logic from prompt templates.
 
 **Error handling pattern:**
 
-`app/llm/client.py:_call_llm_json()` wraps LLM calls in broad try/except and returns a `default` value on any error (no exception thrown). This is **intentional** for resilience — LLM calls are inherently unreliable. When calling the LLM, provide a sensible default (empty list, None, fallback structure) and let the caller decide what to do with it.
+`app/llm/client.py:_call_llm_json()` logs and re-raises on any error (bad response, timeout,
+unparseable JSON). This is **intentional**: the ingestion pipeline must not fabricate
+placeholder content (e.g. a candidate page named after the source file, or raw document text
+as page content) when the LLM is unreachable or misbehaving. The exception propagates up
+through `run_ingestion_pipeline` to `_run_batch` (`app/routers/produce.py`), which marks the
+whole batch `error` — a broken LLM call means zero candidates are proposed, not a wrong one.
 
 ```python
-# This is the pattern — catch all, return default
+# This is the pattern — let failures propagate, don't default
 result = await _call_llm_json(
     messages=[...],
-    default=[],  # Return empty list if LLM fails
     name="extract_candidates"
 )
 ```

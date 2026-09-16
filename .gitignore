@@ -50,5 +50,4 @@ htmlcov/
 # Logs
 *.log
 
-# MongoDB data (if running locally)
-data/db/
+task.md

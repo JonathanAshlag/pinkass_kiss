@@ -98,6 +98,13 @@ async def apply_page_mutation(
     elif req_type == RequestType.edit:
         assert isinstance(data, PageUpdate), "data must be PageUpdate for edit mutations"
         assert page_id is not None, "page_id required for edit mutations"
+        if data.title is not None:
+            # `page` is an optional caller-supplied hint (the router passes it, some
+            # callers don't) — fetch it ourselves so this check can't be bypassed by
+            # simply omitting the parameter.
+            current = page if page is not None else await page_repo.get(page_id)
+            if current is not None and data.title != current.title:
+                raise ValueError("Page title is immutable and cannot be changed after creation")
         force_review = page is not None and page.trust_tier == TrustTier.verified
         if user.workflow_id or force_review:
             if force_review and not user.workflow_id:

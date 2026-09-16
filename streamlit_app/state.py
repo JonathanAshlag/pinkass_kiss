@@ -23,6 +23,9 @@ EDITING_PAGE = "editing_page"
 # Chat
 CHAT_HISTORY = "chat_history"
 
+# Produce (ingestion review)
+PRODUCE_BATCH_ID = "produce_batch_id"
+
 # Parent picker
 PP_CTX = "_pp_ctx"
 PP_SEL_ID = "_pp_sel_id"

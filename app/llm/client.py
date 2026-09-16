@@ -21,8 +21,12 @@ def get_client() -> AsyncOpenAI:
 
 
 def _parse_json_response(raw: str) -> str:
-    """Strip markdown code fences from an LLM JSON response."""
+    """Strip a leading <think>...</think> reasoning block and markdown code fences from an LLM JSON response."""
     raw = raw.strip()
+    if raw.startswith("<think>"):
+        end = raw.find("</think>")
+        if end != -1:
+            raw = raw[end + len("</think>"):].strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
         if raw.endswith("```"):
@@ -30,8 +34,11 @@ def _parse_json_response(raw: str) -> str:
     return raw.strip()
 
 
-async def _call_llm_json(messages: list[dict], default: object, name: str = "llm") -> object:
-    """Call the LLM and parse a JSON response. Returns `default` on any error."""
+async def _call_llm_json(messages: list[dict], name: str = "llm") -> object:
+    """Call the LLM and parse a JSON response. Raises on any error (bad response, timeout,
+    unparseable JSON) — callers must not fabricate placeholder content when the LLM is
+    unavailable or misbehaving; the ingestion pipeline relies on this to abort a batch
+    rather than propose a bogus candidate."""
     try:
         response = await get_client().chat.completions.create(
             model=settings.openai_model,
@@ -41,4 +48,4 @@ async def _call_llm_json(messages: list[dict], default: object, name: str = "llm
         return json.loads(raw)
     except Exception as e:
         logger.error(f"LLM {name} error: {e}")
-        return default
+        raise

@@ -76,13 +76,18 @@ docker-compose up -d
 
 **Central mutation seam:** All page create/edit/delete operations flow through `app/services/mutations.py:apply_page_mutation()`. This function decides whether to publish directly or route through a workflow based on the user's `workflow_id`. Trust-tier promotion (verified) and reference persistence also happen here.
 
+**Page identity:** `title` is immutable once a page is created — `apply_page_mutation`/`update_page` reject any edit that changes it; renaming means creating a new page. `page_id` is generated once at creation as `{normalized-title}-{random-suffix}` (`app/services/page_id.py`, Slack-channel-style) rather than being the title itself, so it stays short and copyable (including for LLM tool calls) without colliding across pages with the same title. Non-Latin scripts (e.g. Hebrew) are kept as-is in the slug.
+
 **LLM integration:**
-- `app/llm/client.py` — OpenAI-compatible client setup and JSON response parsing
+- `app/llm/client.py` — OpenAI-compatible client setup and JSON response parsing; `_call_llm_json` raises on any error (bad response, timeout, unparseable JSON) rather than returning a fallback default — a broken LLM call must produce nothing rather than fabricate placeholder content
 - `app/llm/retrieval.py` — Q&A with tool-calling loop (LLM calls a `retrieve` tool to search pages)
-- `app/llm/pipeline.py` — 3-phase document ingestion orchestrator (extract → dedup → create/merge)
-- `app/llm/ingestion.py` — Individual LLM calls for each pipeline phase
-- `app/routers/produce.py` — HTTP endpoints for document ingestion
+- `app/llm/pipeline.py` — 3-phase document ingestion orchestrator (extract → dedup → create/merge). Proposes candidates only — no direct DB writes; each candidate is handed to the in-memory batch store for user review, and any LLM failure aborts the whole batch
+- `app/llm/batch_store.py` — in-memory, per-process store of ingestion batches/candidates awaiting user approval (not persisted; scoped to the uploading user)
+- `app/llm/ingestion.py` — Individual LLM calls for each pipeline phase, each accepting an optional free-text `ingestion_context` to steer that run
+- `app/routers/produce.py` — HTTP endpoints for document ingestion: upload kicks off background candidate generation; separate endpoints list/approve/reject individual candidates, calling `apply_page_mutation` only at approval time
 - `app/IP/prompts/` — Prompt templates for ingestion and retrieval workflows
+
+**Search:** `find_similar_pages_for_dedup` (`app/services/pages.py`) reuses the exact same fuzzy-search mechanism as `/pages/search` (`fuzzy_search_scored` — title+aliases, pg_trgm/text-search, threshold-enforced on both backends) minus classification/permission filtering, so ingestion-time dedup and user-facing search behave identically.
 
 **Permission model:** Classification-based. Pages carry a `classification` list of `ClassificationTriangle` objects. Access is resolved via `app/services/permissions.py` using classification matching.
 

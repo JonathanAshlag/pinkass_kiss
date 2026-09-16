@@ -158,6 +158,16 @@ async def update_page_endpoint(
             request_path=f"/pages/{page_id}",
         ))
         raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        emit_audit_log(AuditLogEntry(
+            action=AuditAction.edit_page,
+            user_context=user_context,
+            resource_id=page_id,
+            outcome=AuditOutcome.denied,
+            latency_ms=(time.perf_counter() - t0) * 1000,
+            request_path=f"/pages/{page_id}",
+        ))
+        raise HTTPException(status_code=400, detail=str(e))
     emit_audit_log(AuditLogEntry(
         action=AuditAction.edit_page,
         user_context=user_context,

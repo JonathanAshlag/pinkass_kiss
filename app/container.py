@@ -29,6 +29,7 @@ class RepoSet:
     requests: RequestRepository
     users: UserRepository
     workflows: WorkflowRepository
+    source_files: SourceFileRepository
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +135,7 @@ async def background_repos():
         from app.storage.postgres.requests import PostgresRequestRepository
         from app.storage.postgres.users import PostgresUserRepository
         from app.storage.postgres.workflows import PostgresWorkflowRepository
+        from app.storage.postgres.source_files import PostgresSourceFileRepository
 
         factory = get_session_factory()
         async with factory() as session:
@@ -142,6 +144,7 @@ async def background_repos():
                 requests=PostgresRequestRepository(session),
                 users=PostgresUserRepository(session),
                 workflows=PostgresWorkflowRepository(session),
+                source_files=PostgresSourceFileRepository(session),
             )
             await session.commit()
     else:
@@ -149,6 +152,7 @@ async def background_repos():
         from app.storage.mongo.requests import MongoRequestRepository
         from app.storage.mongo.users import MongoUserRepository
         from app.storage.mongo.workflows import MongoWorkflowRepository
+        from app.storage.mongo.source_files import MongoSourceFileRepository
 
         db = get_db()
         yield RepoSet(
@@ -156,4 +160,5 @@ async def background_repos():
             requests=MongoRequestRepository(db),
             users=MongoUserRepository(db),
             workflows=MongoWorkflowRepository(db),
+            source_files=MongoSourceFileRepository(db),
         )

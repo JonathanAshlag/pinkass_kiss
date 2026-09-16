@@ -1,18 +1,26 @@
 """Prompts for the document ingestion pipeline (Phases 1-3)."""
 
+
+def _context_block(ingestion_context: str | None) -> str:
+    if not ingestion_context:
+        return ""
+    return f"\n\nAdditional guidance from the user for this ingestion: {ingestion_context}"
+
+
 EXTRACT_TOPICS_SYSTEM = (
     'You are a knowledge base curator for an organizational wiki called "Pinkas" (פנקס כיס). '
     "Identify the distinct wiki-worthy topics in a source document."
 )
 
 
-def build_extract_topics_user(filename: str) -> tuple[str, str]:
+def build_extract_topics_user(filename: str, ingestion_context: str | None = None) -> tuple[str, str]:
     pre = f"Document: {filename}\n\nDocument content:\n"
     post = (
         "\n\nFor each distinct topic in the document, return:\n"
         "- title: concise wiki-style title\n"
         "- description: one sentence defining this topic (used for search and dedup)\n\n"
         "Return a JSON array only. No other text."
+        f"{_context_block(ingestion_context)}"
     )
     return pre, post
 
@@ -20,7 +28,9 @@ def build_extract_topics_user(filename: str) -> tuple[str, str]:
 JUDGE_DUPLICATE_SYSTEM = "You are a knowledge deduplication specialist."
 
 
-def build_judge_duplicate_user(candidate: dict, search_results: list[dict]) -> str:
+def build_judge_duplicate_user(
+    candidate: dict, search_results: list[dict], ingestion_context: str | None = None,
+) -> str:
     pages_text = "\n".join(
         f"- [{r['page_id']}] {r['title']}: {r.get('description', '')}\n  Content: {r.get('content', '')}"
         for r in search_results
@@ -32,18 +42,22 @@ def build_judge_duplicate_user(candidate: dict, search_results: list[dict]) -> s
         f"Existing pages:\n{pages_text}\n\n"
         "Is the candidate the same concept as any existing page?\n"
         'Return JSON only: {"is_duplicate": bool, "matched_page_id": "id or null", "confidence": "high|medium|low"}'
+        f"{_context_block(ingestion_context)}"
     )
 
 
 GENERATE_CONTENT_SYSTEM = "You are a wiki editor writing a new page for an organizational knowledge base."
 
 
-def build_generate_content_user(title: str, description: str, filename: str) -> tuple[str, str]:
+def build_generate_content_user(
+    title: str, description: str, filename: str, ingestion_context: str | None = None,
+) -> tuple[str, str]:
     pre = f"Source document: {filename}\n\nDocument content:\n"
     post = (
         f'\n\nWrite a complete wiki page for the topic "{title}" ({description}).\n'
         "Base your content only on what the document says about this topic.\n"
         'Return JSON only: {"content": "full markdown content"}'
+        f"{_context_block(ingestion_context)}"
     )
     return pre, post
 
@@ -60,6 +74,7 @@ def build_merge_content_user(
     candidate_description: str,
     filename: str,
     text: str,
+    ingestion_context: str | None = None,
 ) -> str:
     return (
         f'Source document "{filename}":\n{text}\n\n'
@@ -67,4 +82,5 @@ def build_merge_content_user(
         f"New source covers this topic as: {candidate_description}\n\n"
         "Does the document add meaningful information not already in the existing page?\n"
         'Return JSON only: {"has_new_info": bool, "merged_content": "full updated markdown or null", "summary_of_additions": "brief or null"}'
+        f"{_context_block(ingestion_context)}"
     )

@@ -12,6 +12,7 @@ from app.models.page import (
 from app.models.user import User
 from app.storage.base import PageRepository, with_always_included_fields
 from app.services.classification import get_user_triangles, user_satisfies_classification
+from app.services.page_id import generate_page_id
 
 logger = logging.getLogger("pinkas.pages")
 
@@ -38,12 +39,17 @@ async def _merge_parent_tags(tags: list[str], parent_id: Optional[str], repo: Pa
     return sorted(set(tags) | set(parent.tags))
 
 
+async def _page_id_exists(candidate: str, repo: PageRepository) -> bool:
+    return await repo.get(candidate) is not None
+
+
 async def create_page(data: PageCreate, user: User, repo: PageRepository) -> Page:
-    if await repo.get(data.title) is not None:
+    if await repo.get_by_title(data.title) is not None:
         raise ValueError(f"A page titled '{data.title}' already exists")
+    page_id = await generate_page_id(data.title, lambda candidate: _page_id_exists(candidate, repo))
     merged_tags = await _merge_parent_tags(data.tags, data.parent_id, repo)
     page = Page(
-        page_id=data.title,
+        page_id=page_id,
         title=data.title,
         description=data.description,
         parent_id=data.parent_id,
@@ -80,9 +86,10 @@ async def update_page(
     if not page:
         return None
 
+    if data.title is not None and data.title != page.title:
+        raise ValueError("Page title is immutable and cannot be changed after creation")
+
     update_fields: dict = {}
-    if data.title is not None:
-        update_fields["title"] = data.title
     if data.description is not None:
         update_fields["description"] = data.description
     if "parent_id" in data.model_fields_set:
@@ -266,6 +273,23 @@ async def fuzzy_search_pages(
     docs.sort(key=lambda d: d["score"], reverse=True)
     good = [d for d in docs if d["score"] >= ACTIVE_SEARCH_MISS_THRESHOLD][:ACTIVE_SEARCH_TOP_N]
     return [Page(**doc) for doc in good]
+
+
+async def find_similar_pages_for_dedup(query: str, repo: PageRepository) -> list[dict]:
+    """Same search mechanism as fuzzy_search_pages — title+aliases, pg_trgm/text-search
+    scored via repo.fuzzy_search_scored, miss-thresholded, capped at ACTIVE_SEARCH_TOP_N —
+    used during ingestion to find existing pages an extracted candidate might duplicate.
+
+    Considers all non-deleted pages (not just published, since drafts/pending-approval
+    pages are valid dedup targets too) and skips classification/permission filtering:
+    ingestion-time matching isn't scoped to any particular user's visibility.
+    """
+    from app.search_config import ACTIVE_SEARCH_CANDIDATE_POOL, ACTIVE_SEARCH_MISS_THRESHOLD, ACTIVE_SEARCH_TOP_N
+    statuses = [s.value for s in PageStatus if s != PageStatus.deleted]
+    fields = list(with_always_included_fields(["page_id", "title", "description", "content"]))
+    docs = await repo.fuzzy_search_scored(query, statuses, ACTIVE_SEARCH_CANDIDATE_POOL, fields=fields)
+    docs.sort(key=lambda d: d["score"], reverse=True)
+    return [d for d in docs if d["score"] >= ACTIVE_SEARCH_MISS_THRESHOLD][:ACTIVE_SEARCH_TOP_N]
 
 
 async def find_page_docs_fuzzy(

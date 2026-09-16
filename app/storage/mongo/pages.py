@@ -19,6 +19,13 @@ class MongoPageRepository(PageRepository):
             return Page(**doc)
         return None
 
+    async def get_by_title(self, title: str) -> Optional[Page]:
+        doc = await self._db.pages.find_one({"title": title})
+        if doc:
+            doc.pop("_id", None)
+            return Page(**doc)
+        return None
+
     async def create(self, page: Page) -> None:
         await self._db.pages.insert_one(page.model_dump(mode="json"))
 
