@@ -263,6 +263,17 @@ def remove_manifest_member(
     session.flush()
 
 
+def list_manifest_members(session: Session, manifest_id: uuid.UUID) -> list[ManifestMember]:
+    """The manifest's direct membership rows (not expanded -- see resolve_manifest)."""
+    return list(
+        session.scalars(
+            select(ManifestMember)
+            .where(ManifestMember.manifest_id == manifest_id)
+            .order_by(ManifestMember.created_at)
+        )
+    )
+
+
 def resolve_manifest(
     session: Session, manifest_id: uuid.UUID, _visited: set[uuid.UUID] | None = None
 ) -> set[File]:

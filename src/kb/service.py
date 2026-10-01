@@ -151,5 +151,9 @@ def remove_manifest_member(
     )
 
 
+def list_manifest_members(session: Session, manifest_id: uuid.UUID) -> list[ManifestMember]:
+    return dal.list_manifest_members(session, manifest_id)
+
+
 def resolve_manifest(session: Session, manifest_id: uuid.UUID) -> set[File]:
     return dal.resolve_manifest(session, manifest_id)

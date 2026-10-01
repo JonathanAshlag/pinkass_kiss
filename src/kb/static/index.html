@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KB Browser</title>
+<style>
+  :root { --bg:#fff; --fg:#1d2129; --muted:#6b7280; --line:#e3e6ea; --accent:#2563eb; --bad:#b91c1c; --panel:#f6f7f9; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161a; --fg:#e6e8eb; --muted:#9aa1ac; --line:#2b2f36; --accent:#6ea0ff; --bad:#f07178; --panel:#1b1e23; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; gap:12px; align-items:center; padding:8px 12px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; }
+  nav button { margin-right:4px; }
+  main { flex:1; display:flex; min-height:0; }
+  #left { width:340px; border-right:1px solid var(--line); overflow:auto; padding:8px; background:var(--panel); }
+  #right { flex:1; overflow:auto; padding:12px 16px; }
+  button, input, select, textarea { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:4px; padding:4px 8px; }
+  button { cursor:pointer; } button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.danger { color:var(--bad); }
+  textarea { width:100%; font-family:ui-monospace,monospace; font-size:13px; }
+  label { display:block; margin:8px 0 2px; color:var(--muted); font-size:12px; }
+  input[type=text], select { width:100%; }
+  .node { padding:2px 4px; cursor:pointer; border-radius:3px; white-space:nowrap; }
+  .node:hover { background:var(--line); } .node.sel { background:var(--accent); color:#fff; }
+  .node.del .t { text-decoration:line-through; opacity:.6; }
+  .twisty { display:inline-block; width:14px; color:var(--muted); }
+  .badge { font-size:10px; color:var(--muted); border:1px solid var(--line); border-radius:8px; padding:0 5px; margin-left:4px; }
+  .children { margin-left:14px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; }
+  .warn { color:#b45309; margin:6px 0; } .meta { color:var(--muted); font-size:12px; }
+  #toast { position:fixed; bottom:16px; right:16px; max-width:420px; padding:10px 14px; border-radius:6px; background:var(--bad); color:#fff; display:none; }
+  #toast.ok { background:#15803d; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0 12px; }
+  .hidden { display:none; }
+  code { font-size:12px; }
+  .addbtn { float:right; padding:0 6px; line-height:1.3; } .node.sel .addbtn { color:var(--fg); }
+  .sect { font-size:11px; text-transform:uppercase; color:var(--muted); margin:10px 0 4px; letter-spacing:.04em; }
+  pre.fm { background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:8px 12px; margin:0 0 4px; white-space:pre-wrap; word-break:break-word; font-size:12px; }
+  .md { max-width:860px; border-top:1px solid var(--line); margin-top:4px; }
+  .md pre { background:var(--panel); padding:8px 12px; overflow:auto; border-radius:4px; }
+  .md code { background:var(--panel); padding:0 3px; border-radius:3px; }
+  .md table { border-collapse:collapse; } .md td,.md th { border:1px solid var(--line); padding:3px 8px; }
+  .md blockquote { margin-left:0; padding-left:12px; border-left:3px solid var(--line); color:var(--muted); }
+  .md a.internal { text-decoration:underline dotted; }
+  .md img { max-width:100%; }
+  @media (max-width:700px){ main{flex-direction:column} #left{width:100%;max-height:40vh} }
+</style>
+</head>
+<body>
+<header>
+  <h1>KB Browser</h1>
+  <nav><button id="tab-files" class="primary">Files</button><button id="tab-mf">Manifests</button></nav>
+  <span id="filters">
+    <input id="f-tags" type="text" placeholder="tags (comma)" style="width:130px">
+    <select id="f-status"><option value="">any status</option><option>draft</option><option>stable</option><option>deprecated</option></select>
+    <button id="f-go">Filter</button><button id="f-clear">Clear</button>
+  </span>
+  <label style="margin:0"><input type="checkbox" id="show-deleted"> show deleted</label>
+  <a href="/docs" target="_blank" style="margin-left:auto">API docs</a>
+</header>
+<main>
+  <aside id="left"></aside>
+  <section id="right"><p class="meta">Select a node, or create one.</p></section>
+</main>
+<div id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let activeManifest = null, selectedId = null, view = 'browse', mode = 'files', filterResults = null, pickTarget = null;
+
+function toast(msg, ok = false) {
+  const t = $('#toast'); t.textContent = msg; t.className = ok ? 'ok' : ''; t.style.display = 'block';
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.style.display = 'none', 4000);
+}
+async function api(method, path, body) {
+  const res = await fetch(path, { method, headers: body ? {'Content-Type':'application/json'} : {}, body: body ? JSON.stringify(body) : undefined });
+  if (!res.ok) {
+    let d = res.statusText; try { const j = await res.json(); d = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail); } catch {}
+    toast(`${res.status}: ${d}`); throw new Error(d);
+  }
+  return res.status === 204 ? null : res.json();
+}
+const showDel = () => $('#show-deleted').checked;
+const qs = o => { const p = new URLSearchParams(); for (const [k,v] of Object.entries(o)) if (v !== '' && v != null) (Array.isArray(v) ? v : [v]).forEach(x => p.append(k, x)); return p.toString(); };
+
+/* ---------------- tree ---------------- */
+function nodeEl(n) {
+  const wrap = document.createElement('div');
+  const row = document.createElement('div');
+  row.className = 'node' + (n.deleted_at ? ' del' : '') + (n.id === selectedId ? ' sel' : '');
+  row.dataset.id = n.id;
+  const folder = n.kind === 'folder';
+  row.innerHTML = `<span class="twisty">${folder ? '▸' : ''}</span>${folder ? '📁' : '📄'} <span class="t">${esc(n.title)}</span><span class="badge">${esc(n.status)}</span>`;
+  if (mode === 'mf' && activeManifest) {
+    const add = document.createElement('button'); add.textContent = '＋'; add.className = 'addbtn'; add.title = 'add to manifest';
+    add.onclick = e => { e.stopPropagation(); addMember({ file_id: n.id }); };
+    row.append(add);
+  }
+  const kids = document.createElement('div'); kids.className = 'children hidden';
+  let loaded = false;
+  row.onclick = async e => {
+    if (mode === 'mf') { if (folder) await toggle(); return; }   // manifests tab: tree is just a picker
+    if (pickTarget) { pickTarget(n.id); pickTarget = null; return; }
+    selectNode(n.id);
+    if (folder && e.target.classList.contains('twisty')) await toggle();
+  };
+  async function toggle() {
+    const open = kids.classList.contains('hidden');
+    if (open && !loaded) { await fillChildren(kids, n.id); loaded = true; }
+    kids.classList.toggle('hidden', !open);
+    $('.twisty', row).textContent = open ? '▾' : '▸';
+  }
+  row.ondblclick = () => folder && toggle();
+  row._expand = async () => { if (folder && kids.classList.contains('hidden')) await toggle(); };
+  wrap.append(row, kids);
+  return wrap;
+}
+async function fillChildren(container, parentId) {
+  const path = parentId ? `/files/${parentId}/children` : '/files/roots';
+  const items = await api('GET', `${path}?${qs({include_deleted: showDel()})}`);
+  container.innerHTML = '';
+  items.forEach(n => container.append(nodeEl(n)));
+  if (!items.length) container.innerHTML = '<div class="meta" style="padding:2px 6px">(empty)</div>';
+}
+async function renderTree(left = $('#left')) {
+  left.innerHTML = '';
+  if (mode === 'files') {
+    const bar = document.createElement('div');
+    bar.innerHTML = '<button id="new-root">+ new at root</button> <button id="refresh">↻</button>';
+    left.append(bar);
+    $('#new-root').onclick = () => newForm(null);
+    $('#refresh').onclick = () => renderTree();
+  }
+  const box = document.createElement('div'); box.style.marginTop = '8px'; left.append(box);
+  if (filterResults && mode === 'files') {
+    box.innerHTML = `<div class="meta">${filterResults.length} filter result(s)</div>`;
+    filterResults.forEach(n => { const w = nodeEl(n); box.append(w); });
+  } else await fillChildren(box, null);
+}
+function highlight() {
+  document.querySelectorAll('.node').forEach(e => e.classList.toggle('sel', e.dataset.id === selectedId));
+}
+
+/* ---------------- file detail ---------------- */
+const jsonField = (id, label, v) => `<label>${label} (JSON)</label><textarea id="${id}" rows="3">${esc(JSON.stringify(v ?? null, null, 1))}</textarea>`;
+function toLocalInput(s) { return s ? s.slice(0, 19) : ''; }
+
+function viewTabs(id) {
+  return `<div class="row" style="margin:0 0 10px"><button id="v-browse" class="${view === 'browse' ? 'primary' : ''}">Browse</button><button id="v-edit" class="${view === 'edit' ? 'primary' : ''}">Edit</button></div>`;
+}
+function wireViewTabs(id) {
+  $('#v-browse').onclick = () => { view = 'browse'; selectNode(id); };
+  $('#v-edit').onclick = () => { view = 'edit'; selectNode(id); };
+}
+
+function frontmatter(n) {
+  const fields = { id: n.id, title: n.title, kind: n.kind, status: n.status, description: n.description, tags: n.tags, aliases: n.aliases,
+    sources: n.sources, verified: n.verified, generated: n.generated, stale_after: n.stale_after, created_at: n.created_at, updated_at: n.updated_at };
+  const lines = Object.entries(fields)
+    .filter(([, v]) => v != null && v !== '' && !(Array.isArray(v) && !v.length))
+    .map(([k, v]) => `${k}: ${JSON.stringify(v)}`);   // JSON is valid YAML flow syntax
+  return `---\n${lines.join('\n')}\n---`;
+}
+
+function renderBrowse(n) {
+  const md = n.content ?? '';
+  const html = window.marked ? marked.parse(md) : `<pre>${esc(md)}</pre>`;
+  $('#right').innerHTML = `${viewTabs(n.id)}
+    ${n.deleted_at ? `<div class="warn">deleted ${n.deleted_at}</div>` : ''}
+    ${n.warnings.map(w => `<div class="warn">⚠ ${esc(w)}</div>`).join('')}
+    <pre class="fm">${esc(frontmatter(n))}</pre>
+    <article class="md">${html || '<p class="meta">(no content)</p>'}</article>`;
+  wireViewTabs(n.id);
+  // db://files/<id> links navigate within the UI instead of being dead anchors
+  document.querySelectorAll('.md a[href^="db://files/"]').forEach(a => {
+    const target = a.getAttribute('href').slice('db://files/'.length);
+    a.href = '#'; a.classList.add('internal');
+    a.onclick = async e => { e.preventDefault(); await selectNode(target); await revealInTree(target); };
+  });
+}
+
+// Expand the tree down to `id` (lazy folders get loaded as we go) and scroll to it.
+async function revealInTree(id) {
+  if (filterResults) return;               // filter results are a flat list, nothing to expand
+  const chain = [];                        // ancestors, nearest first
+  for (let cur = id, hops = 0; cur && hops < 100; hops++) {
+    const res = await fetch(`/files/${cur}`);   // raw fetch: a deleted/missing ancestor shouldn't toast
+    if (!res.ok) break;
+    cur = (await res.json()).parent_id;
+    if (cur) chain.push(cur);
+  }
+  for (const anc of chain.reverse()) {
+    const row = document.querySelector(`.node[data-id="${anc}"]`);
+    if (!row) break;                       // e.g. hidden because "show deleted" is off
+    await row._expand();
+  }
+  highlight();
+  document.querySelector(`.node[data-id="${id}"]`)?.scrollIntoView({ block: 'nearest' });
+}
+
+async function selectNode(id) {
+  selectedId = id; highlight();
+  const n = await api('GET', `/files/${id}`);
+  if (view === 'browse') return renderBrowse(n);
+  renderEdit(n, id);
+}
+
+function renderEdit(n, id) {
+  const r = $('#right');
+  r.innerHTML = viewTabs(id) + `
+    <div class="meta">id <code>${n.id}</code> · parent <code>${n.parent_id ?? 'root'}</code> · created ${n.created_at} · updated ${n.updated_at}${n.deleted_at ? ` · <b style="color:var(--bad)">deleted ${n.deleted_at}</b>` : ''}</div>
+    ${n.warnings.map(w => `<div class="warn">⚠ ${esc(w)}</div>`).join('')}
+    <div class="grid2">
+      <div><label>title</label><input type="text" id="e-title" value="${esc(n.title)}"></div>
+      <div><label>kind</label><select id="e-kind"><option>file</option><option>folder</option></select></div>
+      <div><label>status</label><select id="e-status"><option>draft</option><option>stable</option><option>deprecated</option></select></div>
+      <div><label>stale_after (UTC, e.g. 2026-12-31T00:00:00)</label><input type="text" id="e-stale" value="${esc(toLocalInput(n.stale_after))}"></div>
+      <div><label>tags (comma)</label><input type="text" id="e-tags" value="${esc(n.tags.join(', '))}"></div>
+      <div><label>aliases (comma)</label><input type="text" id="e-aliases" value="${esc(n.aliases.join(', '))}"></div>
+    </div>
+    <label>description</label><input type="text" id="e-desc" value="${esc(n.description ?? '')}">
+    <label>content (markdown)</label><textarea id="e-content" rows="14">${esc(n.content ?? '')}</textarea>
+    ${jsonField('e-sources', 'sources', n.sources)}${jsonField('e-verified', 'verified', n.verified)}${jsonField('e-generated', 'generated', n.generated)}
+    <div class="row">
+      <button class="primary" id="b-save">Save</button>
+      <button id="b-child">New child…</button>
+      ${n.deleted_at ? '<button id="b-restore">Restore</button>' : '<button class="danger" id="b-del">Delete</button> <label style="margin:0"><input type="checkbox" id="b-cascade" checked> cascade</label>'}
+    </div>
+    <div class="row"><span>Move to parent:</span><input type="text" id="m-target" placeholder="parent id (blank = root)" style="width:300px">
+      <button id="m-pick">pick from tree</button><button id="m-go">Move</button></div>`;
+  wireViewTabs(id);
+  $('#e-kind').value = n.kind; $('#e-status').value = n.status;
+  const list = s => s.split(',').map(x => x.trim()).filter(Boolean);
+  const parseJson = (id, orig) => { const raw = $(id).value.trim(); try { return raw ? JSON.parse(raw) : null; } catch { toast(`invalid JSON in ${id}`); throw 0; } };
+  $('#b-save').onclick = async () => {
+    const body = {
+      title: $('#e-title').value, kind: $('#e-kind').value, status: $('#e-status').value,
+      description: $('#e-desc').value || null, content: $('#e-content').value,
+      tags: list($('#e-tags').value), aliases: list($('#e-aliases').value),
+      stale_after: $('#e-stale').value.trim() ? $('#e-stale').value.trim() + (/[zZ+]|-\d\d:\d\d$/.test($('#e-stale').value.trim()) ? '' : 'Z') : null,
+      sources: parseJson('#e-sources') ?? [], verified: parseJson('#e-verified') ?? [], generated: parseJson('#e-generated'),
+    };
+    if (body.kind === 'folder' && !body.content) body.content = null;
+    await api('PATCH', `/files/${id}`, body); toast('saved', true); await refreshKeep(id);
+  };
+  $('#b-child').onclick = () => newForm(id);
+  if ($('#b-del')) $('#b-del').onclick = async () => {
+    if (!confirm('Delete this node' + ($('#b-cascade').checked ? ' and its subtree' : '') + '?')) return;
+    await api('DELETE', `/files/${id}?cascade=${$('#b-cascade').checked}`); toast('deleted', true); await refreshKeep(id);
+  };
+  if ($('#b-restore')) $('#b-restore').onclick = async () => { await api('POST', `/files/${id}/restore`); toast('restored', true); await refreshKeep(id); };
+  $('#m-pick').onclick = () => { toast('click a node in the tree…', true); pickTarget = t => { $('#m-target').value = t; }; };
+  $('#m-go').onclick = async () => {
+    await api('POST', `/files/${id}/move`, { new_parent_id: $('#m-target').value.trim() || null });
+    toast('moved', true); await refreshKeep(id);
+  };
+}
+async function refreshKeep(id) { await renderTree(); await selectNode(id); }
+
+function newForm(parentId) {
+  $('#right').innerHTML = `
+    <h3>New node ${parentId ? `under <code>${parentId}</code>` : 'at root'}</h3>
+    <div class="grid2">
+      <div><label>title</label><input type="text" id="n-title"></div>
+      <div><label>kind</label><select id="n-kind"><option>file</option><option>folder</option></select></div>
+    </div>
+    <label>content (markdown; optional for folders)</label><textarea id="n-content" rows="10"></textarea>
+    <div class="row"><button class="primary" id="n-go">Create</button></div>`;
+  $('#n-go').onclick = async () => {
+    const kind = $('#n-kind').value, content = $('#n-content').value;
+    const n = await api('POST', '/files', { parent_id: parentId, kind, title: $('#n-title').value, content: content || (kind === 'folder' ? null : '') });
+    toast('created', true); await renderTree(); await selectNode(n.id);
+  };
+}
+
+/* ---------------- manifests ---------------- */
+async function renderManifests() {
+  const left = $('#left');
+  left.innerHTML = `<div><input type="text" id="mf-name" placeholder="new manifest name" style="width:170px"> <button id="mf-new">+ create</button></div>
+    <div class="sect">Manifests</div><div id="mf-list"></div>
+    <div class="sect" id="mf-tree-h">Files — click ＋ to add to the open manifest</div><div id="mf-tree"></div>`;
+  $('#mf-new').onclick = async () => {
+    const m = await api('POST', '/manifests', { name: $('#mf-name').value }); toast('created', true); await renderManifests(); openManifest(m.id);
+  };
+  const ms = await api('GET', `/manifests?${qs({include_deleted: showDel()})}`);
+  $('#mf-list').innerHTML = '';
+  ms.forEach(m => {
+    const d = document.createElement('div'); d.className = 'node' + (m.deleted_at ? ' del' : '') + (m.id === activeManifest ? ' sel' : ''); d.dataset.id = m.id;
+    d.innerHTML = `🗂 <span class="t">${esc(m.name)}</span>`;
+    d.onclick = () => openManifest(m.id);
+    if (activeManifest && m.id !== activeManifest) {
+      const add = document.createElement('button'); add.textContent = '＋'; add.className = 'addbtn'; add.title = 'nest inside the open manifest';
+      add.onclick = e => { e.stopPropagation(); addMember({ child_manifest_id: m.id }); };
+      d.append(add);
+    }
+    $('#mf-list').append(d);
+  });
+  await renderTree($('#mf-tree'));
+}
+async function addMember(target) {
+  await api('POST', `/manifests/${activeManifest}/members`, target); toast('added', true); openManifest(activeManifest, false);
+}
+async function openManifest(id, rerenderLeft = true) {
+  const switching = activeManifest !== id;
+  activeManifest = id;
+  const [m, files, members] = await Promise.all([api('GET', `/manifests/${id}`), api('GET', `/manifests/${id}/resolve`), api('GET', `/manifests/${id}/members`)]);
+  // direct members -> display labels
+  const labelOf = {};
+  await Promise.all(members.map(async mem => {
+    if (mem.file_id) { const f = files.find(x => x.id === mem.file_id) || await api('GET', `/files/${mem.file_id}`).catch(() => null); labelOf[mem.id] = f ? `${f.kind === 'folder' ? '📁' : '📄'} ${f.title}` : `(missing file ${mem.file_id})`; }
+    else { const c = await api('GET', `/manifests/${mem.child_manifest_id}`).catch(() => null); labelOf[mem.id] = c ? `🗂 ${c.name}` : `(missing manifest ${mem.child_manifest_id})`; }
+  }));
+  $('#right').innerHTML = `
+    <h3>${esc(m.name)}</h3><div class="meta">id <code>${m.id}</code> ${esc(m.description ?? '')}</div>
+    <div class="sect">Members (${members.length}) — pick more from the left pane with ＋</div>
+    ${members.map(mem => `<div class="row" style="margin:2px 0"><span>${esc(labelOf[mem.id])}</span><button class="danger rm" data-file="${mem.file_id ?? ''}" data-child="${mem.child_manifest_id ?? ''}">remove</button></div>`).join('') || '<div class="meta">(none yet)</div>'}
+    <div class="sect">Resolved — everything agents see (${files.length})</div>
+    ${files.map(f => `<div>${f.kind === 'folder' ? '📁' : '📄'} ${esc(f.title)} <code class="meta">${f.id}</code></div>`).join('') || '<div class="meta">(nothing)</div>'}`;
+  document.querySelectorAll('#right .rm').forEach(b => b.onclick = async () => {
+    await api('DELETE', `/manifests/${id}/members?${qs({ file_id: b.dataset.file, child_manifest_id: b.dataset.child })}`);
+    toast('removed', true); openManifest(id, false);
+  });
+  if (switching || rerenderLeft) await renderManifests();   // refresh ＋ buttons / selection for the new active manifest
+}
+
+/* ---------------- wiring ---------------- */
+function setMode(m) {
+  mode = m; if (m === 'mf') activeManifest = null;
+  $('#tab-files').className = m === 'files' ? 'primary' : ''; $('#tab-mf').className = m === 'mf' ? 'primary' : '';
+  $('#filters').classList.toggle('hidden', m !== 'files');
+  m === 'files' ? renderTree() : renderManifests();
+}
+$('#tab-files').onclick = () => setMode('files'); $('#tab-mf').onclick = () => setMode('mf');
+$('#show-deleted').onchange = () => setMode(mode);
+$('#f-go').onclick = async () => {
+  const tags = $('#f-tags').value.split(',').map(s => s.trim()).filter(Boolean);
+  filterResults = await api('GET', `/files?${qs({tags, status: $('#f-status').value, include_deleted: showDel()})}`); renderTree();
+};
+$('#f-clear').onclick = () => { filterResults = null; $('#f-tags').value = ''; $('#f-status').value = ''; renderTree(); };
+setMode('files');
+</script>
+</body>
+</html>

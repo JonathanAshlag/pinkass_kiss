@@ -7,10 +7,12 @@ same as Alembic).
 """
 
 import uuid
+from pathlib import Path
 from typing import Iterator
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from kb import service
@@ -22,6 +24,7 @@ from kb.schemas import (
     FileUpdate,
     ManifestCreate,
     ManifestMemberCreate,
+    ManifestMemberRead,
     ManifestRead,
     MoveRequest,
 )
@@ -167,6 +170,13 @@ def get_manifest(manifest_id: uuid.UUID, session: Session = Depends(get_session)
     return manifest
 
 
+@app.get("/manifests/{manifest_id}/members", response_model=list[ManifestMemberRead])
+def list_manifest_members(manifest_id: uuid.UUID, session: Session = Depends(get_session)):
+    if service.get_manifest(session, manifest_id) is None:
+        raise HTTPException(404, f"no such manifest: {manifest_id}")
+    return service.list_manifest_members(session, manifest_id)
+
+
 @app.post("/manifests/{manifest_id}/members", status_code=201)
 def add_manifest_member(
     manifest_id: uuid.UUID, body: ManifestMemberCreate, session: Session = Depends(get_session)
@@ -192,3 +202,10 @@ def remove_manifest_member(
 @app.get("/manifests/{manifest_id}/resolve", response_model=list[FileSummary])
 def resolve_manifest(manifest_id: uuid.UUID, session: Session = Depends(get_session)):
     return list(service.resolve_manifest(session, manifest_id))
+
+
+# --------------------------------------------------------------------------
+# Dev UI (static, no logic) -- mounted last so it never shadows an API route
+# --------------------------------------------------------------------------
+
+app.mount("/ui", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="ui")

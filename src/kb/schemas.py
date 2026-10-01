@@ -101,3 +101,11 @@ class ManifestMemberCreate(BaseModel):
         if (self.file_id is None) == (self.child_manifest_id is None):
             raise ValueError("exactly one of file_id or child_manifest_id must be set")
         return self
+
+
+class ManifestMemberRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    file_id: uuid.UUID | None
+    child_manifest_id: uuid.UUID | None
