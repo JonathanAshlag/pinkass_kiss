@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from kb import service
 from kb.db import SessionLocal
+from kb.dci import DEFAULT_MAX_CHARS, DEFAULT_READ_LIMIT, MAX_CHARS_LIMIT
 from kb.schemas import (
     FileCreate,
     FileRead,
@@ -27,6 +28,7 @@ from kb.schemas import (
     ManifestMemberRead,
     ManifestRead,
     MoveRequest,
+    ToolOutputRead,
 )
 
 app = FastAPI(title="pinkass_kiss KB API")
@@ -50,11 +52,17 @@ def _cycle_error_handler(request, exc):
     return _json_error(409, str(exc))
 
 
+@app.exception_handler(service.PatternError)
+def _pattern_error_handler(request, exc):
+    return _json_error(422, str(exc))
+
+
 @app.exception_handler(ValueError)
 def _value_error_handler(request, exc):
-    # dal.py only raises plain ValueError for "no such node/manifest: {id}" --
-    # shape-validation (e.g. add_manifest_member's exactly-one-of check) is caught
-    # earlier by Pydantic and never reaches here.
+    # dal.py/dci.py only raise plain ValueError for "no such node/manifest/path" --
+    # shape-validation (add_manifest_member's exactly-one-of check, dci's
+    # max_chars/offset/limit/context bounds) is caught earlier by Pydantic/Query
+    # constraints and never reaches here.
     return _json_error(404, str(exc))
 
 
@@ -202,6 +210,63 @@ def remove_manifest_member(
 @app.get("/manifests/{manifest_id}/resolve", response_model=list[FileSummary])
 def resolve_manifest(manifest_id: uuid.UUID, session: Session = Depends(get_session)):
     return list(service.resolve_manifest(session, manifest_id))
+
+
+# --------------------------------------------------------------------------
+# Direct corpus interaction (agent-facing ls/grep/read over a manifest)
+# --------------------------------------------------------------------------
+
+MaxChars = Query(DEFAULT_MAX_CHARS, ge=1, le=MAX_CHARS_LIMIT)
+
+
+@app.get("/manifests/{manifest_id}/paths", response_model=ToolOutputRead)
+def list_paths(
+    manifest_id: uuid.UUID,
+    under: str | None = None,
+    recursive: bool = False,
+    max_chars: int = MaxChars,
+    session: Session = Depends(get_session),
+):
+    return service.list_paths(
+        session, manifest_id, under=under, recursive=recursive, max_chars=max_chars
+    )
+
+
+@app.get("/manifests/{manifest_id}/search", response_model=ToolOutputRead)
+def search_lines(
+    manifest_id: uuid.UUID,
+    pattern: list[str] = Query(..., min_length=1),
+    path: list[str] | None = Query(None),
+    ignore_case: bool = False,
+    context: int = Query(0, ge=0),
+    files_only: bool = False,
+    max_chars: int = MaxChars,
+    session: Session = Depends(get_session),
+):
+    return service.search_lines(
+        session,
+        manifest_id,
+        pattern,
+        paths=path,
+        ignore_case=ignore_case,
+        context=context,
+        files_only=files_only,
+        max_chars=max_chars,
+    )
+
+
+@app.get("/manifests/{manifest_id}/read", response_model=ToolOutputRead)
+def read_lines(
+    manifest_id: uuid.UUID,
+    path: str,
+    offset: int = Query(1, ge=1),
+    limit: int = Query(DEFAULT_READ_LIMIT, ge=1),
+    max_chars: int = MaxChars,
+    session: Session = Depends(get_session),
+):
+    return service.read_lines(
+        session, manifest_id, path, offset=offset, limit=limit, max_chars=max_chars
+    )
 
 
 # --------------------------------------------------------------------------

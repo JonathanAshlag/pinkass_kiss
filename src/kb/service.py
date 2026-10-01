@@ -17,12 +17,13 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from kb import dal, okf
+from kb import dal, dci, okf
 from kb.models import File, Manifest, ManifestMember
 
-# Re-exported as-is: dal.py's own exceptions are this layer's exceptions too.
+# Re-exported as-is: dal.py's/dci.py's own exceptions are this layer's exceptions too.
 ManifestCycleError = dal.ManifestCycleError
 TreeCycleError = dal.TreeCycleError
+PatternError = dci.PatternError
 
 
 def get_warnings(session: Session, node: File) -> list[str]:
@@ -157,3 +158,58 @@ def list_manifest_members(session: Session, manifest_id: uuid.UUID) -> list[Mani
 
 def resolve_manifest(session: Session, manifest_id: uuid.UUID) -> set[File]:
     return dal.resolve_manifest(session, manifest_id)
+
+
+# --------------------------------------------------------------------------
+# Direct corpus interaction (agent-facing ls/grep/read, see kb.dci)
+# --------------------------------------------------------------------------
+
+
+def list_paths(
+    session: Session,
+    manifest_id: uuid.UUID,
+    *,
+    under: str | None = None,
+    recursive: bool = False,
+    max_chars: int = dci.DEFAULT_MAX_CHARS,
+) -> dci.ToolOutput:
+    return dci.list_paths(
+        session, manifest_id, under=under, recursive=recursive, max_chars=max_chars
+    )
+
+
+def search_lines(
+    session: Session,
+    manifest_id: uuid.UUID,
+    patterns: str | list[str],
+    *,
+    paths: list[str] | None = None,
+    ignore_case: bool = False,
+    context: int = 0,
+    files_only: bool = False,
+    max_chars: int = dci.DEFAULT_MAX_CHARS,
+) -> dci.ToolOutput:
+    return dci.search_lines(
+        session,
+        manifest_id,
+        patterns,
+        paths=paths,
+        ignore_case=ignore_case,
+        context=context,
+        files_only=files_only,
+        max_chars=max_chars,
+    )
+
+
+def read_lines(
+    session: Session,
+    manifest_id: uuid.UUID,
+    path: str,
+    *,
+    offset: int = 1,
+    limit: int = dci.DEFAULT_READ_LIMIT,
+    max_chars: int = dci.DEFAULT_MAX_CHARS,
+) -> dci.ToolOutput:
+    return dci.read_lines(
+        session, manifest_id, path, offset=offset, limit=limit, max_chars=max_chars
+    )

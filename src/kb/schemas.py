@@ -103,6 +103,15 @@ class ManifestMemberCreate(BaseModel):
         return self
 
 
+class ToolOutputRead(BaseModel):
+    """A kb.dci tool result: agent-ready text, plus whether it was cut at max_chars."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    text: str
+    truncated: bool
+
+
 class ManifestMemberRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
