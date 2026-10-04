@@ -118,3 +118,22 @@ class ManifestMemberRead(BaseModel):
     id: uuid.UUID
     file_id: uuid.UUID | None
     child_manifest_id: uuid.UUID | None
+
+
+class IngestFailure(BaseModel):
+    path: str
+    error: str
+
+
+class IngestReportRead(BaseModel):
+    """kb.ingest.IngestReport, with paths relative to the uploaded folder's parent."""
+
+    root_id: uuid.UUID
+    files_created: list[uuid.UUID]
+    folders_created: list[uuid.UUID]
+    skipped: list[str]
+    failed: list[IngestFailure]
+
+
+class IngestExtensionsRead(BaseModel):
+    extensions: list[str]

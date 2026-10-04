@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Iterator
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -18,11 +18,15 @@ from sqlalchemy.orm import Session
 from kb import service
 from kb.db import SessionLocal
 from kb.dci import DEFAULT_MAX_CHARS, DEFAULT_READ_LIMIT, MAX_CHARS_LIMIT
+from kb.ingest import UploadError, default_registry, ingest_upload
 from kb.schemas import (
     FileCreate,
     FileRead,
     FileSummary,
     FileUpdate,
+    IngestExtensionsRead,
+    IngestFailure,
+    IngestReportRead,
     ManifestCreate,
     ManifestMemberCreate,
     ManifestMemberRead,
@@ -54,6 +58,12 @@ def _cycle_error_handler(request, exc):
 
 @app.exception_handler(service.PatternError)
 def _pattern_error_handler(request, exc):
+    return _json_error(422, str(exc))
+
+
+@app.exception_handler(UploadError)
+def _upload_error_handler(request, exc):
+    # UploadError subclasses ValueError; Starlette picks the most specific handler.
     return _json_error(422, str(exc))
 
 
@@ -266,6 +276,44 @@ def read_lines(
 ):
     return service.read_lines(
         session, manifest_id, path, offset=offset, limit=limit, max_chars=max_chars
+    )
+
+
+# --------------------------------------------------------------------------
+# Ingestion (folder upload)
+# --------------------------------------------------------------------------
+
+
+@app.get("/ingest/extensions", response_model=IngestExtensionsRead)
+def ingest_extensions():
+    """File extensions a processor exists for -- lets clients skip uploading the rest."""
+    return IngestExtensionsRead(extensions=sorted(default_registry().supported_extensions))
+
+
+@app.post("/ingest", response_model=IngestReportRead, status_code=201)
+def ingest(
+    files: list[UploadFile] = File(...),
+    # Relative path of each file, same order as `files` (e.g. "docs/guide/setup.md").
+    # Sent separately because multipart filenames aren't reliably kept with directories.
+    paths: list[str] = Form(...),
+    parent_id: uuid.UUID | None = Form(None),
+    tags: list[str] = Form([]),
+    session: Session = Depends(get_session),
+):
+    if len(files) != len(paths):
+        raise UploadError(f"got {len(files)} files but {len(paths)} paths")
+    report = ingest_upload(
+        session,
+        ((path, upload.file.read()) for path, upload in zip(paths, files)),
+        parent_id=parent_id,
+        tags=tags,
+    )
+    return IngestReportRead(
+        root_id=report.root_id,
+        files_created=report.files_created,
+        folders_created=report.folders_created,
+        skipped=[p.as_posix() for p in report.skipped],
+        failed=[IngestFailure(path=p.as_posix(), error=e) for p, e in report.failed],
     )
 
 
