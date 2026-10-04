@@ -84,13 +84,26 @@ def build_agent(llm, tools):
     return graph.compile()
 
 
-def ask(llm, manifest_id: uuid.UUID, question: str) -> tuple[str, int]:
-    """Returns (final answer text, number of tool calls made)."""
-    result = build_agent(llm, make_tools(manifest_id)).invoke(
-        {"messages": [SystemMessage(SYSTEM_PROMPT), HumanMessage(question)]},
-        {"recursion_limit": 30},
-    )
-    messages = result["messages"]
+def ask(llm, manifest_id: uuid.UUID, question: str) -> tuple[str | None, int]:
+    """Returns (final answer text, number of tool calls made).
+
+    The answer is None if the agent never stopped calling tools (recursion limit): that's
+    an unanswered question for the eval, not a crash.
+    """
+    from langgraph.errors import GraphRecursionError
+
+    app = build_agent(llm, make_tools(manifest_id))
+    messages: list = []
+    try:
+        for state in app.stream(
+            {"messages": [SystemMessage(SYSTEM_PROMPT), HumanMessage(question)]},
+            {"recursion_limit": 30},
+            stream_mode="values",
+        ):
+            messages = state["messages"]
+    except GraphRecursionError:
+        calls = sum(len(m.tool_calls) for m in messages if isinstance(m, AIMessage))
+        return None, calls
     calls = sum(len(m.tool_calls) for m in messages if isinstance(m, AIMessage))
     return str(messages[-1].text).strip(), calls
 
@@ -173,18 +186,21 @@ def test_llm_answers_questions_with_kb_tools(examples, manifests, session):
     n = int(os.environ.get("HOTPOTQA_LLM_N", "10"))
     min_acc = float(os.environ.get("HOTPOTQA_LLM_MIN_ACC", "0.6"))
 
-    correct, no_tools, wrong = 0, [], []
+    correct, no_tools, wrong, unanswered = 0, [], [], 0
     for ex in examples[:n]:
         answer, calls = ask(llm, manifests[ex["id"]], ex["question"])
         if calls == 0:
             no_tools.append(ex["id"])
-        if is_correct(answer, ex["answer"]):
+        if answer is None:
+            unanswered += 1
+            wrong.append((ex["question"], ex["answer"], "<no answer: hit recursion limit>"))
+        elif is_correct(answer, ex["answer"]):
             correct += 1
         else:
             wrong.append((ex["question"], ex["answer"], answer))
 
     accuracy = correct / n
-    print(f"\naccuracy {correct}/{n} = {accuracy:.0%}")
+    print(f"\naccuracy {correct}/{n} = {accuracy:.0%} ({unanswered} unanswered)")
     for q, gold, got in wrong:
         print(f"  WRONG: {q!r} gold={gold!r} got={got!r}")
     assert not no_tools, f"model answered without using the KB tools: {no_tools}"
