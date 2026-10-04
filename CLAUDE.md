@@ -229,6 +229,24 @@ the local Postgres and exercising the full golden path plus error-mapping cases
 head`). `pyproject.toml` has no test/dev deps yet — no committed test suite for any
 layer.
 
+## QASPER evaluation
+
+`scripts/load_qasper.py` ingests QASPER papers through `kb.service`, one folder per
+paper that **mirrors the paper's own outline**: sections become numbered files
+(`01-introduction.md`), sections with subsections become numbered folders (their lead
+text as folder content), plus `metadata.md` (id, arXiv link, counts) and `figures/` /
+`tables/` (one file per caption). The paper folder's content is title + abstract +
+outline, and its `description` is the abstract's first sentence. Each section keeps
+its original heading as an alias and gets a `role:<role>` tag (intro / related /
+method / training / setup / baselines / results / conclusion / other) from keyword
+heuristics (`classify_section`) -- a label only, it never moves text. An earlier
+fixed-template layout (introduction.md, methods/, experiments/...) was replaced by this
+because 31% of sections matched no rule and files became grab bags. Questions/answers
+are never stored in the KB. `tests/test_qasper.py` is the deterministic suite (committed
+20-paper fixture `tests/fixtures/qasper_20.jsonl`); `tests/test_qasper_llm.py` runs a
+LangGraph agent (Anthropic or Ollama) with the DCI tools, scored by Answer-F1. Replaced
+the earlier HotPotQA eval.
+
 ## Known gotcha already hit once
 
 Alembic + `postgresql.ENUM`: if you explicitly call `some_enum.create(op.get_bind(),

@@ -1,8 +1,8 @@
 """
 An LLM agent answers HotPotQA questions using the KB's DCI tools (ls / grep / read),
 orchestrated with LangGraph. Two tests:
-
-- `test_agent_graph_wiring`: a scripted fake model drives the same graph + tools, so the
+∏
+- `test_agent_graph_wiring`: a scripted fake model drives the same graph + tools, PPPPPso the
   tool-calling loop and the KB tool wrappers are checked for free (no API key).
 - `test_llm_answers_questions_with_kb_tools`: a real model answers the first
   HOTPOTQA_LLM_N (default 10) questions, each against that question's manifest (its 10
