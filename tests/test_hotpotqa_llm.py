@@ -4,13 +4,15 @@ orchestrated with LangGraph. Two tests:
 
 - `test_agent_graph_wiring`: a scripted fake model drives the same graph + tools, so the
   tool-calling loop and the KB tool wrappers are checked for free (no API key).
-- `test_llm_answers_questions_with_kb_tools`: a real Claude model answers the first
+- `test_llm_answers_questions_with_kb_tools`: a real model answers the first
   HOTPOTQA_LLM_N (default 10) questions, each against that question's manifest (its 10
-  paragraphs, the distractor setting). Costs money, so it only runs when
-  ANTHROPIC_API_KEY is set. Asserts the model used the tools on every question and that
+  paragraphs, the distractor setting). HOTPOTQA_LLM_PROVIDER picks the model:
+  "anthropic" (default; costs money, needs ANTHROPIC_API_KEY) or "ollama" (local and
+  free; needs a running server and a tool-calling model). Skipped when unavailable. Asserts the model used the tools on every question and that
   accuracy (normalized exact match or containment) meets HOTPOTQA_LLM_MIN_ACC (default 0.6).
 
-Env (all read from .env, see .env.example): ANTHROPIC_API_KEY, HOTPOTQA_LLM_MODEL (default claude-opus-5-5), HOTPOTQA_LLM_N, HOTPOTQA_LLM_MIN_ACC.
+Env (all read from .env, see .env.example): HOTPOTQA_LLM_PROVIDER, ANTHROPIC_API_KEY,
+OLLAMA_BASE_URL, HOTPOTQA_LLM_MODEL (default claude-opus-5-5 / qwen3-coder:30b), HOTPOTQA_LLM_N, HOTPOTQA_LLM_MIN_ACC.
 """
 
 import os
@@ -21,7 +23,6 @@ import uuid
 import pytest
 
 pytest.importorskip("langgraph")
-pytest.importorskip("langchain_anthropic")
 
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage  # noqa: E402
@@ -139,14 +140,36 @@ def test_agent_graph_wiring(examples, manifests, session):
     assert tools["search_lines"].invoke({"pattern": "("}).startswith("error:")  # bad regex is reported, not raised
 
 
-@pytest.mark.llm
-@pytest.mark.skipif(not os.environ.get("ANTHROPIC_API_KEY"), reason="ANTHROPIC_API_KEY not set")
-def test_llm_answers_questions_with_kb_tools(examples, manifests, session):
-    from langchain_anthropic import ChatAnthropic
+def make_llm():
+    """The chat model for HOTPOTQA_LLM_PROVIDER, or pytest.skip if it isn't available."""
+    provider = os.environ.get("HOTPOTQA_LLM_PROVIDER", "anthropic").lower()
+    if provider == "anthropic":
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            pytest.skip("ANTHROPIC_API_KEY not set")
+        from langchain_anthropic import ChatAnthropic
 
-    llm = ChatAnthropic(
-        model=os.environ.get("HOTPOTQA_LLM_MODEL", "claude-opus-5-5"), max_tokens=4096
-    )
+        return ChatAnthropic(
+            model=os.environ.get("HOTPOTQA_LLM_MODEL") or "claude-opus-5-5", max_tokens=4096
+        )
+    if provider == "ollama":
+        import httpx
+        from langchain_ollama import ChatOllama
+
+        base_url = os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434"
+        model = os.environ.get("HOTPOTQA_LLM_MODEL") or "qwen3-coder:30b"
+        try:
+            tags = httpx.get(f"{base_url}/api/tags", timeout=5).json()["models"]
+        except Exception as exc:  # server down / unreachable
+            pytest.skip(f"ollama not reachable at {base_url}: {exc}")
+        if model not in {m["name"] for m in tags}:
+            pytest.skip(f"ollama model '{model}' not pulled (`ollama pull {model}`)")
+        return ChatOllama(model=model, base_url=base_url, temperature=0, num_ctx=8192)
+    pytest.fail(f"unknown HOTPOTQA_LLM_PROVIDER '{provider}' (anthropic | ollama)")
+
+
+@pytest.mark.llm
+def test_llm_answers_questions_with_kb_tools(examples, manifests, session):
+    llm = make_llm()
     n = int(os.environ.get("HOTPOTQA_LLM_N", "10"))
     min_acc = float(os.environ.get("HOTPOTQA_LLM_MIN_ACC", "0.6"))
 
