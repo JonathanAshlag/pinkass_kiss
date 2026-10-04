@@ -1,0 +1,35 @@
+# Throwaway Postgres for the test suite, run as a Docker Swarm service.
+#
+#   docker swarm init   # once, if this node isn't already in a swarm
+#   docker stack deploy -c docker/stack.test.yml kbtest
+#   export TEST_DATABASE_URL=postgresql+psycopg://kb:kbtest@localhost:5433/kb_test
+#   pytest tests
+#   docker stack rm kbtest
+#
+# The test DB name must end in `_test`; tests refuse to run against anything else
+# because they TRUNCATE the KB tables.
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: kb
+      POSTGRES_PASSWORD: kbtest
+      POSTGRES_DB: kb_test
+    # host mode (a real container port binding) so Colima/Docker Desktop forward it to
+    # the Mac; the default swarm routing-mesh port isn't reachable from the host there.
+    ports:
+      - target: 5432
+        published: 5433
+        protocol: tcp
+        mode: host
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kb -d kb_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
