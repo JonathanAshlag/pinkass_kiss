@@ -48,6 +48,8 @@ migrations, psycopg3 as the driver. Src-layout package `kb` under `src/kb/`.
   `kb.okf`
 - `src/kb/schemas.py` — Pydantic v2 request/response models for `api.py`
 - `src/kb/api.py` — the FastAPI app (see below); imports `kb.service` and `kb.schemas`
+- `src/kb/ingest/` — folder ingestion with pluggable per-format processors (see below);
+  imports `kb.service` only
 - `migrations/` — Alembic; a single `0001_create_schema.py` migration (compacted from
   what was originally six incremental migrations, while there was still no real data
   to preserve)
@@ -201,7 +203,7 @@ via `schemas.py` and HTTP-status mapping (`TreeCycleError`/`ManifestCycleError` 
 `POST /files/{id}/move`, `POST /files/{id}/restore`, `GET /files/{id}/children`,
 `GET /files/roots`, `GET /files` (query filters), and the `/manifests` equivalents
 (`POST/GET /manifests`, `GET /manifests/{id}`, `POST/DELETE /manifests/{id}/members`,
-`GET /manifests/{id}/resolve`). Single-resource file responses (`FileRead`) include a
+`GET /manifests/{id}/resolve`), and `GET /ingest/extensions` / `POST /ingest` (folder upload). Single-resource file responses (`FileRead`) include a
 `warnings` field from `get_warnings`; list responses (`FileSummary`) omit `content` and
 `warnings` to avoid running the advisory checks on every row of a listing.
 
@@ -214,6 +216,40 @@ not. `ManifestMemberCreate` enforces "exactly one of `file_id`/`child_manifest_i
 the Pydantic layer (a native 422), so `dal.add_manifest_member`'s `ValueError` for that
 same shape problem is effectively unreachable through the API — the global `ValueError`
 → 404 handler stays correct (it only ever means "no such id").
+
+## Folder ingestion (`src/kb/ingest/`, `scripts/ingest_folder.py`)
+
+`ingest_folder(session, root, *, parent_id=None, registry=None, tags=None) ->
+IngestReport` mirrors a local directory into the tree: dirs → folder nodes (title = dir
+name), supported files → file nodes, each with `sources=[{"resource": "file:///..."}]`
+and the given `tags`. Unsupported files go in `report.skipped`, processor errors in
+`report.failed` (per-file, never fatal). Hidden entries and symlinks are ignored. Folder
+nodes are created **lazily**, so a dir with no supported files (e.g. images only) gets
+no node. The root always does. Never commits; the caller owns the transaction. Re-ingest
+always creates a new subtree (no dedupe/upsert, deliberate).
+
+**Extension point** (`base.py`): a `Processor` has `name`, `extensions` (lowercase,
+with dot) and `process(path) -> ProcessedDocument(title, content, extra)`, where
+`extra` holds additional `files` columns. To add a format (PDF, docx...), write one
+processor module and register it in `default_registry()`. The walker doesn't change.
+Only `MarkdownProcessor` exists today: content stored verbatim, **no frontmatter
+parsing** (user's choice), title = first `# ` H1 else filename stem.
+
+CLI: `python scripts/ingest_folder.py PATH [--parent-id UUID] [--tag T ...] [--dry-run]`.
+
+**Uploads** (`upload.py`): `ingest_upload(session, [(rel_path, bytes), ...], ...)` writes
+the files into a temp dir mirroring the tree and runs `ingest_folder` over it (so
+processors stay path-based). Paths must be relative, `/`-separated, with no `..`, and
+all under one top-level folder, whose name becomes the root title. Anything else raises
+`UploadError` (a `ValueError` subclass, mapped to 422 ahead of the generic 404 handler).
+Upload sources are `upload:<rel path>`, not temp-dir file URIs. API:
+`GET /ingest/extensions` and `POST /ingest` (multipart: `files[]` + a parallel `paths[]`,
+optional `parent_id`, `tags[]`). Needs `python-multipart`. The dev UI has "⇪ ingest
+folder" (root) and "Ingest folder here…" (on folders), using `<input webkitdirectory>`.
+It filters hidden and unsupported files client-side, so those are never uploaded. No
+upload size limit yet.
+
+Tests: `tests/test_ingest.py`.
 
 ## Verification status
 
@@ -228,6 +264,24 @@ the local Postgres and exercising the full golden path plus error-mapping cases
 `curl`; the DB was reset to empty afterward (`alembic downgrade base && alembic upgrade
 head`). `pyproject.toml` has no test/dev deps yet — no committed test suite for any
 layer.
+
+## QASPER evaluation
+
+`scripts/load_qasper.py` ingests QASPER papers through `kb.service`, one folder per
+paper that **mirrors the paper's own outline**: sections become numbered files
+(`01-introduction.md`), sections with subsections become numbered folders (their lead
+text as folder content), plus `metadata.md` (id, arXiv link, counts) and `figures/` /
+`tables/` (one file per caption). The paper folder's content is title + abstract +
+outline, and its `description` is the abstract's first sentence. Each section keeps
+its original heading as an alias and gets a `role:<role>` tag (intro / related /
+method / training / setup / baselines / results / conclusion / other) from keyword
+heuristics (`classify_section`) -- a label only, it never moves text. An earlier
+fixed-template layout (introduction.md, methods/, experiments/...) was replaced by this
+because 31% of sections matched no rule and files became grab bags. Questions/answers
+are never stored in the KB. `tests/test_qasper.py` is the deterministic suite (committed
+20-paper fixture `tests/fixtures/qasper_20.jsonl`); `tests/test_qasper_llm.py` runs a
+LangGraph agent (Anthropic or Ollama) with the DCI tools, scored by Answer-F1. Replaced
+the earlier HotPotQA eval.
 
 ## Known gotcha already hit once
 

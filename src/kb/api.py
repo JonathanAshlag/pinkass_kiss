@@ -10,23 +10,29 @@ import uuid
 from pathlib import Path
 from typing import Iterator
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from kb import service
 from kb.db import SessionLocal
+from kb.dci import DEFAULT_MAX_CHARS, DEFAULT_READ_LIMIT, MAX_CHARS_LIMIT
+from kb.ingest import UploadError, default_registry, ingest_upload
 from kb.schemas import (
     FileCreate,
     FileRead,
     FileSummary,
     FileUpdate,
+    IngestExtensionsRead,
+    IngestFailure,
+    IngestReportRead,
     ManifestCreate,
     ManifestMemberCreate,
     ManifestMemberRead,
     ManifestRead,
     MoveRequest,
+    ToolOutputRead,
 )
 
 app = FastAPI(title="pinkass_kiss KB API")
@@ -50,11 +56,23 @@ def _cycle_error_handler(request, exc):
     return _json_error(409, str(exc))
 
 
+@app.exception_handler(service.PatternError)
+def _pattern_error_handler(request, exc):
+    return _json_error(422, str(exc))
+
+
+@app.exception_handler(UploadError)
+def _upload_error_handler(request, exc):
+    # UploadError subclasses ValueError; Starlette picks the most specific handler.
+    return _json_error(422, str(exc))
+
+
 @app.exception_handler(ValueError)
 def _value_error_handler(request, exc):
-    # dal.py only raises plain ValueError for "no such node/manifest: {id}" --
-    # shape-validation (e.g. add_manifest_member's exactly-one-of check) is caught
-    # earlier by Pydantic and never reaches here.
+    # dal.py/dci.py only raise plain ValueError for "no such node/manifest/path" --
+    # shape-validation (add_manifest_member's exactly-one-of check, dci's
+    # max_chars/offset/limit/context bounds) is caught earlier by Pydantic/Query
+    # constraints and never reaches here.
     return _json_error(404, str(exc))
 
 
@@ -202,6 +220,101 @@ def remove_manifest_member(
 @app.get("/manifests/{manifest_id}/resolve", response_model=list[FileSummary])
 def resolve_manifest(manifest_id: uuid.UUID, session: Session = Depends(get_session)):
     return list(service.resolve_manifest(session, manifest_id))
+
+
+# --------------------------------------------------------------------------
+# Direct corpus interaction (agent-facing ls/grep/read over a manifest)
+# --------------------------------------------------------------------------
+
+MaxChars = Query(DEFAULT_MAX_CHARS, ge=1, le=MAX_CHARS_LIMIT)
+
+
+@app.get("/manifests/{manifest_id}/paths", response_model=ToolOutputRead)
+def list_paths(
+    manifest_id: uuid.UUID,
+    under: str | None = None,
+    recursive: bool = False,
+    max_chars: int = MaxChars,
+    session: Session = Depends(get_session),
+):
+    return service.list_paths(
+        session, manifest_id, under=under, recursive=recursive, max_chars=max_chars
+    )
+
+
+@app.get("/manifests/{manifest_id}/search", response_model=ToolOutputRead)
+def search_lines(
+    manifest_id: uuid.UUID,
+    pattern: list[str] = Query(..., min_length=1),
+    path: list[str] | None = Query(None),
+    ignore_case: bool = False,
+    context: int = Query(0, ge=0),
+    files_only: bool = False,
+    max_chars: int = MaxChars,
+    session: Session = Depends(get_session),
+):
+    return service.search_lines(
+        session,
+        manifest_id,
+        pattern,
+        paths=path,
+        ignore_case=ignore_case,
+        context=context,
+        files_only=files_only,
+        max_chars=max_chars,
+    )
+
+
+@app.get("/manifests/{manifest_id}/read", response_model=ToolOutputRead)
+def read_lines(
+    manifest_id: uuid.UUID,
+    path: str,
+    offset: int = Query(1, ge=1),
+    limit: int = Query(DEFAULT_READ_LIMIT, ge=1),
+    max_chars: int = MaxChars,
+    session: Session = Depends(get_session),
+):
+    return service.read_lines(
+        session, manifest_id, path, offset=offset, limit=limit, max_chars=max_chars
+    )
+
+
+# --------------------------------------------------------------------------
+# Ingestion (folder upload)
+# --------------------------------------------------------------------------
+
+
+@app.get("/ingest/extensions", response_model=IngestExtensionsRead)
+def ingest_extensions():
+    """File extensions a processor exists for -- lets clients skip uploading the rest."""
+    return IngestExtensionsRead(extensions=sorted(default_registry().supported_extensions))
+
+
+@app.post("/ingest", response_model=IngestReportRead, status_code=201)
+def ingest(
+    files: list[UploadFile] = File(...),
+    # Relative path of each file, same order as `files` (e.g. "docs/guide/setup.md").
+    # Sent separately because multipart filenames aren't reliably kept with directories.
+    paths: list[str] = Form(...),
+    parent_id: uuid.UUID | None = Form(None),
+    tags: list[str] = Form([]),
+    session: Session = Depends(get_session),
+):
+    if len(files) != len(paths):
+        raise UploadError(f"got {len(files)} files but {len(paths)} paths")
+    report = ingest_upload(
+        session,
+        ((path, upload.file.read()) for path, upload in zip(paths, files)),
+        parent_id=parent_id,
+        tags=tags,
+    )
+    return IngestReportRead(
+        root_id=report.root_id,
+        files_created=report.files_created,
+        folders_created=report.folders_created,
+        skipped=[p.as_posix() for p in report.skipped],
+        failed=[IngestFailure(path=p.as_posix(), error=e) for p, e in report.failed],
+    )
 
 
 # --------------------------------------------------------------------------

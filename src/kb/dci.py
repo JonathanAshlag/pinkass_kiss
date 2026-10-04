@@ -1,0 +1,339 @@
+"""
+Direct-corpus-interaction (DCI) tools: ls/grep/read-style access to the KB for agents.
+
+Instead of a retriever, an agent explores the corpus itself with three bounded,
+line-oriented primitives -- see reference/paper.md (direct corpus interaction) and
+reference/project-dci-analysis.md for the reasoning:
+
+- `list_paths`   -- `ls` / `find`: enumerate nodes as paths
+- `search_lines` -- `grep -n` / `rg`: regex search, one hit per matching line
+- `read_lines`   -- `read` / `sed -n`: a line-numbered slice of one file
+
+Every tool is scoped to a manifest (the nodes `dal.resolve_manifest` expands it to)
+and every output is capped at `max_chars` characters, so a single call can never flood
+an agent's context. Outputs are plain text in familiar CLI shapes, ready to hand to an
+agent as a tool result.
+
+What gets searched/read is a node's *virtual file*: its frontmatter rendered as a
+YAML block, followed by its markdown `content` (see `render_virtual_file`), so a
+search for a tag, alias or description hits the same way it would in an OKF bundle
+on disk.
+
+Paths are derived at read time, not stored: `/`-joined node titles from the KB root
+down. Since titles aren't unique among siblings, colliding titles get a `~<first 8
+hex of id>` suffix. Every tool that takes a path also accepts a raw node uuid.
+"""
+
+import json
+import re
+import uuid
+from dataclasses import dataclass
+
+from sqlalchemy.orm import Session
+
+from kb import dal
+from kb.models import File
+
+DEFAULT_MAX_CHARS = 20_000
+MAX_CHARS_LIMIT = 50_000
+DEFAULT_READ_LIMIT = 200
+
+
+class PatternError(Exception):
+    """Raised when a search pattern isn't a valid (Python `re`) regular expression."""
+
+
+@dataclass
+class ToolOutput:
+    """A tool result: the text to show the agent, and whether it was cut at `max_chars`."""
+
+    text: str
+    truncated: bool
+
+
+# --------------------------------------------------------------------------
+# Scope, paths, rendering
+# --------------------------------------------------------------------------
+
+
+class _Scope:
+    """The nodes a manifest resolves to, with their derived paths (both directions)."""
+
+    def __init__(self, session: Session, manifest_id: uuid.UUID):
+        if dal.get_manifest(session, manifest_id) is None:
+            raise ValueError(f"no such manifest: {manifest_id}")
+        self._session = session
+        self._segments: dict[uuid.UUID, str] = {}
+        self._paths: dict[uuid.UUID, str] = {}
+
+        self.nodes = {node.id: node for node in dal.resolve_manifest(session, manifest_id)}
+        for node in self.nodes.values():
+            self._path_of(node)
+        self.by_path = {self._paths[node_id]: node for node_id, node in self.nodes.items()}
+
+    def path(self, node: File) -> str:
+        return self._paths[node.id]
+
+    def lookup(self, path_or_id: str) -> File:
+        """A node in scope by path or uuid; ValueError if it isn't in this manifest."""
+        key = path_or_id.strip().strip("/")
+        node = self.by_path.get(key)
+        if node is None:
+            try:
+                node = self.nodes.get(uuid.UUID(key))
+            except ValueError:
+                pass
+        if node is None:
+            raise ValueError(f"no such path in manifest: {path_or_id}")
+        return node
+
+    def _path_of(self, node: File) -> str:
+        if node.id not in self._paths:
+            parent = self._session.get(File, node.parent_id) if node.parent_id else None
+            prefix = f"{self._path_of(parent)}/" if parent is not None else ""
+            self._paths[node.id] = prefix + self._segment(node)
+        return self._paths[node.id]
+
+    def _segment(self, node: File) -> str:
+        if node.id not in self._segments:
+            siblings = dal.list_children(self._session, node.parent_id)
+            if node not in siblings:
+                siblings.append(node)
+            counts: dict[str, int] = {}
+            for sibling in siblings:
+                base = _title_segment(sibling.title)
+                counts[base] = counts.get(base, 0) + 1
+            for sibling in siblings:
+                base = _title_segment(sibling.title)
+                self._segments[sibling.id] = (
+                    f"{base}~{sibling.id.hex[:8]}" if counts[base] > 1 else base
+                )
+        return self._segments[node.id]
+
+
+def _title_segment(title: str) -> str:
+    return title.replace("/", "-").strip() or "untitled"
+
+
+def render_virtual_file(node: File) -> str:
+    """
+    The text the DCI tools see for `node`: a YAML frontmatter block (values written
+    as JSON, which is valid YAML) followed by the markdown content. Empty optional
+    fields are omitted.
+    """
+    fields: dict[str, object] = {
+        "id": str(node.id),
+        "kind": node.kind,
+        "title": node.title,
+        "status": node.status,
+    }
+    if node.aliases:
+        fields["aliases"] = node.aliases
+    if node.description:
+        fields["description"] = node.description
+    if node.tags:
+        fields["tags"] = node.tags
+    if node.stale_after is not None:
+        fields["stale_after"] = node.stale_after.isoformat()
+    if node.sources:
+        fields["sources"] = node.sources
+
+    frontmatter = "\n".join(
+        f"{key}: {json.dumps(value, ensure_ascii=False)}" for key, value in fields.items()
+    )
+    body = node.content or ""
+    return f"---\n{frontmatter}\n---\n{body}"
+
+
+def _bounded(lines: list[str], max_chars: int, hint: str) -> ToolOutput:
+    """Joins `lines`, cutting at a line boundary so the whole output fits `max_chars`."""
+    if not 1 <= max_chars <= MAX_CHARS_LIMIT:
+        raise ValueError(f"max_chars must be between 1 and {MAX_CHARS_LIMIT}")
+
+    text = "\n".join(lines)
+    if len(text) <= max_chars:
+        return ToolOutput(text, truncated=False)
+
+    notice = f"[truncated at {max_chars} chars -- {hint}]"
+    budget = max_chars - len(notice) - 1
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        cost = len(line) + 1
+        if used + cost > budget:
+            break
+        kept.append(line)
+        used += cost
+    if not kept and budget > 0:
+        # A single overlong line: keep a prefix rather than returning nothing.
+        kept.append(lines[0][:budget])
+    return ToolOutput("\n".join([*kept, notice])[:max_chars], truncated=True)
+
+
+# --------------------------------------------------------------------------
+# Tools
+# --------------------------------------------------------------------------
+
+
+def list_paths(
+    session: Session,
+    manifest_id: uuid.UUID,
+    *,
+    under: str | None = None,
+    recursive: bool = False,
+    max_chars: int = DEFAULT_MAX_CHARS,
+) -> ToolOutput:
+    """
+    `ls` over a manifest. Without `under`, lists the manifest's top-level nodes (in-scope
+    nodes whose parent is out of scope); with `under` (a path or uuid), that node's
+    in-scope children. `recursive=True` lists whole subtrees instead.
+
+    One line per node: `<path>[/]  [<status>]  <description>` -- folders end in `/`,
+    and description is omitted when unset.
+    """
+    scope = _Scope(session, manifest_id)
+
+    if under is None:
+        frontier = [n for n in scope.nodes.values() if n.parent_id not in scope.nodes]
+    else:
+        root = scope.lookup(under)
+        frontier = [n for n in scope.nodes.values() if n.parent_id == root.id]
+
+    listed: list[File] = []
+    while frontier:
+        listed.extend(frontier)
+        if not recursive:
+            break
+        ids = {n.id for n in frontier}
+        frontier = [n for n in scope.nodes.values() if n.parent_id in ids]
+
+    lines = []
+    for node in sorted(listed, key=scope.path):
+        line = scope.path(node) + ("/" if node.kind == "folder" else "") + f"  [{node.status}]"
+        if node.description:
+            line += f"  {node.description}"
+        lines.append(line)
+
+    return _bounded(
+        lines or ["(no entries)"],
+        max_chars,
+        "list a narrower subtree with `under`, or drop `recursive`",
+    )
+
+
+def search_lines(
+    session: Session,
+    manifest_id: uuid.UUID,
+    patterns: str | list[str],
+    *,
+    paths: list[str] | None = None,
+    ignore_case: bool = False,
+    context: int = 0,
+    files_only: bool = False,
+    max_chars: int = DEFAULT_MAX_CHARS,
+) -> ToolOutput:
+    """
+    `grep -n` over the virtual files in a manifest (Python `re` syntax). With several
+    `patterns`, a line must match *all* of them -- the equivalent of `grep a | grep b`.
+    `paths` (paths or uuids) restricts the search to those nodes; a folder path covers
+    its in-scope subtree.
+
+    Output lines are `<path>:<line>:<text>` for hits and `<path>-<line>-<text>` for
+    `context` lines (groups separated by `--`), or just matching paths if `files_only`.
+    """
+    if isinstance(patterns, str):
+        patterns = [patterns]
+    if not patterns:
+        raise PatternError("at least one pattern is required")
+    if context < 0:
+        raise ValueError("context must be >= 0")
+    flags = re.IGNORECASE if ignore_case else 0
+    try:
+        compiled = [re.compile(p, flags) for p in patterns]
+    except re.error as exc:
+        raise PatternError(f"invalid pattern: {exc}") from exc
+
+    scope = _Scope(session, manifest_id)
+    if paths is None:
+        targets = list(scope.nodes.values())
+    else:
+        targets = []
+        for p in paths:
+            root = scope.lookup(p)
+            prefix = scope.path(root) + "/"
+            targets.append(root)
+            targets.extend(n for n in scope.nodes.values() if scope.path(n).startswith(prefix))
+
+    out: list[str] = []
+    seen: set[uuid.UUID] = set()
+    for node in sorted(targets, key=scope.path):
+        if node.id in seen:
+            continue
+        seen.add(node.id)
+
+        lines = render_virtual_file(node).split("\n")
+        hits = [i for i, line in enumerate(lines) if all(rx.search(line) for rx in compiled)]
+        if not hits:
+            continue
+
+        path = scope.path(node)
+        if files_only:
+            out.append(path)
+            continue
+
+        hit_set = set(hits)
+        last = -1
+        for i in hits:
+            start, end = max(i - context, 0), min(i + context, len(lines) - 1)
+            if context and last >= 0 and start > last + 1:
+                out.append("--")
+            for j in range(max(start, last + 1), end + 1):
+                sep = ":" if j in hit_set else "-"
+                out.append(f"{path}{sep}{j + 1}{sep}{lines[j]}")
+            last = max(last, end)
+        if context:
+            out.append("--")
+
+    if out and out[-1] == "--":
+        out.pop()
+    return _bounded(
+        out or ["(no matches)"],
+        max_chars,
+        "add a pattern, restrict `paths`, or use `files_only` first",
+    )
+
+
+def read_lines(
+    session: Session,
+    manifest_id: uuid.UUID,
+    path: str,
+    *,
+    offset: int = 1,
+    limit: int = DEFAULT_READ_LIMIT,
+    max_chars: int = DEFAULT_MAX_CHARS,
+) -> ToolOutput:
+    """
+    `read` / `sed -n` on one virtual file in a manifest: lines `offset` (1-based) to
+    `offset + limit - 1`, each prefixed with its line number and a tab, under a header
+    line `<path> (lines a-b of N)`. Line numbers match `search_lines` output, so a hit
+    can be expanded with `read_lines(path, offset=hit - k, limit=2k)`.
+    """
+    if offset < 1:
+        raise ValueError("offset must be >= 1")
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+
+    scope = _Scope(session, manifest_id)
+    node = scope.lookup(path)
+    lines = render_virtual_file(node).split("\n")
+
+    end = min(offset + limit - 1, len(lines))
+    if offset > len(lines):
+        header = f"{scope.path(node)} (offset {offset} is past the end -- {len(lines)} lines)"
+        return _bounded([header], max_chars, "")
+
+    header = f"{scope.path(node)} (lines {offset}-{end} of {len(lines)})"
+    body = [f"{n}\t{lines[n - 1]}" for n in range(offset, end + 1)]
+    return _bounded(
+        [header, *body], max_chars, "read a smaller range with `offset`/`limit`"
+    )
