@@ -17,11 +17,11 @@ from dotenv import load_dotenv
 from sqlalchemy import make_url, text
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))  # for `import load_qasper`
+sys.path.insert(0, str(ROOT / "scripts" / "eval"))  # for `import load_qasper`
 
 load_dotenv(ROOT / ".env")  # TEST_DATABASE_URL, ANTHROPIC_API_KEY, QASPER_LLM_* live here
 TEST_URL = os.environ.get("TEST_DATABASE_URL")
-# kb.db builds its engine at import time; create_engine doesn't connect, so a
+# kb.storage.db builds its engine at import time; create_engine doesn't connect, so a
 # placeholder is fine when the tests are going to be skipped anyway.
 os.environ["DATABASE_URL"] = TEST_URL or "postgresql+psycopg://skipped/skipped_test"
 
@@ -47,7 +47,7 @@ def migrated_db():
 
 
 def _truncate() -> None:
-    from kb.db import engine
+    from kb.storage.db import engine
 
     with engine.begin() as conn:
         conn.execute(text("TRUNCATE kb_chunks, upsertion_record, manifest_members, manifests, files CASCADE"))
@@ -57,7 +57,7 @@ def _truncate() -> None:
 # QASPER fixture data, loaded into the KB once per test session
 # --------------------------------------------------------------------------
 
-FIXTURE = Path(__file__).parent / "fixtures" / "qasper_20.jsonl"
+FIXTURE = Path(__file__).parent / "eval" / "fixtures" / "qasper_20.jsonl"
 ROOT_TITLE = "QASPER"
 
 
@@ -78,7 +78,7 @@ def manifests(ids, papers):
     """{paper id: manifest id}, each holding exactly that paper's folder (so its whole
     subtree). Plus "corpus": a manifest over the whole QASPER folder."""
     from kb import service
-    from kb.db import SessionLocal
+    from kb.storage.db import SessionLocal
 
     out = {}
     with SessionLocal() as session:
@@ -96,7 +96,7 @@ def manifests(ids, papers):
 
 @pytest.fixture
 def session(ids):
-    from kb.db import SessionLocal
+    from kb.storage.db import SessionLocal
 
     with SessionLocal() as s:
         yield s

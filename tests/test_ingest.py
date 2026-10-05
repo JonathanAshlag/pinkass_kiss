@@ -15,7 +15,7 @@ from kb.ingest import (
     materialize,
     plan_folder,
 )
-from kb.ingest.markdown import MarkdownProcessor
+from kb.ingest.processors.markdown import MarkdownProcessor
 
 
 def write(path: Path, data: str | bytes) -> Path:
@@ -172,7 +172,7 @@ def test_loader_processor_joins_docs_and_titles(tmp_path):
 def test_pdf_plan_keeps_original_in_blob_store(tmp_path):
     from langchain_core.stores import InMemoryByteStore
 
-    from kb.blobs import get_original
+    from kb.storage.blobs import get_original
 
     pdf = make_pdf(tmp_path / "docs" / "report.pdf")
     write(tmp_path / "docs" / "notes.md", "# Notes")
@@ -238,7 +238,7 @@ def test_docling_processor_registered_when_installed():
 
 @pytest.fixture
 def db_session(migrated_db):
-    from kb.db import SessionLocal
+    from kb.storage.db import SessionLocal
 
     session = SessionLocal()
     try:
@@ -394,7 +394,7 @@ def test_ingest_pdf_sets_blob_columns(db_session, tmp_path):
     from langchain_core.stores import InMemoryByteStore
 
     from kb import service
-    from kb.blobs import get_original
+    from kb.storage.blobs import get_original
 
     pdf = make_pdf(tmp_path / "papers" / "report.pdf")
     store = InMemoryByteStore()
@@ -425,7 +425,9 @@ def test_ingest_pdf_without_blob_store_leaves_blob_null(db_session, tmp_path):
 def test_ingest_uses_configured_blob_store_by_default(db_session, tmp_path):
     from langchain_core.stores import InMemoryByteStore
 
-    from kb import blobs, service
+    from kb import service
+
+    from kb.storage import blobs
 
     store = InMemoryByteStore()
     blobs.set_blob_store(store)
@@ -463,7 +465,7 @@ def test_upload_pdf_keeps_original(db_session, tmp_path):
 def test_raw_original_endpoint(client, db_session, tmp_path):
     from langchain_core.stores import InMemoryByteStore
 
-    from kb import blobs
+    from kb.storage import blobs
 
     pdf = make_pdf(tmp_path / "papers" / "report.pdf")
     (tmp_path / "papers" / "notes.md").write_text("# Notes\n")

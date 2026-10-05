@@ -29,11 +29,11 @@ this project" below for what was deliberately adopted, adapted, or skipped.
 3. **KB service / CRUD API** — **built.** `src/kb/service.py`: a thin passthrough
    chokepoint over the DAL (plus one real piece of logic, `get_warnings`) that every
    consumer — REST API, agents, ingestion jobs — goes through instead of calling
-   `kb.dal` directly. `src/kb/api.py`: a FastAPI REST surface over it. Still
+   `kb.storage.dal` directly. `src/kb/api/app.py`: a FastAPI REST surface over it. Still
    explicitly deferred: authz, manifest boundaries beyond storage, concurrency checks,
    real validation hooks (constraint violations currently surface as a raw 500).
 
-4. **Semantic index** — **built.** `src/kb/index/`: a *derived* pgvector index
+4. **Semantic index** — **built.** `src/kb/semantic_index/`: a *derived* pgvector index
    (`kb_chunks`) beside the canonical `files` table, kept in step by LangChain's indexing
    API. Disposable — always rebuildable from `files`. See "Semantic index" below.
 
@@ -42,23 +42,44 @@ this project" below for what was deliberately adopted, adapted, or skipped.
 Python 3.11, SQLAlchemy 2.0 (declarative style, `Mapped`/`mapped_column`), Alembic for
 migrations, psycopg3 as the driver. Src-layout package `kb` under `src/kb/`.
 
-- `src/kb/db.py` — `Base`, engine, `SessionLocal` (reads `DATABASE_URL` from env)
-- `src/kb/models.py` — SQLAlchemy models: `File`, `Manifest`, `ManifestMember`
-- `src/kb/dal.py` — the DAL primitives (see below); does not import `kb.okf`
-- `src/kb/okf.py` — the OKF layer primitives (see below); imports only `kb.models`,
-  never `kb.dal`
-- `src/kb/service.py` — the KB service primitives (see below); imports `kb.dal` and
-  `kb.okf`
-- `src/kb/schemas.py` — Pydantic v2 request/response models for `api.py`
-- `src/kb/api.py` — the FastAPI app (see below); imports `kb.service` and `kb.schemas`
-- `src/kb/ingest/` — folder ingestion with pluggable per-format processors (see below);
-  imports `kb.service` only
-- `src/kb/agent_tools.py` — `AgentTools(manifest_id)`: the DCI tools as an agent binds
-  them (see "Agent tools" below); imports `kb.service`
-- `src/kb/index/` — semantic index: `store.py` (LangChain wiring), `loader.py`
-  (files → chunks), `sync.py` (index/unindex), `search.py`; imports `kb.db`/`kb.dci`/
-  `kb.models`/`kb.dal`, never `kb.service` (service imports it lazily)
-- `src/kb/blobs.py` — raw-original storage (S3 / local `ByteStore`), see "Folder ingestion"
+Layout: data comes **in** (`ingest/`), lives in **storage** with a **derived index** beside it,
+and goes **out** through `service` → `api/` / `retrieval/`.
+
+```
+src/kb/
+  service.py          the chokepoint every consumer goes through; imports storage.dal, okf,
+                      retrieval.dci (semantic_index/retrieval.semantic/storage.blobs lazily)
+  okf.py              layer 2: advisory OKF checks; imports only storage.models, never dal
+  storage/            layer 1: canonical data
+    db.py             Base, engine, SessionLocal (reads DATABASE_URL from env)
+    models.py         SQLAlchemy models: File, Manifest, ManifestMember
+    dal.py            the DAL primitives (see below); does not import kb.okf
+    blobs.py          raw-original storage (S3 / local ByteStore), see "Folder ingestion"
+  ingest/             data coming in; imports kb.service only (+ storage.blobs)
+    folder.py         plan_folder / ingest_folder
+    upload.py         ingest_upload (multipart uploads -> temp dir -> ingest_folder)
+    plan.py           PlannedNode + materialize (the one place a plan becomes nodes)
+    processors/
+      base.py         Processor protocol, ProcessedDocument, registry
+      markdown.py     MarkdownProcessor
+      converters.py   LoaderProcessor: PDF/DOCX/... -> markdown via LangChain loaders
+  semantic_index/     layer 4, build side: derived pgvector index; never imports kb.service
+    vectorstore.py    LangChain wiring: PGVectorStore, record manager, embeddings
+    chunking.py       files -> chunks (FileNodeLoader, splitter, line/heading annotator)
+    indexer.py        index_files / unindex_files / reindex_all
+  retrieval/          data going out to agents
+    dci.py            direct corpus interaction: list_paths / search_lines / read_lines,
+                      render_virtual_file (see reference/paper.md)
+    semantic.py       semantic_search over semantic_index, scoped by manifest
+    agent_tools.py    AgentTools(manifest_id): both of the above as agent tools
+  api/                REST surface (`uvicorn kb.api:app`); imports kb.service
+    app.py            the FastAPI app (see below)
+    schemas.py        Pydantic v2 request/response models
+    static/           dev UI mounted at /ui
+scripts/              ingest_folder.py, reindex.py, seed_db.py; eval/load_qasper.py
+tests/                unit/integration suites; eval/ = QASPER suites + fixtures
+```
+
 - `migrations/` — Alembic: `0001_create_schema.py` (compacted from what was originally
   six incremental migrations, while there was still no real data to preserve) and
   `0002_semantic_index.py` (`vector` extension, `kb_chunks`, `upsertion_record`).
@@ -89,7 +110,7 @@ To run the API locally: `set -a && source .env && set +a && uvicorn kb.api:app
 | `status` (enum `draft`\|`stable`\|`deprecated`) | lifecycle field |
 | `content` | markdown body; NOT NULL unless `kind='folder'` (`content_required_for_file` CHECK) |
 | `deleted_at` | soft delete, NULL = active |
-| `blob_key`, `blob_size_bytes`, `blob_mime_type`, `blob_checksum` | the retained original of a converted file (PDF, ...): content-addressed key `sha256/<hex>` in the `kb.blobs` store, checksum `sha256:<hex>`. NULL for markdown nodes or when no blob store is configured |
+| `blob_key`, `blob_size_bytes`, `blob_mime_type`, `blob_checksum` | the retained original of a converted file (PDF, ...): content-addressed key `sha256/<hex>` in the `kb.storage.blobs` store, checksum `sha256:<hex>`. NULL for markdown nodes or when no blob store is configured |
 | `created_at`, `updated_at` | `updated_at` kept current by a DB trigger (`trg_files_set_updated_at` → `set_updated_at()`), not the ORM |
 
 ### `manifests` / `manifest_members` — curated per-agent file lists
@@ -152,14 +173,14 @@ doesn't exist yet).
 - **OKF's `type` and `resource` fields** — considered and skipped, see above; don't
   add columns for these without a concrete need.
 - **Auto-generated `index.md`-style directory index nodes** — built once (an
-  `is_generated_index` column + `kb.okf.regenerate_index`, wired into every `kb.dal`
+  `is_generated_index` column + `kb.okf.regenerate_index`, wired into every `kb.storage.dal`
   mutation), then removed: most uploaded markdown won't have a `description` set (and
   we deliberately never auto-generate one), so an auto-index listing that can't show
   descriptions is no better than just listing children — not worth the schema/code
   weight, and it raises the entry price for uploading already-existing files. Don't
   re-add without asking.
 
-## DAL primitives (`src/kb/dal.py`)
+## DAL primitives (`src/kb/storage/dal.py`)
 
 All functions take an explicit `Session` — no global/module-level session usage. Reads
 default to excluding soft-deleted rows (`include_deleted=False`).
@@ -199,16 +220,16 @@ Two calling conventions, by whether cross-node lookups are needed:
 **Pure, no node at all**: `extract_links(content)` — every markdown link target in a
 string, in order.
 
-## KB service / API primitives (`src/kb/service.py`, `src/kb/api.py`)
+## KB service / API primitives (`src/kb/service.py`, `src/kb/api/app.py`)
 
-`service.py` re-exports every `kb.dal` node/manifest function 1:1, same
+`service.py` re-exports every `kb.storage.dal` node/manifest function 1:1, same
 explicit-`Session`-argument style, same exceptions (`TreeCycleError`,
 `ManifestCycleError`, plain `ValueError` for "no such node/manifest") — it's the
 chokepoint future authz/validation hooks will land in, not a redesign of the DAL's
 surface. The one new function: `get_warnings(session, node)` composes all four
 `kb.okf` advisory checks into a single `list[str]` report for a node.
 
-`api.py` is a thin FastAPI wrapper: no business logic, just request/response shaping
+`api/app.py` is a thin FastAPI wrapper: no business logic, just request/response shaping
 via `schemas.py` and HTTP-status mapping (`TreeCycleError`/`ManifestCycleError` → 409,
 `ValueError` → 404). Routes: `POST/GET/PATCH/DELETE /files/{id}`,
 `POST /files/{id}/move`, `POST /files/{id}/restore`, `GET /files/{id}/children`,
@@ -218,7 +239,7 @@ via `schemas.py` and HTTP-status mapping (`TreeCycleError`/`ManifestCycleError` 
 `warnings` field from `get_warnings`; list responses (`FileSummary`) omit `content` and
 `warnings` to avoid running the advisory checks on every row of a listing.
 
-A static dev UI (`src/kb/static/index.html`, vanilla JS, no logic) is mounted at `/ui` for
+A static dev UI (`src/kb/api/static/index.html`, vanilla JS, no logic) is mounted at `/ui` for
 browsing the tree and exercising the CRUD/manifest routes.
 
 `FileUpdate` deliberately excludes `parent_id` — moving a node has to go through
@@ -242,7 +263,7 @@ dedupe/upsert, deliberate).
 It's two steps. **`plan_folder(root, ...) -> FolderPlan`** walks the dir and runs the
 processors without touching the DB. It returns `PlannedNode`s (the root plus one per
 file, addressed by `/`-joined path) and the skipped/failed lists. Then
-**`materialize(session, plan, *, parent_id, folder_fields)`** (`plan.py`) is the one place
+**`materialize(session, plan, *, parent_id, folder_fields)`** (`ingest/plan.py`) is the one place
 a plan becomes nodes. Ancestors the plan doesn't list are *implied* and created as plain
 folders (title = path segment, `folder_fields`) only when something below them is
 created, which is why empty dirs get no node. Explicit folders are always created.
@@ -251,7 +272,7 @@ created, which is why empty dirs get no node. Explicit folders are always create
 subtree should emit a plan and call `materialize` (the QASPER loader does), not loop
 over `create_file` by hand.
 
-**Extension point** (`base.py`): a `Processor` has `name`, `extensions` (lowercase,
+**Extension point** (`ingest/processors/base.py`): a `Processor` has `name`, `extensions` (lowercase,
 with dot) and `process(path) -> ProcessedDocument(title, content, extra)`, where
 `extra` holds additional `files` columns. To add a format (PDF, docx...), write one
 processor module and register it in `default_registry()`. `plan_folder` doesn't change.
@@ -272,13 +293,13 @@ folder" (root) and "Ingest folder here…" (on folders), using `<input webkitdir
 It filters hidden and unsupported files client-side, so those are never uploaded. No
 upload size limit yet.
 
-**Non-markdown formats** (`loaders.py`): `LoaderProcessor(name, extensions,
+**Non-markdown formats** (`ingest/processors/converters.py`): `LoaderProcessor(name, extensions,
 loader_factory)` runs any LangChain `BaseLoader` as a `Processor` (docs joined, title =
 first H1 else stem, empty text → failed). Built-ins: `PyMuPDF4LLMLoader(mode="single")`
 for `.pdf`; `DoclingLoader(export_type=MARKDOWN)` for `.pdf .docx .pptx .html .htm` when
 the optional `docling` extra is installed (it then takes `.pdf`; it pulls in torch).
 
-**Raw originals** (`src/kb/blobs.py`): processors with `retain_original = True` (the
+**Raw originals** (`src/kb/storage/blobs.py`): processors with `retain_original = True` (the
 loader ones, not markdown) get their source bytes stored via `put_original` and the
 `blob_*` columns set. Store from env: `BLOB_BUCKET` (+`BLOB_ENDPOINT_URL`,
 `BLOB_PREFIX`) → `S3ByteStore` (boto3; LangChain has no S3 write store); else
@@ -291,11 +312,11 @@ file. Blobs are written before the DB commit, so a rolled-back ingest can leave
 Tests: `tests/test_ingest.py` (plan tests need no DB; materialize/walker/upload tests
 do), `tests/test_blobs.py`.
 
-## Semantic index (`src/kb/index/`)
+## Semantic index (`src/kb/semantic_index/`, `src/kb/retrieval/semantic.py`)
 
 Built from LangChain parts; only KB-specific glue is hand-written.
 
-- **Store** (`store.py`): `langchain-postgres` `PGVectorStore` bound to `kb_chunks`
+- **Store** (`semantic_index/vectorstore.py`): `langchain-postgres` `PGVectorStore` bound to `kb_chunks`
   (columns `langchain_id`, `content`, `embedding vector(EMBEDDING_DIM)`, `file_id` FK
   `ON DELETE CASCADE`, `heading`, `start_line`, `end_line`, `langchain_metadata`; HNSW
   cosine) + `SQLRecordManager` (table `upsertion_record`, namespace
@@ -304,34 +325,34 @@ Built from LangChain parts; only KB-specific glue is hand-written.
   `DeterministicFakeEmbedding`. Searches run with `hnsw.iterative_scan=relaxed_order`
   so narrow `$in` filters still return k hits. `chunk_key_encoder` makes uuid chunk ids
   (the default sha1 one warns; sha256 hex doesn't fit the uuid column).
-- **Chunking** (`loader.py`): `FileNodeLoader` yields one Document per active node with
+- **Chunking** (`semantic_index/chunking.py`): `FileNodeLoader` yields one Document per active node with
   content (files *and* folders). Only the markdown **body** is embedded, not frontmatter
   (so retags re-embed nothing), but `start_line`/`end_line` are lines of the
   `dci`-rendered virtual file, so `read_lines(path, offset=start_line)` returns the
   chunk. `RecursiveCharacterTextSplitter.from_language(MARKDOWN)`, 1500 chars / 200
   overlap. `heading` = heading path at the chunk start ("Methods > Data"). Embedded text
   is prefixed with `"<title> > <heading>"`; `chunk_text(doc)` strips it.
-- **Sync** (`sync.py`): `index_files(ids)` takes *any* touched ids — active nodes are
+- **Sync** (`semantic_index/indexer.py`): `index_files(ids)` takes *any* touched ids — active nodes are
   re-indexed via `langchain_core.indexing.index(cleanup="incremental",
   source_id_key="file_id")` (unchanged chunks skipped, never re-embedded), deleted /
   missing / content-less ones unindexed. Never raises per file (`IndexResult.failed`).
   `unindex_files(ids)` goes through record-manager keys (incremental cleanup can't drop
   a file absent from the batch). `reindex_all()` = full cleanup, file by file. All open
   their own session: call them **after commit**, and not inside a running event loop.
-- **Index after writes** (`api.py`): create/patch/delete (+ descendants)/restore/ingest
+- **Index after writes** (`api/app.py`): create/patch/delete (+ descendants)/restore/ingest
   commit explicitly, then schedule `index_files` as a `BackgroundTask`; failures are only
   logged. Move/manifest routes don't reindex. `KB_AUTO_INDEX=0` turns it off (dev
   without an embeddings server). Repair: `POST /index/reindex` or `scripts/reindex.py
-  --all`. `scripts/ingest_folder.py --index` and `scripts/load_qasper.py --index` opt in.
-- **Search** (`search.py`): `service.semantic_search(session, manifest_id, query, *, k,
+  --all`. `scripts/ingest_folder.py --index` and `scripts/eval/load_qasper.py --index` opt in.
+- **Search** (`retrieval/semantic.py`): `service.semantic_search(session, manifest_id, query, *, k,
   tags, status)` → `SearchHit(file_id, path, title, heading, start_line, end_line,
   snippet, score)`. Scope = manifest nodes (∩ `query_metadata` tags/status) as a
   `file_id $in` filter — tags/status are never copied onto chunks. `score` is cosine
   **similarity** (higher = closer). Route: `GET /manifests/{id}/semantic?q=&k=`.
 
-Tests: `tests/test_index.py`, `tests/test_search.py`.
+Tests: `tests/test_semantic_index.py`, `tests/test_semantic_search.py`.
 
-## Agent tools (`src/kb/agent_tools.py`)
+## Agent tools (`src/kb/retrieval/agent_tools.py`)
 
 `AgentTools(manifest_id, *, session_factory=SessionLocal)` adapts the DCI tools for an agent.
 It sits at the same seam (`kb.service`'s `list_paths`/`search_lines`/`read_lines`) as the
@@ -359,7 +380,7 @@ head`). There is now a committed pytest suite (`pytest -m "not llm"`, needs
 
 ## QASPER evaluation
 
-`scripts/load_qasper.py` ingests QASPER papers (`paper_nodes` → a `PlannedNode` plan →
+`scripts/eval/load_qasper.py` ingests QASPER papers (`paper_nodes` → a `PlannedNode` plan →
 `kb.ingest.materialize`), one folder per
 paper that **mirrors the paper's own outline**: sections become numbered files
 (`01-introduction.md`), sections with subsections become numbered folders (their lead
@@ -371,8 +392,8 @@ method / training / setup / baselines / results / conclusion / other) from keywo
 heuristics (`classify_section`) -- a label only, it never moves text. An earlier
 fixed-template layout (introduction.md, methods/, experiments/...) was replaced by this
 because 31% of sections matched no rule and files became grab bags. Questions/answers
-are never stored in the KB. `tests/test_qasper.py` is the deterministic suite (committed
-20-paper fixture `tests/fixtures/qasper_20.jsonl`); `tests/test_qasper_llm.py` runs a
+are never stored in the KB. `tests/eval/test_qasper.py` is the deterministic suite (committed
+20-paper fixture `tests/eval/fixtures/qasper_20.jsonl`); `tests/eval/test_qasper_llm.py` runs a
 LangGraph agent (Anthropic, Ollama or any OpenAI-compatible server) bound to
 `AgentTools(...).as_langchain()`, scored by Answer-F1 (`QASPER_SEMANTIC=1` indexes the
 corpus once and adds the `semantic_search` tool, for comparing). Replaced the earlier HotPotQA eval

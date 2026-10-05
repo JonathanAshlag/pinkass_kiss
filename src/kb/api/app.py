@@ -1,6 +1,6 @@
 """
 REST API for the KB service layer. Thin: every route calls into kb.service and
-shapes the result with kb.schemas -- no business logic lives here.
+shapes the result with kb.api.schemas -- no business logic lives here.
 
 Run locally: `uvicorn kb.api:app --reload` (needs DATABASE_URL in the environment,
 same as Alembic).
@@ -30,10 +30,10 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from kb import service
-from kb.db import SessionLocal
-from kb.dci import DEFAULT_MAX_CHARS, DEFAULT_READ_LIMIT, MAX_CHARS_LIMIT
+from kb.storage.db import SessionLocal
+from kb.retrieval.dci import DEFAULT_MAX_CHARS, DEFAULT_READ_LIMIT, MAX_CHARS_LIMIT
 from kb.ingest import UploadError, default_registry, ingest_upload
-from kb.schemas import (
+from kb.api.schemas import (
     FileCreate,
     FileRead,
     FileSummary,

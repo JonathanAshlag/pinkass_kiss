@@ -2,12 +2,12 @@
 
 `FileNodeLoader` yields one `Document` per active node with content; `split_documents`
 cuts those into chunks whose metadata (`file_id`, `heading`, `start_line`, `end_line`,
-`title`) matches the `kb_chunks` columns in `kb.index.store`.
+`title`) matches the `kb_chunks` columns in `kb.semantic_index.vectorstore`.
 
 Decisions:
 
 - **What gets embedded: the markdown body, not the frontmatter.** A node's virtual file
-  (`kb.dci.render_virtual_file`) is a YAML frontmatter block followed by
+  (`kb.retrieval.dci.render_virtual_file`) is a YAML frontmatter block followed by
   `node.content`. Only the content is indexed, so retagging, a status change or a
   description edit doesn't re-embed anything (frontmatter is reachable via
   `search_lines` already). The loader records how many lines precede the body in the
@@ -33,7 +33,7 @@ Decisions:
   heading line includes that heading. Headings inside fenced code blocks are ignored.
   `None` when no heading precedes the chunk.
 
-Imports kb.db / kb.dci / kb.models only (kb.service will import this module).
+Imports kb.storage.db / kb.retrieval.dci / kb.storage.models only (kb.service will import this module).
 """
 
 from __future__ import annotations
@@ -47,9 +47,9 @@ from langchain_core.documents import Document
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 from sqlalchemy import select
 
-from kb.db import SessionLocal
-from kb.dci import render_virtual_file
-from kb.models import File
+from kb.storage.db import SessionLocal
+from kb.retrieval.dci import render_virtual_file
+from kb.storage.models import File
 
 DEFAULT_CHUNK_SIZE = 1500
 DEFAULT_CHUNK_OVERLAP = 200

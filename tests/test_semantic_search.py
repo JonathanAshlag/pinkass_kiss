@@ -1,11 +1,11 @@
 """
-Semantic search (kb.index.search) and its wiring: service passthroughs, the
+Semantic search (kb.retrieval.semantic) and its wiring: service passthroughs, the
 /manifests/{id}/semantic and /index/reindex routes, the index-after-write background
 hook, and the agent tool.
 
 Chunks are seeded straight into kb_chunks with `vector_store.add_documents` (metadata
 file_id / heading / start_line / end_line), so these tests don't depend on
-kb.index.sync -- except `test_index_files_roundtrip`, which runs only when it exists.
+kb.semantic_index.indexer -- except `test_index_files_roundtrip`, which runs only when it exists.
 Embeddings are `DeterministicFakeEmbedding`: a query equal to a chunk's text lands at
 distance 0 from it, everything else is effectively random.
 """
@@ -26,7 +26,7 @@ from langchain_core.embeddings import DeterministicFakeEmbedding  # noqa: E402
 
 @pytest.fixture(scope="module")
 def store(migrated_db):
-    from kb.index.store import EMBEDDING_DIM, build_index_store, set_index_store
+    from kb.semantic_index.vectorstore import EMBEDDING_DIM, build_index_store, set_index_store
 
     s = build_index_store(
         database_url=os.environ["TEST_DATABASE_URL"],
@@ -43,7 +43,7 @@ class KB:
     them), seeds chunks for them, and hard-deletes everything it made afterwards."""
 
     def __init__(self, store):
-        from kb.db import SessionLocal
+        from kb.storage.db import SessionLocal
 
         self.store = store
         self.session = SessionLocal()
@@ -78,7 +78,7 @@ class KB:
     def chunk(self, node, line_text, heading=None):
         """Seed one chunk whose text is `line_text`, located where that line sits in
         the DCI-rendered virtual file (so start_line matches read_lines)."""
-        from kb.dci import render_virtual_file
+        from kb.retrieval.dci import render_virtual_file
 
         lines = render_virtual_file(node).split("\n")
         line_no = lines.index(line_text) + 1
@@ -135,7 +135,7 @@ def search(kb, manifest, query, **kwargs):
 
 
 # --------------------------------------------------------------------------
-# kb.index.search via kb.service
+# kb.retrieval.semantic via kb.service
 # --------------------------------------------------------------------------
 
 
@@ -220,7 +220,7 @@ def test_hit_path_roundtrips_into_read_lines(kb):
 
 
 def test_empty_scope_returns_nothing(kb):
-    from kb.index import search as search_mod
+    from kb.retrieval import semantic as search_mod
 
     folder = kb.node("only-a-folder", kind="folder")  # no content -> not searchable
     m_folder = kb.manifest(folder)
@@ -259,7 +259,7 @@ def test_narrow_manifest_gets_its_hits_among_many_files(kb):
     filter anyway, so this checks the outcome (all k narrow hits, sorted) plus that the
     iterative-scan option is wired in; the HNSW shortfall itself was demonstrated by
     hand on 20k rows (forced HNSW plan: 4/20 hits plain, 20/20 with iterative scan)."""
-    from kb.index.store import _iterative_hnsw_options
+    from kb.semantic_index.vectorstore import _iterative_hnsw_options
 
     assert "hnsw.iterative_scan = relaxed_order" in _iterative_hnsw_options().to_parameter()
     noise_root = kb.node("noise", kind="folder")
@@ -346,7 +346,7 @@ def recorder(monkeypatch, kb):
     """Replaces service.index_files; each call records the ids plus how each node
     looks from a *fresh* session -- i.e. what was committed when indexing ran."""
     from kb import service
-    from kb.db import SessionLocal
+    from kb.storage.db import SessionLocal
 
     monkeypatch.setenv("KB_AUTO_INDEX", "1")
     calls = []
@@ -432,7 +432,7 @@ def test_index_hook_disabled_by_env(kb, client, recorder, monkeypatch):
 
 
 def test_agent_semantic_search_tool(kb):
-    from kb.agent_tools import AgentTools
+    from kb.retrieval.agent_tools import AgentTools
 
     doc = kb.node("agent-doc", "# Setup\n\nwe train for ten epochs")
     line_no = kb.chunk(doc, "we train for ten epochs", heading="Setup")
@@ -459,7 +459,7 @@ def test_agent_semantic_search_tool(kb):
 
 
 @pytest.mark.skipif(
-    importlib.util.find_spec("kb.index.sync") is None, reason="kb.index.sync not built yet"
+    importlib.util.find_spec("kb.semantic_index.indexer") is None, reason="kb.semantic_index.indexer not built yet"
 )
 def test_index_files_roundtrip(kb):
     from kb import service

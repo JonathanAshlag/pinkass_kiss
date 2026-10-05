@@ -1,7 +1,7 @@
 """
 OKF document layer: frontmatter-aware behavior built on top of the DAL.
 
-Depends only on kb.models, never on kb.dal -- kb.dal doesn't import this
+Depends only on kb.storage.models, never on kb.storage.dal -- kb.storage.dal doesn't import this
 module at all, so there's no circularity to worry about either way.
 """
 
@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from kb.models import File
+from kb.storage.models import File
 
 _LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 _INTERNAL_LINK_PREFIX = "db://files/"

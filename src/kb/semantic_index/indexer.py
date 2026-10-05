@@ -22,8 +22,8 @@ from dataclasses import dataclass, field
 
 from langchain_core.indexing import index
 
-from kb.index.loader import FileNodeLoader, split_documents
-from kb.index.store import IndexStore, chunk_key_encoder, get_index_store
+from kb.semantic_index.chunking import FileNodeLoader, split_documents
+from kb.semantic_index.vectorstore import IndexStore, chunk_key_encoder, get_index_store
 
 log = logging.getLogger(__name__)
 

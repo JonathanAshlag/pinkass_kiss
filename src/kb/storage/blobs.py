@@ -6,7 +6,7 @@ Any LangChain `ByteStore` works: `S3ByteStore` (S3 or an S3-compatible endpoint 
 MinIO/GCS), `LocalFileStore` for dev, `InMemoryByteStore` for tests. Originals are stored
 content-addressed (`sha256/<hex>`), so identical uploads share one object.
 
-Independent of the DB layers: never imports kb.service / kb.dal.
+Independent of the DB layers: never imports kb.service / kb.storage.dal.
 """
 
 import hashlib

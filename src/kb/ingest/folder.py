@@ -4,14 +4,14 @@ a registered processor handles becomes a file node, everything else is skipped.
 
 Two steps: `plan_folder` walks the directory and runs the processors (no DB), then
 `kb.ingest.plan.materialize` creates the nodes. Format-agnostic -- which files are
-supported is entirely the registry's business (see kb.ingest.base). Never commits: the
+supported is entirely the registry's business (see kb.ingest.processors.base). Never commits: the
 caller owns the transaction, so one run is all-or-nothing.
 
 Originals: for files whose processor sets `retain_original` (converted formats such as
-PDF), the raw bytes go to a blob store (kb.blobs) during planning and the node gets the
+PDF), the raw bytes go to a blob store (kb.storage.blobs) during planning and the node gets the
 `blob_*` columns. That's external I/O but not DB I/O, and it's opt-in: `plan_folder`
 retains nothing unless given a `blob_store`; `ingest_folder` defaults to the configured
-one (`kb.blobs.get_blob_store()`). Blobs are content-addressed, so a rolled-back ingest
+one (`kb.storage.blobs.get_blob_store()`). Blobs are content-addressed, so a rolled-back ingest
 only leaves harmless, dedupable objects behind.
 """
 
@@ -24,8 +24,8 @@ from typing import Any
 from langchain_core.stores import ByteStore
 from sqlalchemy.orm import Session
 
-from kb.blobs import get_blob_store, guess_mime, put_original
-from kb.ingest.base import ProcessorRegistry, default_registry
+from kb.storage.blobs import get_blob_store, guess_mime, put_original
+from kb.ingest.processors.base import ProcessorRegistry, default_registry
 from kb.ingest.plan import PlannedNode, materialize
 
 
@@ -136,7 +136,7 @@ def ingest_folder(
     blob_store: ByteStore | None = DEFAULT_BLOB_STORE,
 ) -> IngestReport:
     """`plan_folder` + `materialize` under `parent_id` (an existing folder, or None for
-    the KB root). `blob_store` defaults to `kb.blobs.get_blob_store()`; pass None to keep
+    the KB root). `blob_store` defaults to `kb.storage.blobs.get_blob_store()`; pass None to keep
     no originals. See `plan_folder` for the other arguments."""
     if blob_store is DEFAULT_BLOB_STORE:
         blob_store = get_blob_store()

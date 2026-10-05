@@ -6,7 +6,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, ENUM, JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
-from kb.db import Base
+from kb.storage.db import Base
 
 FileStatus = ENUM("draft", "stable", "deprecated", name="file_status", create_type=False)
 FileKind = ENUM("file", "folder", name="file_kind", create_type=False)
@@ -63,7 +63,7 @@ class File(Base):
     )
 
     # Soft delete: NULL = active. Deleting a folder cascades to its subtree
-    # (see kb.dal.delete_node); all DAL reads exclude these by default.
+    # (see kb.storage.dal.delete_node); all DAL reads exclude these by default.
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
     # Placeholders for a future object-storage-backed blob layer. Unused
@@ -95,7 +95,7 @@ class Manifest(Base):
     A named, curated manifest of files/directories/other manifests that an
     agent developer preclaims as relevant to their agent. Resolution
     (expanding directories/nested manifests into a concrete file set)
-    happens at read time via kb.dal.resolve_manifest -- membership itself is
+    happens at read time via kb.storage.dal.resolve_manifest -- membership itself is
     static, but a directory member's resolved contents are not (new children
     under it are picked up automatically).
 
@@ -132,7 +132,7 @@ class ManifestMember(Base):
     """
     One membership row: exactly one of `file_id` (a file or directory node)
     or `child_manifest_id` (a nested manifest) is set. Multi-hop cycle
-    prevention for nested manifests is enforced in kb.dal.add_manifest_member,
+    prevention for nested manifests is enforced in kb.storage.dal.add_manifest_member,
     not the database -- only the direct self-reference case is a CHECK here.
     """
 

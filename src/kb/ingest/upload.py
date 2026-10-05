@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from langchain_core.stores import ByteStore
 from sqlalchemy.orm import Session
 
-from kb.ingest.base import ProcessorRegistry
+from kb.ingest.processors.base import ProcessorRegistry
 from kb.ingest.folder import DEFAULT_BLOB_STORE, IngestReport, ingest_folder
 
 UPLOAD_SCHEME = "upload:"

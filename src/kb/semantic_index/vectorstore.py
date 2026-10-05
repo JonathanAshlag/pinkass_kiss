@@ -2,7 +2,7 @@
 migration 0002, never by this module) plus a SQLRecordManager over `upsertion_record`.
 
 Nothing here connects at import time; `get_index_store()` builds lazily and caches.
-Does not import `kb.dal` / `kb.service`.
+Does not import `kb.storage.dal` / `kb.service`.
 
 Env vars:
 - `DATABASE_URL`      -- same `postgresql+psycopg://...` URL as the rest of the app. The
@@ -96,7 +96,7 @@ def _iterative_hnsw_options():
     `file_id IN (<manifest scope>)`) keeps walking the graph until it has `k` rows
     that pass the filter instead of returning fewer than `k` (plain HNSW only visits
     `ef_search` candidates, then filters). `relaxed_order` may return rows slightly out
-    of distance order -- callers re-sort (kb.index.search does)."""
+    of distance order -- callers re-sort (kb.retrieval.semantic does)."""
     from langchain_postgres.v2.indexes import HNSWQueryOptions
 
     class IterativeHNSWQueryOptions(HNSWQueryOptions):
@@ -118,7 +118,7 @@ def build_index_store(
     from langchain_postgres import PGEngine, PGVectorStore
 
     if database_url is None:
-        from kb.db import get_database_url
+        from kb.storage.db import get_database_url
 
         database_url = get_database_url()
     model = _embeddings_model()

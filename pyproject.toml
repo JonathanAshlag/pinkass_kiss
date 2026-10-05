@@ -11,7 +11,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "python-dotenv>=1.0",
     "python-multipart>=0.0.9",  # multipart uploads (POST /ingest)
-    # semantic index (kb.index): pgvector store, chunking, embeddings, record manager
+    # semantic index (kb.semantic_index): pgvector store, chunking, embeddings, record manager
     "langchain>=1.0",  # init_embeddings
     "langchain-classic>=1.0",  # SQLRecordManager
     "langchain-postgres>=0.0.18",

@@ -34,7 +34,7 @@ def main() -> None:
     p.add_argument("--index", action="store_true", help="after committing, add the created nodes to the semantic index")
     args = p.parse_args()
 
-    from kb.db import SessionLocal
+    from kb.storage.db import SessionLocal
     from kb.ingest import ingest_folder
 
     with SessionLocal() as session:

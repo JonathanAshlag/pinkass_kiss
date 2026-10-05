@@ -1,4 +1,4 @@
-"""Semantic index (kb.index.loader / kb.index.sync): splitter/annotator tests (no DB),
+"""Semantic index (kb.semantic_index.chunking / kb.semantic_index.indexer): splitter/annotator tests (no DB),
 plus DB-backed indexing tests against kb_chunks with fake embeddings."""
 
 import uuid
@@ -7,7 +7,7 @@ import pytest
 from langchain_core.documents import Document
 from langchain_core.embeddings import DeterministicFakeEmbedding
 
-from kb.index.loader import chunk_text, heading_paths, split_documents
+from kb.semantic_index.chunking import chunk_text, heading_paths, split_documents
 
 
 def section(n: int, words: int = 120, tag: str = "") -> str:
@@ -100,7 +100,7 @@ class FailingEmbedding(DeterministicFakeEmbedding):
 @pytest.fixture(scope="module")
 def store(migrated_db):
     from conftest import TEST_URL
-    from kb.index.store import EMBEDDING_DIM, build_index_store, set_index_store
+    from kb.semantic_index.vectorstore import EMBEDDING_DIM, build_index_store, set_index_store
 
     s = build_index_store(database_url=TEST_URL, embeddings=DeterministicFakeEmbedding(size=EMBEDDING_DIM))
     set_index_store(s)
@@ -111,14 +111,14 @@ def store(migrated_db):
 @pytest.fixture(scope="module")
 def failing_store(migrated_db):
     from conftest import TEST_URL
-    from kb.index.store import EMBEDDING_DIM, build_index_store
+    from kb.semantic_index.vectorstore import EMBEDDING_DIM, build_index_store
 
     return build_index_store(database_url=TEST_URL, embeddings=FailingEmbedding(size=EMBEDDING_DIM))
 
 
 @pytest.fixture
 def db(migrated_db):
-    from kb.db import SessionLocal
+    from kb.storage.db import SessionLocal
 
     with SessionLocal() as s:
         yield s
@@ -137,7 +137,7 @@ def make(db, *, kind="file", content=None, title=None, parent_id=None, **cols):
 def chunks_of(file_id):
     from sqlalchemy import text
 
-    from kb.db import engine
+    from kb.storage.db import engine
 
     with engine.connect() as conn:
         return conn.execute(
@@ -150,7 +150,7 @@ def chunks_of(file_id):
 
 
 def test_create_then_index(db, store):
-    from kb.index.sync import index_files
+    from kb.semantic_index.indexer import index_files
 
     content = "# Top\n\n" + "".join(section(i) for i in range(4))
     fid = make(db, content=content)
@@ -164,7 +164,7 @@ def test_create_then_index(db, store):
 
 
 def test_reindex_unchanged_is_all_skipped(db, store):
-    from kb.index.sync import index_files
+    from kb.semantic_index.indexer import index_files
 
     fid = make(db, content="".join(section(i) for i in range(3)))
     first = index_files([fid])
@@ -174,7 +174,7 @@ def test_reindex_unchanged_is_all_skipped(db, store):
 
 def test_edit_replaces_changed_and_deletes_stale(db, store):
     from kb import service
-    from kb.index.sync import index_files
+    from kb.semantic_index.indexer import index_files
 
     fid = make(db, content="".join(section(i) for i in range(5)))
     first = index_files([fid])
@@ -195,7 +195,7 @@ def test_edit_replaces_changed_and_deletes_stale(db, store):
 
 def test_retag_only_adds_nothing(db, store):
     from kb import service
-    from kb.index.sync import index_files
+    from kb.semantic_index.indexer import index_files
 
     fid = make(db, content="".join(section(i) for i in range(2)), tags=["a"])
     first = index_files([fid])
@@ -208,7 +208,7 @@ def test_retag_only_adds_nothing(db, store):
 
 def test_soft_delete_then_restore(db, store):
     from kb import service
-    from kb.index.sync import index_files
+    from kb.semantic_index.indexer import index_files
 
     fid = make(db, content=section(1))
     n = index_files([fid]).num_added
@@ -224,14 +224,14 @@ def test_soft_delete_then_restore(db, store):
 
 
 def test_missing_id_is_harmless(store):
-    from kb.index.sync import index_files
+    from kb.semantic_index.indexer import index_files
 
     result = index_files([uuid.uuid4()])
     assert result.failed == [] and result.num_deleted == 0
 
 
 def test_folders_indexed_only_with_content(db, store):
-    from kb.index.sync import index_files
+    from kb.semantic_index.indexer import index_files
 
     with_content = make(db, kind="folder", content="# About\n\nwhat lives here")
     empty = make(db, kind="folder")
@@ -242,7 +242,7 @@ def test_folders_indexed_only_with_content(db, store):
 
 
 def test_embedding_failure_is_isolated(db, failing_store):
-    from kb.index.sync import index_files
+    from kb.semantic_index.indexer import index_files
 
     bad = make(db, content=f"this one has {FAIL_MARKER} inside")
     good = make(db, content="this one is fine")
@@ -255,7 +255,7 @@ def test_embedding_failure_is_isolated(db, failing_store):
 
 def test_reindex_all_removes_chunks_of_deleted_files(db, store):
     from kb import service
-    from kb.index.sync import index_files, reindex_all
+    from kb.semantic_index.indexer import index_files, reindex_all
 
     keep = make(db, content=section(1))
     drop = make(db, content=section(2))
@@ -272,7 +272,7 @@ def test_reindex_all_removes_chunks_of_deleted_files(db, store):
 
 
 def test_unindex_files_returns_count(db, store):
-    from kb.index.sync import index_files, unindex_files
+    from kb.semantic_index.indexer import index_files, unindex_files
 
     fid = make(db, content="".join(section(i) for i in range(3)))
     n = index_files([fid]).num_added
@@ -283,8 +283,8 @@ def test_unindex_files_returns_count(db, store):
 
 def test_line_ranges_round_trip_through_read_lines(db, store):
     from kb import service
-    from kb.index.loader import chunk_text
-    from kb.index.sync import index_files
+    from kb.semantic_index.chunking import chunk_text
+    from kb.semantic_index.indexer import index_files
 
     content = "# Paper\n\nintro\n\n" + "".join(section(i, words=100) for i in range(6))
     fid = make(db, content=content, tags=["t1", "t2"], description="desc", aliases=["P"])

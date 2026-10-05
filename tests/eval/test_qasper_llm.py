@@ -3,7 +3,7 @@ An LLM agent answers QASPER questions using the KB's DCI tools (ls / grep / read
 orchestrated with LangGraph. Two tests:
 
 - `test_agent_graph_wiring`: a scripted fake model drives the same graph + tools
-  (`kb.agent_tools`), so the tool-calling loop is checked for free (no API key).
+  (`kb.retrieval.agent_tools`), so the tool-calling loop is checked for free (no API key).
 - `test_llm_answers_questions_with_kb_tools`: a real model answers the first
   QASPER_LLM_N (default 10) questions, each against its paper's manifest (the paper's
   folder tree). QASPER_LLM_PROVIDER picks the model: "anthropic" (default; costs money,
@@ -44,7 +44,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage  # no
 from langgraph.graph import END, START, MessagesState, StateGraph  # noqa: E402
 from langgraph.prebuilt import ToolNode, tools_condition  # noqa: E402
 
-from kb.agent_tools import AgentTools  # noqa: E402
+from kb.retrieval.agent_tools import AgentTools  # noqa: E402
 
 SYSTEM_PROMPT = (
     "You answer questions about one scientific paper using only a small knowledge base "
@@ -269,7 +269,7 @@ def semantic_index(manifests):
     if not semantic_enabled():
         return False
     from kb import service
-    from kb.db import SessionLocal
+    from kb.storage.db import SessionLocal
 
     with SessionLocal() as s:
         node_ids = [n.id for n in service.resolve_manifest(s, manifests["corpus"])]

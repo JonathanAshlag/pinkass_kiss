@@ -9,7 +9,7 @@ Usage: `set -a && source .env && set +a && python scripts/seed_db.py`
 from datetime import datetime, timedelta, timezone
 
 from kb import service
-from kb.db import SessionLocal
+from kb.storage.db import SessionLocal
 
 
 def main() -> None:

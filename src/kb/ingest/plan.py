@@ -15,7 +15,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from kb import service
-from kb.models import File
+from kb.storage.models import File
 
 
 @dataclass

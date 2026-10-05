@@ -1,5 +1,5 @@
 """
-Rebuilds or refreshes the semantic index (kb_chunks) from the files table (see kb.index).
+Rebuilds or refreshes the semantic index (kb_chunks) from the files table (see kb.semantic_index).
 
 --all rebuilds from every active node with content and removes chunks of deleted or
 emptied nodes; --file-id (re)indexes just those nodes (deleted/missing/empty ones are
@@ -30,7 +30,7 @@ def main() -> None:
     group.add_argument("--file-id", type=uuid.UUID, nargs="+", help="node(s) to (re)index")
     args = p.parse_args()
 
-    from kb.index.sync import index_files, reindex_all
+    from kb.semantic_index.indexer import index_files, reindex_all
 
     result = reindex_all() if args.all else index_files(args.file_id)
 

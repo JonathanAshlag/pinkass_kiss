@@ -32,8 +32,8 @@ Needs DATABASE_URL for --to-kb (see .env.example).
 
 Usage:
     pip install datasets
-    python scripts/load_qasper.py --split validation --limit 20 --out tests/fixtures/qasper_20.jsonl
-    python scripts/load_qasper.py --to-kb --limit 20 [--index]
+    python scripts/eval/load_qasper.py --split validation --limit 20 --out tests/eval/fixtures/qasper_20.jsonl
+    python scripts/eval/load_qasper.py --to-kb --limit 20 [--index]
 
 --index also embeds the loaded papers into the semantic index (kb_chunks); it needs
 the embeddings model (EMBEDDINGS_MODEL) reachable. Off by default.
@@ -51,9 +51,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")  # HF_TOKEN, DATABASE_URL (for --to-kb)
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")  # HF_TOKEN, DATABASE_URL (for --to-kb)
 
-from kb.ingest.plan import PlannedNode  # noqa: E402 -- after load_dotenv: kb.db reads DATABASE_URL on import
+from kb.ingest.plan import PlannedNode  # noqa: E402 -- after load_dotenv: kb.storage.db reads DATABASE_URL on import
 
 ROOT_TITLE = "QASPER"
 TAG = "qasper"
@@ -295,7 +295,7 @@ def load_into_kb(papers: list[dict], *, index: bool = False) -> dict[str, str]:
     """Create the KB from the papers. Returns {paper id: paper folder node id}. With
     `index`, every created node is also added to the semantic index after the commit."""
     from kb import service
-    from kb.db import SessionLocal
+    from kb.storage.db import SessionLocal
     from kb.ingest import materialize
 
     with SessionLocal() as session:

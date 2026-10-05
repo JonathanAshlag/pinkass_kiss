@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session, aliased
 
-from kb.models import File, Manifest, ManifestMember
+from kb.storage.models import File, Manifest, ManifestMember
 
 
 class ManifestCycleError(ValueError):

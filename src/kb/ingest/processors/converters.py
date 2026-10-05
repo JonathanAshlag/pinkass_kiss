@@ -2,7 +2,7 @@
 Processors backed by LangChain document loaders: binary formats (PDF, DOCX, PPTX, HTML)
 converted to markdown. Unlike markdown, the stored content isn't the original, so these
 set `retain_original = True` and the folder walker keeps the raw bytes in the blob store
-(see kb.blobs) when one is configured.
+(see kb.storage.blobs) when one is configured.
 
 Built-ins: PyMuPDF4LLM for `.pdf` (always installed), and Docling for
 `.pdf .docx .pptx .html .htm` when the optional `langchain-docling` extra is installed
@@ -14,8 +14,8 @@ from pathlib import Path
 
 from langchain_core.document_loaders import BaseLoader
 
-from kb.ingest.base import ProcessedDocument
-from kb.ingest.markdown import title_from_markdown
+from kb.ingest.processors.base import ProcessedDocument
+from kb.ingest.processors.markdown import title_from_markdown
 
 LoaderFactory = Callable[[Path], BaseLoader]
 

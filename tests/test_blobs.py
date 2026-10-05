@@ -1,4 +1,4 @@
-"""kb.blobs: content-addressed originals over any ByteStore, S3ByteStore against a
+"""kb.storage.blobs: content-addressed originals over any ByteStore, S3ByteStore against a
 stubbed boto3 client, and env-based store selection. No DB, no network."""
 
 import hashlib
@@ -11,8 +11,8 @@ from botocore.stub import Stubber
 from langchain_classic.storage import LocalFileStore
 from langchain_core.stores import InMemoryByteStore
 
-from kb import blobs
-from kb.blobs import S3ByteStore, get_original, guess_mime, put_original
+from kb.storage import blobs
+from kb.storage.blobs import S3ByteStore, get_original, guess_mime, put_original
 
 PDF = b"%PDF-1.7 fake bytes"
 DIGEST = hashlib.sha256(PDF).hexdigest()

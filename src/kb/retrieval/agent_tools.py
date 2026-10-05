@@ -1,5 +1,5 @@
 """
-The KB's DCI tools (see kb.dci) as an agent sees them: scoped to one manifest, text in,
+The KB's DCI tools (see kb.retrieval.dci) as an agent sees them: scoped to one manifest, text in,
 text out. This is the agent-side adapter at the same seam the REST routes in kb.api sit
 on -- what an agent framework binds as tools.
 
@@ -14,7 +14,7 @@ Differences from calling kb.service directly, all of which an agent loop needs:
   the text as a `[truncated ...]` notice).
 
 `semantic_search` is a fourth, optional tool over the derived embedding index
-(kb.index): it finds passages by meaning and points at them with the same paths and
+(kb.semantic_index): it finds passages by meaning and points at them with the same paths and
 line numbers `read_lines` takes. It needs the index stack (and an indexed corpus), so
 `as_langchain()` only includes it when asked (`include_semantic=True`).
 
@@ -35,7 +35,7 @@ class AgentTools:
         self, manifest_id: uuid.UUID, *, session_factory: Callable[[], Session] | None = None
     ):
         if session_factory is None:
-            from kb.db import SessionLocal
+            from kb.storage.db import SessionLocal
 
             session_factory = SessionLocal
         self.manifest_id = manifest_id

@@ -1,5 +1,5 @@
 """
-Pydantic request/response models for src/kb/api.py.
+Pydantic request/response models for src/kb/api/app.py.
 
 FileRead/ManifestRead use from_attributes=True so they can be built directly off the
 SQLAlchemy File/Manifest objects kb.service returns (`FileRead.model_validate(node)`).
@@ -106,7 +106,7 @@ class ManifestMemberCreate(BaseModel):
 
 
 class ToolOutputRead(BaseModel):
-    """A kb.dci tool result: agent-ready text, plus whether it was cut at max_chars."""
+    """A kb.retrieval.dci tool result: agent-ready text, plus whether it was cut at max_chars."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -142,7 +142,7 @@ class IngestExtensionsRead(BaseModel):
 
 
 class SearchHitRead(BaseModel):
-    """A kb.index.search.SearchHit: one chunk matching a semantic query. `path` and
+    """A kb.retrieval.semantic.SearchHit: one chunk matching a semantic query. `path` and
     `start_line` can be passed straight to GET /manifests/{id}/read (path, offset)."""
 
     model_config = ConfigDict(from_attributes=True)

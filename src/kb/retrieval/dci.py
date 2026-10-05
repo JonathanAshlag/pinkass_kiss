@@ -31,8 +31,8 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from kb import dal
-from kb.models import File
+from kb.storage import dal
+from kb.storage.models import File
 
 DEFAULT_MAX_CHARS = 20_000
 MAX_CHARS_LIMIT = 50_000

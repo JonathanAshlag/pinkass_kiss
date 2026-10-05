@@ -4,7 +4,7 @@ Revision ID: 0002
 Revises: 0001
 Create Date: 2026-10-05
 
-`kb_chunks` is the table `kb.index.store` binds a langchain_postgres PGVectorStore to
+`kb_chunks` is the table `kb.semantic_index.vectorstore` binds a langchain_postgres PGVectorStore to
 (default PGVectorStore column names: langchain_id / content / embedding /
 langchain_metadata, plus the custom metadata columns file_id / heading / start_line /
 end_line). `upsertion_record` is langchain_classic's SQLRecordManager table, with DDL
@@ -25,7 +25,7 @@ down_revision: Union[str, None] = "0001"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-# Must match the embedding model's output size (kb.index.store.EMBEDDING_DIM).
+# Must match the embedding model's output size (kb.semantic_index.vectorstore.EMBEDDING_DIM).
 EMBEDDING_DIM = int(os.environ.get("EMBEDDING_DIM", "768"))
 
 

@@ -2,12 +2,12 @@
 Semantic (embedding) search over the derived `kb_chunks` index, scoped to a manifest.
 
 The canonical data stays in `files`; this module only reads chunks that
-`kb.index.sync` derived from it. Every hit is mapped back to the DCI path of its file
-(the same path `kb.dci.read_lines` accepts), and its `start_line`/`end_line` are line
+`kb.semantic_index.indexer` derived from it. Every hit is mapped back to the DCI path of its file
+(the same path `kb.retrieval.dci.read_lines` accepts), and its `start_line`/`end_line` are line
 numbers in the virtual file DCI renders -- so an agent can go straight from a hit to
 `read_lines(path, offset=start_line)`.
 
-Scope = the content-bearing nodes the manifest resolves to (`kb.dal.resolve_manifest`),
+Scope = the content-bearing nodes the manifest resolves to (`kb.storage.dal.resolve_manifest`),
 optionally intersected with a tags/status `query_metadata` filter. Soft-deleted nodes
 drop out of the scope even if their chunks haven't been unindexed yet.
 
@@ -15,7 +15,7 @@ Filtered HNSW: the scope becomes a `file_id IN (...)` filter on the vector query
 HNSW visits only `ef_search` candidates and filters afterwards, so a narrow manifest in
 a large index could get fewer than `k` hits (or none). The vector store is built with
 pgvector's iterative scan (`hnsw.iterative_scan = relaxed_order`, see
-`kb.index.store`), which keeps scanning until `k` rows pass the filter; relaxed order
+`kb.semantic_index.vectorstore`), which keeps scanning until `k` rows pass the filter; relaxed order
 means rows may come back slightly unsorted, so hits are re-sorted here.
 """
 
@@ -26,8 +26,8 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from kb import dal
-from kb.dci import _Scope
+from kb.storage import dal
+from kb.retrieval.dci import _Scope
 
 SNIPPET_CHARS = 240
 
@@ -72,10 +72,10 @@ def semantic_search(
     if not in_scope or not query.strip():
         return []
 
-    from kb.index.loader import chunk_text  # strips the "<title> > <heading>" context prefix
+    from kb.semantic_index.chunking import chunk_text  # strips the "<title> > <heading>" context prefix
 
     if store is None:
-        from kb.index.store import get_index_store
+        from kb.semantic_index.vectorstore import get_index_store
 
         store = get_index_store()
     results = store.vector_store.similarity_search_with_score(

@@ -1,6 +1,6 @@
 """
 Evaluates the KB against a committed 20-paper QASPER slice (regenerate with `python
-scripts/load_qasper.py --limit 20 --out tests/fixtures/qasper_20.jsonl`). No network needed.
+scripts/eval/load_qasper.py --limit 20 --out tests/eval/fixtures/qasper_20.jsonl`). No network needed.
 
 The corpus is the papers, loaded through the real loader (`load_qasper.load_into_kb`)
 into the folder layout documented there. Then:
@@ -24,14 +24,15 @@ ROOT_TITLE = "QASPER"
 
 
 def _path(paper: dict, rel: str = "") -> str:
-    # mirrors kb.dci's path segment for a (unique-among-siblings) title
+    # mirrors kb.retrieval.dci's path segment for a (unique-among-siblings) title
     base = f"{ROOT_TITLE}/{paper['title'].replace('/', '-').strip()}"
     return f"{base}/{rel}" if rel else base
 
 
 def _subtree(session, folder_id) -> dict[str, object]:
     """{path relative to the paper folder: node}"""
-    from kb import dal, service
+    from kb import service
+    from kb.storage import dal
 
     out = {}
     for node in dal.list_descendants(session, uuid.UUID(folder_id)):
@@ -200,7 +201,7 @@ def test_api_serves_search_and_files(ids, papers, manifests):
 
 
 def test_agent_tools_return_text_and_report_errors(papers, manifests):
-    from kb.agent_tools import AgentTools
+    from kb.retrieval.agent_tools import AgentTools
 
     paper = papers[0]
     tools = AgentTools(manifests[paper["id"]])

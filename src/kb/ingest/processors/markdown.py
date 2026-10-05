@@ -3,7 +3,7 @@
 import re
 from pathlib import Path
 
-from kb.ingest.base import ProcessedDocument
+from kb.ingest.processors.base import ProcessedDocument
 
 _H1 = re.compile(r"^#\s+(.+?)\s*#*\s*$", re.MULTILINE)
 
