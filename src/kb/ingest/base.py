@@ -5,7 +5,12 @@ The ingestion extension point: a `Processor` turns one file on disk into a
 
 Adding a format (PDF, docx, ...) means writing one class that satisfies `Processor` and
 registering it in `default_registry()` -- the folder walker (`kb.ingest.folder`) never
-needs to change.
+needs to change. Formats a LangChain loader already handles need no class at all: wrap
+the loader in `kb.ingest.loaders.LoaderProcessor`.
+
+A processor may also set `retain_original = True` (optional, default False) when its
+`content` is a conversion rather than the file itself; the walker then keeps the raw
+bytes in the blob store (kb.blobs) and records them in the node's `blob_*` columns.
 """
 
 from dataclasses import dataclass, field
@@ -55,8 +60,11 @@ class ProcessorRegistry:
 
 def default_registry() -> ProcessorRegistry:
     """A fresh registry with every built-in processor."""
+    from kb.ingest.loaders import builtin_loader_processors
     from kb.ingest.markdown import MarkdownProcessor
 
     registry = ProcessorRegistry()
     registry.register(MarkdownProcessor())
+    for processor in builtin_loader_processors():
+        registry.register(processor)
     return registry

@@ -71,8 +71,8 @@ def test_layout_and_ingestion(session, papers, ids):
         assert set(tree) == set(expected) - {""}, paper["id"]
         for path, node in tree.items():
             want = expected[path]
-            assert (node.kind, node.content, node.description) == (want.kind, want.content, want.description), path
-            assert node.tags == want.tags and node.aliases == want.aliases, path
+            assert (node.kind, node.content, node.description) == (want.kind, want.content, want.fields["description"]), path
+            assert node.tags == want.fields["tags"] and node.aliases == want.fields["aliases"], path
 
         # paper folder: title, abstract and outline; metadata.md points at arXiv
         assert folder.title == paper["title"]
@@ -197,3 +197,18 @@ def test_api_serves_search_and_files(ids, papers, manifests):
     assert r.status_code == 200
     hits = set(r.json()["text"].split("\n"))
     assert hits & {_path(paper, n.path) for n in load_qasper.paper_nodes(paper)}
+
+
+def test_agent_tools_return_text_and_report_errors(papers, manifests):
+    from kb.agent_tools import AgentTools
+
+    paper = papers[0]
+    tools = AgentTools(manifests[paper["id"]])
+
+    assert _path(paper, "metadata.md") in tools.list_paths(recursive=True)
+    assert paper["abstract"] in tools.read_lines(_path(paper), limit=500)
+    # bad agent input comes back as text the model can read, never as an exception
+    assert tools.search_lines("(").startswith("error: invalid pattern")
+    assert tools.read_lines("no/such/path").startswith("error: no such path")
+    assert tools.read_lines(_path(paper), offset=0).startswith("error:")
+    assert _path(papers[1], "metadata.md") not in tools.list_paths(recursive=True)  # scoped

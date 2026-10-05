@@ -1,0 +1,107 @@
+"""
+Semantic (embedding) search over the derived `kb_chunks` index, scoped to a manifest.
+
+The canonical data stays in `files`; this module only reads chunks that
+`kb.index.sync` derived from it. Every hit is mapped back to the DCI path of its file
+(the same path `kb.dci.read_lines` accepts), and its `start_line`/`end_line` are line
+numbers in the virtual file DCI renders -- so an agent can go straight from a hit to
+`read_lines(path, offset=start_line)`.
+
+Scope = the content-bearing nodes the manifest resolves to (`kb.dal.resolve_manifest`),
+optionally intersected with a tags/status `query_metadata` filter. Soft-deleted nodes
+drop out of the scope even if their chunks haven't been unindexed yet.
+
+Filtered HNSW: the scope becomes a `file_id IN (...)` filter on the vector query. Plain
+HNSW visits only `ef_search` candidates and filters afterwards, so a narrow manifest in
+a large index could get fewer than `k` hits (or none). The vector store is built with
+pgvector's iterative scan (`hnsw.iterative_scan = relaxed_order`, see
+`kb.index.store`), which keeps scanning until `k` rows pass the filter; relaxed order
+means rows may come back slightly unsorted, so hits are re-sorted here.
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+
+from sqlalchemy.orm import Session
+
+from kb import dal
+from kb.dci import _Scope
+
+SNIPPET_CHARS = 240
+
+
+@dataclass
+class SearchHit:
+    file_id: uuid.UUID
+    path: str  # DCI path, valid for read_lines/search_lines in the same manifest
+    title: str
+    heading: str | None
+    start_line: int  # 1-based, in the DCI-rendered virtual file
+    end_line: int
+    snippet: str
+    score: float  # cosine similarity (1 - cosine distance): higher = closer, in [-1, 1]
+
+
+def _snippet(text: str) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= SNIPPET_CHARS else flat[: SNIPPET_CHARS - 1].rstrip() + "…"
+
+
+def semantic_search(
+    session: Session,
+    manifest_id: uuid.UUID,
+    query: str,
+    *,
+    k: int = 8,
+    tags: list[str] | None = None,
+    status: str | None = None,
+    store=None,
+) -> list[SearchHit]:
+    """The `k` chunks closest to `query` among the manifest's content-bearing nodes
+    (optionally only those with all `tags` / with `status`), best first. ValueError for
+    an unknown manifest or k < 1. Empty scope -> [] without touching the index."""
+    if k < 1:
+        raise ValueError("k must be >= 1")
+    scope = _Scope(session, manifest_id)  # ValueError on unknown manifest
+    in_scope = {node_id: node for node_id, node in scope.nodes.items() if node.content is not None}
+    if tags or status is not None:
+        allowed = {n.id for n in dal.query_metadata(session, tags=tags, status=status)}
+        in_scope = {node_id: node for node_id, node in in_scope.items() if node_id in allowed}
+    if not in_scope or not query.strip():
+        return []
+
+    from kb.index.loader import chunk_text  # strips the "<title> > <heading>" context prefix
+
+    if store is None:
+        from kb.index.store import get_index_store
+
+        store = get_index_store()
+    results = store.vector_store.similarity_search_with_score(
+        query, k=k, filter={"file_id": {"$in": [str(i) for i in in_scope]}}
+    )
+
+    hits: list[SearchHit] = []
+    for doc, distance in results:
+        meta = doc.metadata
+        file_id = meta["file_id"]
+        if not isinstance(file_id, uuid.UUID):
+            file_id = uuid.UUID(str(file_id))
+        node = in_scope.get(file_id)
+        if node is None:  # defensive: the filter should already guarantee this
+            continue
+        hits.append(
+            SearchHit(
+                file_id=file_id,
+                path=scope.path(node),
+                title=node.title,
+                heading=meta.get("heading"),
+                start_line=int(meta["start_line"]),
+                end_line=int(meta["end_line"]),
+                snippet=_snippet(chunk_text(doc)),
+                score=1.0 - float(distance),
+            )
+        )
+    hits.sort(key=lambda h: h.score, reverse=True)  # iterative scan is relaxed_order
+    return hits

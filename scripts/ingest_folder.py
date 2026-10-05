@@ -8,7 +8,10 @@ subtree -- there is no dedupe.
 Needs DATABASE_URL (see .env.example).
 
 Usage:
-    python scripts/ingest_folder.py PATH [--parent-id UUID] [--tag TAG ...] [--dry-run]
+    python scripts/ingest_folder.py PATH [--parent-id UUID] [--tag TAG ...] [--dry-run] [--index]
+
+--index embeds the created nodes into the semantic index (kb_chunks) after the commit;
+it needs the embeddings model (EMBEDDINGS_MODEL, see .env.example) to be reachable.
 """
 
 import argparse
@@ -28,6 +31,7 @@ def main() -> None:
     p.add_argument("--parent-id", type=uuid.UUID, default=None, help="folder node to ingest under (default: root)")
     p.add_argument("--tag", action="append", default=[], help="tag applied to every created node (repeatable)")
     p.add_argument("--dry-run", action="store_true", help="roll back instead of committing")
+    p.add_argument("--index", action="store_true", help="after committing, add the created nodes to the semantic index")
     args = p.parse_args()
 
     from kb.db import SessionLocal
@@ -54,6 +58,24 @@ def main() -> None:
         print(f"failed: {len(report.failed)}")
         for path, error in report.failed:
             print(f"  {path}: {error}")
+
+    if args.index and not args.dry_run:
+        index_created([report.root_id, *report.folders_created, *report.files_created])
+
+
+def index_created(file_ids: list[uuid.UUID]) -> None:
+    from kb import service
+
+    try:
+        result = service.index_files(file_ids)
+    except ImportError as exc:  # index stack not installed
+        sys.exit(f"--index: semantic index unavailable: {exc}")
+    print(
+        f"indexed: {result.num_added} chunks added, {result.num_updated} updated, "
+        f"{result.num_skipped} unchanged, {result.num_deleted} deleted"
+    )
+    for file_id, error in result.failed:
+        print(f"  index failed {file_id}: {error}")
 
 
 if __name__ == "__main__":

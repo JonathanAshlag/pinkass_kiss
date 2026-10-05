@@ -50,7 +50,7 @@ def _truncate() -> None:
     from kb.db import engine
 
     with engine.begin() as conn:
-        conn.execute(text("TRUNCATE manifest_members, manifests, files CASCADE"))
+        conn.execute(text("TRUNCATE kb_chunks, upsertion_record, manifest_members, manifests, files CASCADE"))
 
 
 # --------------------------------------------------------------------------

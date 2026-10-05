@@ -60,6 +60,12 @@ def list_children(
     return dal.list_children(session, parent_id, include_deleted=include_deleted)
 
 
+def list_descendants(
+    session: Session, node_id: uuid.UUID, *, include_deleted: bool = False
+) -> list[File]:
+    return dal.list_descendants(session, node_id, include_deleted=include_deleted)
+
+
 def create_file(
     session: Session,
     *,
@@ -213,3 +219,75 @@ def read_lines(
     return dci.read_lines(
         session, manifest_id, path, offset=offset, limit=limit, max_chars=max_chars
     )
+
+
+# --------------------------------------------------------------------------
+# Raw originals (kb.blobs): the source bytes of converted uploads (PDF, ...)
+# --------------------------------------------------------------------------
+
+
+def get_original(session: Session, node_id: uuid.UUID) -> tuple[bytes, str, str] | None:
+    """(data, mime, filename) of a node's retained original, or None if it has none
+    (markdown nodes, or no blob store configured). Raises ValueError for no such node."""
+    from kb import blobs
+
+    node = dal.get_node(session, node_id)
+    if node is None:
+        raise ValueError(f"no such node: {node_id}")
+    store = blobs.get_blob_store()
+    if not node.blob_key or store is None:
+        return None
+    data = blobs.get_original(store, node.blob_key)
+    if data is None:
+        return None
+    resource = next((s.get("resource") for s in node.sources if isinstance(s, dict)), None)
+    filename = resource.rsplit("/", 1)[-1].rsplit(":", 1)[-1] if resource else node.title
+    return data, node.blob_mime_type or "application/octet-stream", filename
+
+
+# --------------------------------------------------------------------------
+# Semantic index (derived kb_chunks, see kb.index). Imported lazily so that importing
+# kb.service never requires the LangChain/pgvector stack.
+# --------------------------------------------------------------------------
+
+
+def semantic_search(
+    session: Session,
+    manifest_id: uuid.UUID,
+    query: str,
+    *,
+    k: int = 8,
+    tags: list[str] | None = None,
+    status: str | None = None,
+    store=None,
+):
+    """-> list[kb.index.search.SearchHit], best first."""
+    from kb.index import search
+
+    return search.semantic_search(
+        session, manifest_id, query, k=k, tags=tags, status=status, store=store
+    )
+
+
+# Unlike the functions above, the indexing functions take no Session: they open their
+# own (after the caller's writes are committed), since the index is derived state.
+
+
+def index_files(file_ids, *, store=None, session_factory=None):
+    """(Re)index the given node ids; deleted/missing/content-less ones get unindexed.
+    -> kb.index.sync.IndexResult. Never raises per file."""
+    from kb.index import sync
+
+    return sync.index_files(file_ids, store=store, session_factory=session_factory)
+
+
+def unindex_files(file_ids, *, store=None) -> int:
+    from kb.index import sync
+
+    return sync.unindex_files(file_ids, store=store)
+
+
+def reindex_all(*, store=None, session_factory=None):
+    from kb.index import sync
+
+    return sync.reindex_all(store=store, session_factory=session_factory)

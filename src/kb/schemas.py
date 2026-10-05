@@ -73,6 +73,8 @@ class FileRead(FileSummary):
     verified: list
     generated: dict | None
     stale_after: datetime | None
+    blob_key: str | None = None  # set when the original (PDF, ...) is retained: GET /files/{id}/raw
+    blob_mime_type: str | None = None
     warnings: list[str] = []
 
 
@@ -137,3 +139,38 @@ class IngestReportRead(BaseModel):
 
 class IngestExtensionsRead(BaseModel):
     extensions: list[str]
+
+
+class SearchHitRead(BaseModel):
+    """A kb.index.search.SearchHit: one chunk matching a semantic query. `path` and
+    `start_line` can be passed straight to GET /manifests/{id}/read (path, offset)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    file_id: uuid.UUID
+    path: str
+    title: str
+    heading: str | None
+    start_line: int
+    end_line: int
+    snippet: str
+    score: float  # cosine similarity, higher = closer
+
+
+class ReindexRequest(BaseModel):
+    """Node ids to (re)index; omitted/null means a full reindex of the whole KB."""
+
+    file_ids: list[uuid.UUID] | None = None
+
+
+class IndexFailure(BaseModel):
+    file_id: uuid.UUID
+    error: str
+
+
+class IndexResultRead(BaseModel):
+    num_added: int
+    num_updated: int
+    num_skipped: int
+    num_deleted: int
+    failed: list[IndexFailure]

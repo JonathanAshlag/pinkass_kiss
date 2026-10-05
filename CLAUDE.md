@@ -29,10 +29,13 @@ this project" below for what was deliberately adopted, adapted, or skipped.
 3. **KB service / CRUD API** — **built.** `src/kb/service.py`: a thin passthrough
    chokepoint over the DAL (plus one real piece of logic, `get_warnings`) that every
    consumer — REST API, agents, ingestion jobs — goes through instead of calling
-   `kb.dal` directly. `src/kb/api.py`: a FastAPI REST surface over it. No file uploads
-   yet (text `content` only, blob columns stay untouched placeholders). Still
+   `kb.dal` directly. `src/kb/api.py`: a FastAPI REST surface over it. Still
    explicitly deferred: authz, manifest boundaries beyond storage, concurrency checks,
    real validation hooks (constraint violations currently surface as a raw 500).
+
+4. **Semantic index** — **built.** `src/kb/index/`: a *derived* pgvector index
+   (`kb_chunks`) beside the canonical `files` table, kept in step by LangChain's indexing
+   API. Disposable — always rebuildable from `files`. See "Semantic index" below.
 
 ## Stack
 
@@ -50,9 +53,17 @@ migrations, psycopg3 as the driver. Src-layout package `kb` under `src/kb/`.
 - `src/kb/api.py` — the FastAPI app (see below); imports `kb.service` and `kb.schemas`
 - `src/kb/ingest/` — folder ingestion with pluggable per-format processors (see below);
   imports `kb.service` only
-- `migrations/` — Alembic; a single `0001_create_schema.py` migration (compacted from
-  what was originally six incremental migrations, while there was still no real data
-  to preserve)
+- `src/kb/agent_tools.py` — `AgentTools(manifest_id)`: the DCI tools as an agent binds
+  them (see "Agent tools" below); imports `kb.service`
+- `src/kb/index/` — semantic index: `store.py` (LangChain wiring), `loader.py`
+  (files → chunks), `sync.py` (index/unindex), `search.py`; imports `kb.db`/`kb.dci`/
+  `kb.models`/`kb.dal`, never `kb.service` (service imports it lazily)
+- `src/kb/blobs.py` — raw-original storage (S3 / local `ByteStore`), see "Folder ingestion"
+- `migrations/` — Alembic: `0001_create_schema.py` (compacted from what was originally
+  six incremental migrations, while there was still no real data to preserve) and
+  `0002_semantic_index.py` (`vector` extension, `kb_chunks`, `upsertion_record`).
+  **The DB needs the pgvector extension** — the local Homebrew Postgres doesn't have it
+  yet (`brew install pgvector`); the test stack uses the `pgvector/pgvector:pg16` image.
 - `.env` (gitignored) — `DATABASE_URL=postgresql+psycopg://...`; `.env.example` has the template
 
 To run migrations locally: `set -a && source .env && set +a && alembic upgrade head`
@@ -78,7 +89,7 @@ To run the API locally: `set -a && source .env && set +a && uvicorn kb.api:app
 | `status` (enum `draft`\|`stable`\|`deprecated`) | lifecycle field |
 | `content` | markdown body; NOT NULL unless `kind='folder'` (`content_required_for_file` CHECK) |
 | `deleted_at` | soft delete, NULL = active |
-| `blob_key`, `blob_size_bytes`, `blob_mime_type`, `blob_checksum` | **placeholders only** for a future object-storage-backed blob layer — nothing wired up yet |
+| `blob_key`, `blob_size_bytes`, `blob_mime_type`, `blob_checksum` | the retained original of a converted file (PDF, ...): content-addressed key `sha256/<hex>` in the `kb.blobs` store, checksum `sha256:<hex>`. NULL for markdown nodes or when no blob store is configured |
 | `created_at`, `updated_at` | `updated_at` kept current by a DB trigger (`trg_files_set_updated_at` → `set_updated_at()`), not the ORM |
 
 ### `manifests` / `manifest_members` — curated per-agent file lists
@@ -223,15 +234,27 @@ same shape problem is effectively unreachable through the API — the global `Va
 IngestReport` mirrors a local directory into the tree: dirs → folder nodes (title = dir
 name), supported files → file nodes, each with `sources=[{"resource": "file:///..."}]`
 and the given `tags`. Unsupported files go in `report.skipped`, processor errors in
-`report.failed` (per-file, never fatal). Hidden entries and symlinks are ignored. Folder
-nodes are created **lazily**, so a dir with no supported files (e.g. images only) gets
-no node. The root always does. Never commits; the caller owns the transaction. Re-ingest
-always creates a new subtree (no dedupe/upsert, deliberate).
+`report.failed` (per-file, never fatal). Hidden entries and symlinks are ignored. A dir
+with no supported files (e.g. images only) gets no node. The root always does. Never
+commits; the caller owns the transaction. Re-ingest always creates a new subtree (no
+dedupe/upsert, deliberate).
+
+It's two steps. **`plan_folder(root, ...) -> FolderPlan`** walks the dir and runs the
+processors without touching the DB. It returns `PlannedNode`s (the root plus one per
+file, addressed by `/`-joined path) and the skipped/failed lists. Then
+**`materialize(session, plan, *, parent_id, folder_fields)`** (`plan.py`) is the one place
+a plan becomes nodes. Ancestors the plan doesn't list are *implied* and created as plain
+folders (title = path segment, `folder_fields`) only when something below them is
+created, which is why empty dirs get no node. Explicit folders are always created.
+`parent_id` must be an existing folder and the plan must contain its root (`""`), else
+`ValueError`. It returns `{path: File}` in creation order. Any producer that builds a
+subtree should emit a plan and call `materialize` (the QASPER loader does), not loop
+over `create_file` by hand.
 
 **Extension point** (`base.py`): a `Processor` has `name`, `extensions` (lowercase,
 with dot) and `process(path) -> ProcessedDocument(title, content, extra)`, where
 `extra` holds additional `files` columns. To add a format (PDF, docx...), write one
-processor module and register it in `default_registry()`. The walker doesn't change.
+processor module and register it in `default_registry()`. `plan_folder` doesn't change.
 Only `MarkdownProcessor` exists today: content stored verbatim, **no frontmatter
 parsing** (user's choice), title = first `# ` H1 else filename stem.
 
@@ -249,7 +272,76 @@ folder" (root) and "Ingest folder here…" (on folders), using `<input webkitdir
 It filters hidden and unsupported files client-side, so those are never uploaded. No
 upload size limit yet.
 
-Tests: `tests/test_ingest.py`.
+**Non-markdown formats** (`loaders.py`): `LoaderProcessor(name, extensions,
+loader_factory)` runs any LangChain `BaseLoader` as a `Processor` (docs joined, title =
+first H1 else stem, empty text → failed). Built-ins: `PyMuPDF4LLMLoader(mode="single")`
+for `.pdf`; `DoclingLoader(export_type=MARKDOWN)` for `.pdf .docx .pptx .html .htm` when
+the optional `docling` extra is installed (it then takes `.pdf`; it pulls in torch).
+
+**Raw originals** (`src/kb/blobs.py`): processors with `retain_original = True` (the
+loader ones, not markdown) get their source bytes stored via `put_original` and the
+`blob_*` columns set. Store from env: `BLOB_BUCKET` (+`BLOB_ENDPOINT_URL`,
+`BLOB_PREFIX`) → `S3ByteStore` (boto3; LangChain has no S3 write store); else
+`BLOB_LOCAL_DIR` → `LocalFileStore`; else none (originals not kept). `set_blob_store`
+for tests. `plan_folder(..., blob_store=None)` stays I/O-free without a store;
+`ingest_folder`/`ingest_upload` default to the env store. A blob error fails only that
+file. Blobs are written before the DB commit, so a rolled-back ingest can leave
+(harmless, deduped) orphans. `GET /files/{id}/raw` downloads it (404 if none).
+
+Tests: `tests/test_ingest.py` (plan tests need no DB; materialize/walker/upload tests
+do), `tests/test_blobs.py`.
+
+## Semantic index (`src/kb/index/`)
+
+Built from LangChain parts; only KB-specific glue is hand-written.
+
+- **Store** (`store.py`): `langchain-postgres` `PGVectorStore` bound to `kb_chunks`
+  (columns `langchain_id`, `content`, `embedding vector(EMBEDDING_DIM)`, `file_id` FK
+  `ON DELETE CASCADE`, `heading`, `start_line`, `end_line`, `langchain_metadata`; HNSW
+  cosine) + `SQLRecordManager` (table `upsertion_record`, namespace
+  `kb_chunks/<model>`) + `init_embeddings(EMBEDDINGS_MODEL)` (default
+  `ollama:nomic-embed-text`, 768d). `get_index_store()`/`set_index_store()`; tests use
+  `DeterministicFakeEmbedding`. Searches run with `hnsw.iterative_scan=relaxed_order`
+  so narrow `$in` filters still return k hits. `chunk_key_encoder` makes uuid chunk ids
+  (the default sha1 one warns; sha256 hex doesn't fit the uuid column).
+- **Chunking** (`loader.py`): `FileNodeLoader` yields one Document per active node with
+  content (files *and* folders). Only the markdown **body** is embedded, not frontmatter
+  (so retags re-embed nothing), but `start_line`/`end_line` are lines of the
+  `dci`-rendered virtual file, so `read_lines(path, offset=start_line)` returns the
+  chunk. `RecursiveCharacterTextSplitter.from_language(MARKDOWN)`, 1500 chars / 200
+  overlap. `heading` = heading path at the chunk start ("Methods > Data"). Embedded text
+  is prefixed with `"<title> > <heading>"`; `chunk_text(doc)` strips it.
+- **Sync** (`sync.py`): `index_files(ids)` takes *any* touched ids — active nodes are
+  re-indexed via `langchain_core.indexing.index(cleanup="incremental",
+  source_id_key="file_id")` (unchanged chunks skipped, never re-embedded), deleted /
+  missing / content-less ones unindexed. Never raises per file (`IndexResult.failed`).
+  `unindex_files(ids)` goes through record-manager keys (incremental cleanup can't drop
+  a file absent from the batch). `reindex_all()` = full cleanup, file by file. All open
+  their own session: call them **after commit**, and not inside a running event loop.
+- **Index after writes** (`api.py`): create/patch/delete (+ descendants)/restore/ingest
+  commit explicitly, then schedule `index_files` as a `BackgroundTask`; failures are only
+  logged. Move/manifest routes don't reindex. `KB_AUTO_INDEX=0` turns it off (dev
+  without an embeddings server). Repair: `POST /index/reindex` or `scripts/reindex.py
+  --all`. `scripts/ingest_folder.py --index` and `scripts/load_qasper.py --index` opt in.
+- **Search** (`search.py`): `service.semantic_search(session, manifest_id, query, *, k,
+  tags, status)` → `SearchHit(file_id, path, title, heading, start_line, end_line,
+  snippet, score)`. Scope = manifest nodes (∩ `query_metadata` tags/status) as a
+  `file_id $in` filter — tags/status are never copied onto chunks. `score` is cosine
+  **similarity** (higher = closer). Route: `GET /manifests/{id}/semantic?q=&k=`.
+
+Tests: `tests/test_index.py`, `tests/test_search.py`.
+
+## Agent tools (`src/kb/agent_tools.py`)
+
+`AgentTools(manifest_id, *, session_factory=SessionLocal)` adapts the DCI tools for an agent.
+It sits at the same seam (`kb.service`'s `list_paths`/`search_lines`/`read_lines`) as the
+REST routes. Methods `list_paths`, `search_lines`, `read_lines` return plain text. Each
+call opens its own session. A bad call (unknown path, bad regex, out-of-range arg)
+returns an `error: ...` string instead of raising, so the model can recover.
+`semantic_search(query, k)` adds the semantic index (hits as `path:start-end [heading]
+(score)` + snippet). `as_langchain(include_semantic=False)` wraps them as LangChain
+tools, the 4th only on request. Their docstrings are the tool
+descriptions the model reads, so tune tool wording there.
 
 ## Verification status
 
@@ -262,12 +354,13 @@ each run), not a committed test suite. Layer 3 was verified by running `uvicorn`
 the local Postgres and exercising the full golden path plus error-mapping cases
 (self-cycle move → 409, unknown id → 404, malformed manifest-member body → 422) with
 `curl`; the DB was reset to empty afterward (`alembic downgrade base && alembic upgrade
-head`). `pyproject.toml` has no test/dev deps yet — no committed test suite for any
-layer.
+head`). There is now a committed pytest suite (`pytest -m "not llm"`, needs
+`TEST_DATABASE_URL` pointing at a pgvector Postgres whose DB name ends in `_test`).
 
 ## QASPER evaluation
 
-`scripts/load_qasper.py` ingests QASPER papers through `kb.service`, one folder per
+`scripts/load_qasper.py` ingests QASPER papers (`paper_nodes` → a `PlannedNode` plan →
+`kb.ingest.materialize`), one folder per
 paper that **mirrors the paper's own outline**: sections become numbered files
 (`01-introduction.md`), sections with subsections become numbered folders (their lead
 text as folder content), plus `metadata.md` (id, arXiv link, counts) and `figures/` /
@@ -280,8 +373,10 @@ fixed-template layout (introduction.md, methods/, experiments/...) was replaced 
 because 31% of sections matched no rule and files became grab bags. Questions/answers
 are never stored in the KB. `tests/test_qasper.py` is the deterministic suite (committed
 20-paper fixture `tests/fixtures/qasper_20.jsonl`); `tests/test_qasper_llm.py` runs a
-LangGraph agent (Anthropic or Ollama) with the DCI tools, scored by Answer-F1. Replaced
-the earlier HotPotQA eval.
+LangGraph agent (Anthropic, Ollama or any OpenAI-compatible server) bound to
+`AgentTools(...).as_langchain()`, scored by Answer-F1 (`QASPER_SEMANTIC=1` indexes the
+corpus once and adds the `semantic_search` tool, for comparing). Replaced the earlier HotPotQA eval
+(its test file has been deleted).
 
 ## Known gotcha already hit once
 
@@ -298,7 +393,8 @@ follow this pattern — copy it for any new enum.
 - Authz, manifest boundaries beyond storage, concurrency checks, real validation hooks
   (currently a DB constraint violation from the API surfaces as a raw 500) — all
   explicitly deferred from layer 3, not designed yet.
-- Wiring up real blob storage behind the placeholder columns, and actual file uploads
-  through the API.
-- No test suite yet — verification so far has been ad hoc scripts/curl runs against a
-  live DB, not committed.
+- Run the QASPER LLM eval with `QASPER_SEMANTIC=1` vs without (needs Ollama) to see if
+  semantic search earns its place; then consider `HybridSearchConfig` (keyword + vector
+  fusion in `langchain-postgres`) and an index-status route.
+- Background indexing is in-process (`BackgroundTask`); a real worker would loop
+  `index_files`/`reindex_all`. No upload size limit.

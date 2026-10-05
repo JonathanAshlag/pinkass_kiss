@@ -2,8 +2,8 @@
 An LLM agent answers QASPER questions using the KB's DCI tools (ls / grep / read),
 orchestrated with LangGraph. Two tests:
 
-- `test_agent_graph_wiring`: a scripted fake model drives the same graph + tools, so the
-  tool-calling loop and the KB tool wrappers are checked for free (no API key).
+- `test_agent_graph_wiring`: a scripted fake model drives the same graph + tools
+  (`kb.agent_tools`), so the tool-calling loop is checked for free (no API key).
 - `test_llm_answers_questions_with_kb_tools`: a real model answers the first
   QASPER_LLM_N (default 10) questions, each against its paper's manifest (the paper's
   folder tree). QASPER_LLM_PROVIDER picks the model: "anthropic" (default; costs money,
@@ -13,7 +13,12 @@ orchestrated with LangGraph. Two tests:
   every question and that the mean token-F1 against the best annotator answer (QASPER's
   Answer-F1) meets QASPER_LLM_MIN_F1 (default 0.3).
 
-Env (all read from .env, see .env.example): QASPER_LLM_PROVIDER, ANTHROPIC_API_KEY,
+QASPER_SEMANTIC=1 adds the fourth tool, `semantic_search` (embedding search over
+kb_chunks): the fixture corpus is indexed once per session (needs the embeddings model,
+EMBEDDINGS_MODEL, to be reachable) and the agent gets `as_langchain(include_semantic=True)`
+plus a prompt line about it -- run with and without it to compare Answer-F1.
+
+Env (all read from .env, see .env.example): QASPER_LLM_PROVIDER, QASPER_SEMANTIC, ANTHROPIC_API_KEY,
 OLLAMA_BASE_URL, OPENAI_BASE_URL, QASPER_LLM_MODEL (default claude-opus-5-5 / qwen3-coder:30b),
 QASPER_LLM_N, QASPER_LLM_MIN_F1.
 
@@ -36,9 +41,10 @@ pytest.importorskip("langgraph")
 
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage  # noqa: E402
-from langchain_core.tools import tool  # noqa: E402
 from langgraph.graph import END, START, MessagesState, StateGraph  # noqa: E402
 from langgraph.prebuilt import ToolNode, tools_condition  # noqa: E402
+
+from kb.agent_tools import AgentTools  # noqa: E402
 
 SYSTEM_PROMPT = (
     "You answer questions about one scientific paper using only a small knowledge base "
@@ -50,36 +56,14 @@ SYSTEM_PROMPT = (
     "ONLY the answer: as short as possible (a phrase, number, list, or yes/no), no "
     "explanation. If the paper does not contain the answer, reply exactly: unanswerable"
 )
+SEMANTIC_PROMPT = (
+    " You also have semantic_search, which finds passages by meaning: prefer it over "
+    "search_lines when you don't know the paper's exact wording, then read_lines the hits."
+)
 
 
-def make_tools(manifest_id: uuid.UUID) -> list:
-    """The KB's DCI tools as LangChain tools, scoped to one manifest."""
-    from kb import service
-    from kb.db import SessionLocal
-
-    def run(fn, *args, **kwargs) -> str:
-        with SessionLocal() as session:
-            try:
-                return fn(session, manifest_id, *args, **kwargs).text
-            except (ValueError, service.PatternError) as exc:
-                return f"error: {exc}"
-
-    @tool
-    def list_paths(under: str | None = None, recursive: bool = False) -> str:
-        """List documents in the knowledge base (like `ls`/`find`)."""
-        return run(service.list_paths, under=under, recursive=recursive)
-
-    @tool
-    def search_lines(pattern: str, ignore_case: bool = True, files_only: bool = False) -> str:
-        """Regex search over all documents (like `grep -n`). Output: path:line:text."""
-        return run(service.search_lines, pattern, ignore_case=ignore_case, files_only=files_only)
-
-    @tool
-    def read_lines(path: str, offset: int = 1, limit: int = 50) -> str:
-        """Read a line range of one document by path (like `sed -n`)."""
-        return run(service.read_lines, path, offset=offset, limit=limit)
-
-    return [list_paths, search_lines, read_lines]
+def semantic_enabled() -> bool:
+    return os.environ.get("QASPER_SEMANTIC", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def build_agent(llm, tools):
@@ -98,11 +82,21 @@ def build_agent(llm, tools):
     return graph.compile()
 
 
-def ask(llm, manifest_id: uuid.UUID, question: str, callbacks: list | None = None) -> tuple[str, int]:
+def ask(
+    llm,
+    manifest_id: uuid.UUID,
+    question: str,
+    callbacks: list | None = None,
+    *,
+    semantic: bool = False,
+) -> tuple[str, int]:
     """Returns (final answer text, number of tool calls made). `callbacks` are LangChain
-    callback handlers for the run (e.g. an Opik tracer)."""
-    result = build_agent(llm, make_tools(manifest_id)).invoke(
-        {"messages": [SystemMessage(SYSTEM_PROMPT), HumanMessage(question)]},
+    callback handlers for the run (e.g. an Opik tracer). `semantic` adds the
+    semantic_search tool (the corpus must be indexed)."""
+    tools = AgentTools(manifest_id).as_langchain(include_semantic=semantic)
+    prompt = SYSTEM_PROMPT + (SEMANTIC_PROMPT if semantic else "")
+    result = build_agent(llm, tools).invoke(
+        {"messages": [SystemMessage(prompt), HumanMessage(question)]},
         {"recursion_limit": 30, "callbacks": callbacks or []},
     )
     messages = result["messages"]
@@ -182,7 +176,7 @@ def test_agent_graph_wiring(papers, manifests, session):
     assert calls == 1 and answer == "unanswerable"
 
     # the tool result the model saw came from the KB: a path inside this paper's folder
-    tools = {t.name: t for t in make_tools(manifests[paper["id"]])}
+    tools = {t.name: t for t in AgentTools(manifests[paper["id"]]).as_langchain()}
     hits = tools["search_lines"].invoke({"pattern": re.escape(ev), "files_only": True})
     prefix = f"QASPER/{paper['title'].replace('/', '-').strip()}/"
     assert hits.split("\n") and all(h.startswith(prefix) for h in hits.split("\n"))
@@ -245,6 +239,8 @@ def opik_tracer(**metadata):
     from opik.integrations.langchain import OpikTracer
 
     tags = ["qasper", f"provider:{metadata['provider']}", f"model:{metadata['model']}"]
+    if metadata.get("semantic"):
+        tags.append("semantic_search")
     return OpikTracer(project_name=OPIK_PROJECT, tags=tags, metadata=metadata)
 
 
@@ -267,9 +263,26 @@ def opik_score(tracer, **scores) -> None:
     client.flush()
 
 
+@pytest.fixture(scope="session")
+def semantic_index(manifests):
+    """With QASPER_SEMANTIC=1: index the whole fixture corpus once (True); else False."""
+    if not semantic_enabled():
+        return False
+    from kb import service
+    from kb.db import SessionLocal
+
+    with SessionLocal() as s:
+        node_ids = [n.id for n in service.resolve_manifest(s, manifests["corpus"])]
+    result = service.index_files(node_ids)
+    assert not result.failed, f"indexing failed: {result.failed[:3]}"
+    return True
+
+
 @pytest.mark.llm
-def test_llm_answers_questions_with_kb_tools(papers, manifests, session):
+def test_llm_answers_questions_with_kb_tools(papers, manifests, session, request):
     llm = make_llm()
+    # only after make_llm(), so a skipped run never pays for indexing
+    semantic = request.getfixturevalue("semantic_index")
     n = int(os.environ.get("QASPER_LLM_N", "10"))
     min_f1 = float(os.environ.get("QASPER_LLM_MIN_F1", "0.3"))
 
@@ -282,8 +295,11 @@ def test_llm_answers_questions_with_kb_tools(papers, manifests, session):
             paper_id=paper_id,
             question_id=q["id"],
             gold=[gold_strings(a) for a in q["answers"]],
+            semantic=semantic,
         )
-        answer, calls = ask(llm, manifests[paper_id], q["question"], [tracer] if tracer else None)
+        answer, calls = ask(
+            llm, manifests[paper_id], q["question"], [tracer] if tracer else None, semantic=semantic
+        )
         if calls == 0:
             no_tools.append(q["id"])
         f1 = best_f1(answer, q["answers"])
@@ -293,7 +309,7 @@ def test_llm_answers_questions_with_kb_tools(papers, manifests, session):
             wrong.append((q["question"], [gold_strings(a) for a in q["answers"]], answer))
 
     mean_f1 = sum(scores) / len(scores)
-    print(f"\nmean answer-F1 {mean_f1:.2f} over {len(scores)} questions")
+    print(f"\nmean answer-F1 {mean_f1:.2f} over {len(scores)} questions (semantic_search: {semantic})")
     for question, gold, got in wrong:
         print(f"  LOW: {question!r} gold={gold!r} got={got!r}")
     assert not no_tools, f"model answered without using the KB tools: {no_tools}"

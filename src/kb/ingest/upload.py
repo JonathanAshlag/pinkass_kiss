@@ -13,10 +13,11 @@ import uuid
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
+from langchain_core.stores import ByteStore
 from sqlalchemy.orm import Session
 
 from kb.ingest.base import ProcessorRegistry
-from kb.ingest.folder import IngestReport, ingest_folder
+from kb.ingest.folder import DEFAULT_BLOB_STORE, IngestReport, ingest_folder
 
 UPLOAD_SCHEME = "upload:"
 
@@ -44,10 +45,12 @@ def ingest_upload(
     parent_id: uuid.UUID | None = None,
     registry: ProcessorRegistry | None = None,
     tags: list[str] | None = None,
+    blob_store: ByteStore | None = DEFAULT_BLOB_STORE,
 ) -> IngestReport:
     """Paths must be relative, use `/`, and share one top-level folder (its name becomes
     the root folder node's title). Raises UploadError if not; report paths are
-    relative to that folder's parent, e.g. "docs/logo.png"."""
+    relative to that folder's parent, e.g. "docs/logo.png". `blob_store` as in
+    `ingest_folder` (originals keep their upload file name, so the MIME type is right)."""
     files = [(_safe_relative(raw), data) for raw, data in files]
     if not files:
         raise UploadError("no files uploaded")
@@ -71,6 +74,7 @@ def ingest_upload(
             tags=tags,
             root_title=root_name,
             resource_for=lambda p: UPLOAD_SCHEME + p.relative_to(base).as_posix(),
+            blob_store=blob_store,
         )
         # Temp-dir paths mean nothing to the caller; report upload-relative ones.
         report.skipped = [p.relative_to(base) for p in report.skipped]
