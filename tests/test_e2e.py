@@ -64,12 +64,23 @@ from kb.evaluation.report import QuizReport, RunStats  # noqa: E402
 # Datasets: a knowledge base + a Quiz about it
 # --------------------------------------------------------------------------
 
+SEARCH_ADVICE = (
+    "Start with list_paths (no arguments) and copy paths exactly from tool output. A search "
+    "with no matches only means that word is absent: try synonyms and related terms, and read "
+    "the relevant sections (the outline tells you where) before concluding anything. For a "
+    "yes/no question, read how the thing is described before answering. "
+)
+
+ANSWER_FORMAT = (
+    "When done, reply with ONLY the answer: as short as possible (a phrase, name, number, "
+    "list, or yes/no), no explanation. Reply exactly 'unanswerable' only after you have "
+    "searched with several different terms and read the most relevant sections and still "
+    "found nothing."
+)
+
 DEFAULT_SYSTEM_PROMPT = (
     "You answer questions using only a small knowledge base you can explore with tools: "
-    "list_paths (ls), search_lines (grep), read_lines (read). Search and read before "
-    "answering. When done, reply with ONLY the answer: as short as possible (a phrase, "
-    "name, number, list, or yes/no), no explanation. If the knowledge base does not "
-    "contain the answer, reply exactly: unanswerable"
+    "list_paths (ls), search_lines (grep), read_lines (read). " + SEARCH_ADVICE + ANSWER_FORMAT
 )
 
 QASPER_SYSTEM_PROMPT = (
@@ -77,10 +88,7 @@ QASPER_SYSTEM_PROMPT = (
     "you can explore with tools: list_paths (ls), search_lines (grep), read_lines (read). "
     "The paper is a folder laid out like its own outline: read the folder itself for the "
     "title, abstract and outline; sections are numbered files/folders in reading order, "
-    "and figures/ and tables/ hold captions. Search and read before answering. When "
-    "done, reply with "
-    "ONLY the answer: as short as possible (a phrase, number, list, or yes/no), no "
-    "explanation. If the paper does not contain the answer, reply exactly: unanswerable"
+    "and figures/ and tables/ hold captions. " + SEARCH_ADVICE + ANSWER_FORMAT
 )
 
 

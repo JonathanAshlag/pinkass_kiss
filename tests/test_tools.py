@@ -149,6 +149,24 @@ def test_soft_deleted_nodes_disappear(session, corpus):
         session.rollback()
 
 
+def test_bad_path_error_suggests_the_closest_valid_paths(session, corpus):
+    from kb import service
+
+    def error(path):
+        with pytest.raises(ValueError) as exc:
+            service.read_lines(session, corpus.alpha, path)
+        return str(exc.value)
+
+    root = corpus.root
+    # a shortened path (models cut titles at a ':' or a space) -> the full path
+    assert f"did you mean: {root}/alpha" in error(f"{root}/alp")
+    assert f"did you mean: {root}/alpha" in error(root.upper())  # case-insensitive, out-of-scope prefix
+    # a guessed child of a real folder -> the deepest folder that does exist
+    assert f"did you mean: {root}/alpha/sub)" in error(f"{root}/alpha/sub/nope.md")
+    # nothing close: no hint, just the plain error
+    assert error("zzz/qqq") == "no such path in manifest: zzz/qqq"
+
+
 def test_list_unknown_manifest_and_path_raise(session, corpus):
     from kb import service
 

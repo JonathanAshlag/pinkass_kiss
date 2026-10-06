@@ -90,9 +90,12 @@ class AgentTools:
         def list_paths(under: str | None = None, recursive: bool = False) -> str:
             """List documents in the knowledge base (like `ls`/`find`).
 
-            Call it with no arguments first to see the top level. Pass `under` only as a
-            path copied exactly from a previous listing (never "." or a guessed path).
-            `recursive=True` lists everything below.
+            Call it with no arguments first to see the top level. Each line is a full path
+            (folders end in "/"), then two spaces, then an optional [status] and
+            description: the path is everything before those two spaces and may itself
+            contain spaces and colons. Pass `under` only as a path copied exactly from a
+            listing (never "." or a shortened or guessed path). `recursive=True` lists
+            everything below.
             """
             return self.list_paths(under, recursive)
 

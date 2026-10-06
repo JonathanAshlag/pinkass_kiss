@@ -224,6 +224,21 @@ def test_failed_run_on_an_answerable_question_is_not_a_miss_in_the_matrix():
     assert report.items[0].outcome == "ERR" and report.fn == 0 and report.confusion_matrix() == [[0, 0], [0, 0]]
 
 
+def test_early_abstentions_count_only_quick_give_ups_on_answerable_questions():
+    stats = [RunStats(tool_calls=1), RunStats(tool_calls=3), RunStats(tool_calls=4), RunStats(tool_calls=1), RunStats(tool_calls=1)]
+    report = report_for(
+        refs=["a", "a", "a", "a", "unanswerable"],
+        answers=["unanswerable", "unanswerable", "unanswerable", "wrong", "unanswerable"],
+        replies=["INCORRECT"],
+        stats=stats,
+    )
+    assert [i.outcome for i in report.items] == ["FN", "FN", "FN", "WA", "TN"]
+    assert report.early_abstentions() == 2  # <= 3 tool calls; a wrong answer or a right abstention isn't one
+    assert report.early_abstentions(max_tool_calls=0) == 0
+    assert report.early_abstentions(max_tool_calls=10) == 3
+    assert "2 of the abstentions after <= 3 tool calls" in str(report)
+
+
 def test_confusion_matrix_layout():
     report = report_for(
         refs=["a", "a", "a", "unanswerable", "unanswerable"],

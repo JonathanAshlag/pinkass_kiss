@@ -26,6 +26,7 @@ from typing import Dict, List, Literal, Optional, Sequence, Tuple
 from pydantic import BaseModel
 
 ABSTAIN = "unanswerable"
+EARLY_ABSTAIN_TOOL_CALLS = 3  # abstaining after this many tool calls or fewer counts as "gave up early"
 
 Outcome = Literal["TP", "FN", "WA", "FP", "TN", "ERR"]
 
@@ -180,6 +181,11 @@ class QuizReport(BaseModel):
     def tool_calls(self) -> Stats:
         return Stats.of([i.stats.tool_calls for i in self.items])
 
+    def early_abstentions(self, max_tool_calls: int = EARLY_ABSTAIN_TOOL_CALLS) -> int:
+        """Answerable questions the agent gave up on (FN) after at most `max_tool_calls`
+        tool calls: it abstained before really looking."""
+        return sum(i.outcome == "FN" and i.stats.tool_calls <= max_tool_calls for i in self.items)
+
     def by_question(self) -> List[QuestionSummary]:
         """One summary per question, aggregating its repetitions."""
         groups: Dict[Tuple[str, int], List[ItemResult]] = {}
@@ -228,7 +234,8 @@ class QuizReport(BaseModel):
             "                    pred: abstain/miss   pred: hit",
             f"  ref: unanswerable {self.tn:>14}  {self.fp:>14}",
             f"  ref: answerable   {self.fn + self.wa:>14}  {self.tp:>14}",
-            f"  (answerable misses: {self.fn} abstained, {self.wa} answered wrongly)",
+            f"  (answerable misses: {self.fn} abstained, {self.wa} answered wrongly;"
+            f" {self.early_abstentions()} of the abstentions after <= {EARLY_ABSTAIN_TOOL_CALLS} tool calls)",
             f"  failed runs (not graded): {self.err}",
             "  ".join(f"{k}: {v:.2f}" for k, v in m.items()),
             f"runtime s/answer: {self.runtime}",
