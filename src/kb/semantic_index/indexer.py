@@ -64,6 +64,10 @@ def _index_one(store: IndexStore, file_id: uuid.UUID, docs, result: IndexResult)
                 cleanup="incremental",
                 source_id_key="file_id",
                 key_encoder=chunk_key_encoder,
+                # One batch per file: incremental cleanup runs after *each* batch and drops
+                # the file's chunks not yet seen, so a file split across batches (default
+                # 100) would lose and re-embed its later chunks on every run.
+                batch_size=len(chunks),
             )
         )
     except Exception as exc:  # noqa: BLE001 -- per-file isolation is the contract

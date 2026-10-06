@@ -39,7 +39,7 @@ this project" below for what was deliberately adopted, adapted, or skipped.
 
 ## Stack
 
-Python 3.11, SQLAlchemy 2.0 (declarative style, `Mapped`/`mapped_column`), Alembic for
+Python 3.11+ (dev env: 3.13), SQLAlchemy 2.0 (declarative style, `Mapped`/`mapped_column`), Alembic for
 migrations, psycopg3 as the driver. Src-layout package `kb` under `src/kb/`.
 
 Layout: data comes **in** (`ingest/`), lives in **storage** with a **derived index** beside it,
@@ -83,13 +83,21 @@ tests/                unit/integration suites; eval/ = QASPER suites + fixtures
 - `migrations/` — Alembic: `0001_create_schema.py` (compacted from what was originally
   six incremental migrations, while there was still no real data to preserve) and
   `0002_semantic_index.py` (`vector` extension, `kb_chunks`, `upsertion_record`).
-  **The DB needs the pgvector extension** — the local Homebrew Postgres doesn't have it
-  yet (`brew install pgvector`); the test stack uses the `pgvector/pgvector:pg16` image.
-- `.env` (gitignored) — `DATABASE_URL=postgresql+psycopg://...`; `.env.example` has the template
+  **The DB needs the pgvector extension** — installed on the local Homebrew Postgres 17
+  (pgvector 0.8.7); the test stack uses the `pgvector/pgvector:pg16` image.
+- `.env` (gitignored) — `DATABASE_URL`, plus `BLOB_BUCKET`/`BLOB_PREFIX`/`AWS_*` for the
+  real S3 bucket (verified round-trip); `.env.example` has the template
+
+**Local dev environment:** conda env `kb` (Python 3.13), with the project installed via
+`pip install -e ".[test]"` (pyproject.toml is the only dependency list; there is no
+requirements.txt). Run tools with `conda run -n kb ...` or after `conda activate kb`.
+Embeddings come from Ollama (`brew services start ollama`, model `nomic-embed-text`,
+768d), which the semantic index needs for indexing and search.
 
 To run migrations locally: `set -a && source .env && set +a && alembic upgrade head`
 (a local Postgres with a `pinkas` database, trust auth, is what's been used for
-verification so far — adjust `.env` if that changes).
+verification so far — adjust `.env` if that changes). It is at `0002` (head) and its
+content has been indexed (`scripts/reindex.py --all`).
 
 To run the API locally: `set -a && source .env && set +a && uvicorn kb.api:app
 --app-dir src --reload` — then see `/docs` for the interactive OpenAPI UI.
@@ -336,6 +344,10 @@ Built from LangChain parts; only KB-specific glue is hand-written.
   re-indexed via `langchain_core.indexing.index(cleanup="incremental",
   source_id_key="file_id")` (unchanged chunks skipped, never re-embedded), deleted /
   missing / content-less ones unindexed. Never raises per file (`IndexResult.failed`).
+  Each file goes to `index()` as **one batch** (`batch_size=len(chunks)`): incremental
+  cleanup runs after every batch, so a file split across the default 100-chunk batches
+  had its later chunks deleted and re-embedded on every run (bug hit on a 162-chunk
+  page; regression test `test_reindex_unchanged_large_file_is_all_skipped`).
   `unindex_files(ids)` goes through record-manager keys (incremental cleanup can't drop
   a file absent from the batch). `reindex_all()` = full cleanup, file by file. All open
   their own session: call them **after commit**, and not inside a running event loop.
@@ -376,7 +388,11 @@ the local Postgres and exercising the full golden path plus error-mapping cases
 (self-cycle move → 409, unknown id → 404, malformed manifest-member body → 422) with
 `curl`; the DB was reset to empty afterward (`alembic downgrade base && alembic upgrade
 head`). There is now a committed pytest suite (`pytest -m "not llm"`, needs
-`TEST_DATABASE_URL` pointing at a pgvector Postgres whose DB name ends in `_test`).
+`TEST_DATABASE_URL` pointing at a pgvector Postgres whose DB name ends in `_test`); it
+passes in the `kb` env (86 passed, Docling test skipped). The tests use fake embeddings;
+real Ollama embeddings were verified on the dev DB (6 pages → 222 chunks, a second
+`reindex.py --all` skips all of them, and manifest-scoped `semantic_search` returns
+ranked hits).
 
 ## QASPER evaluation
 
@@ -414,7 +430,8 @@ follow this pattern — copy it for any new enum.
 - Authz, manifest boundaries beyond storage, concurrency checks, real validation hooks
   (currently a DB constraint violation from the API surfaces as a raw 500) — all
   explicitly deferred from layer 3, not designed yet.
-- Run the QASPER LLM eval with `QASPER_SEMANTIC=1` vs without (needs Ollama) to see if
+- Run the QASPER LLM eval with `QASPER_SEMANTIC=1` vs without (Ollama embeddings are
+  now set up; the agent model still needs a tool-calling LLM) to see if
   semantic search earns its place; then consider `HybridSearchConfig` (keyword + vector
   fusion in `langchain-postgres`) and an index-status route.
 - Background indexing is in-process (`BackgroundTask`); a real worker would loop

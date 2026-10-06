@@ -172,6 +172,19 @@ def test_reindex_unchanged_is_all_skipped(db, store):
     assert (again.num_added, again.num_deleted, again.num_skipped) == (0, 0, first.num_added)
 
 
+def test_reindex_unchanged_large_file_is_all_skipped(db, store):
+    # > index()'s default batch_size (100): a file split across batches used to have its
+    # later chunks dropped by the first batch's incremental cleanup and re-embedded
+    # (reindex_all goes through the same per-file _index_one)
+    from kb.semantic_index.indexer import index_files
+
+    fid = make(db, content="".join(section(i) for i in range(80)))
+    first = index_files([fid])
+    assert first.num_added > 100
+    again = index_files([fid])
+    assert (again.num_added, again.num_deleted, again.num_skipped) == (0, 0, first.num_added)
+
+
 def test_edit_replaces_changed_and_deletes_stale(db, store):
     from kb import service
     from kb.semantic_index.indexer import index_files
