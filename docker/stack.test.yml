@@ -12,7 +12,7 @@ version: "3.8"
 
 services:
   postgres:
-    image: postgres:16
+    image: pgvector/pgvector:pg16  # postgres 16 + pgvector (migration 0002)
     environment:
       POSTGRES_USER: kb
       POSTGRES_PASSWORD: kbtest

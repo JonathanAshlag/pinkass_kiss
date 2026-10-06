@@ -1,6 +1,6 @@
 """
 REST API for the KB service layer. Thin: every route calls into kb.service and
-shapes the result with kb.schemas -- no business logic lives here.
+shapes the result with kb.api.schemas -- no business logic lives here.
 
 Run locally: `uvicorn kb.api:app --reload` (needs DATABASE_URL in the environment,
 same as Alembic).
@@ -10,28 +10,43 @@ import uuid
 from pathlib import Path
 from typing import Iterator
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    Body,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from kb import service
-from kb.db import SessionLocal
-from kb.dci import DEFAULT_MAX_CHARS, DEFAULT_READ_LIMIT, MAX_CHARS_LIMIT
+from kb.storage.db import SessionLocal
+from kb.retrieval.dci import DEFAULT_MAX_CHARS, DEFAULT_READ_LIMIT, MAX_CHARS_LIMIT
 from kb.ingest import UploadError, default_registry, ingest_upload
-from kb.schemas import (
-    FileCreate,
-    FileRead,
-    FileSummary,
-    FileUpdate,
+from kb.api.schemas import (
     IngestExtensionsRead,
     IngestFailure,
+    IndexFailure,
+    IndexResultRead,
     IngestReportRead,
     ManifestCreate,
     ManifestMemberCreate,
     ManifestMemberRead,
     ManifestRead,
     MoveRequest,
+    NodeCreate,
+    NodeRead,
+    NodeSummary,
+    NodeUpdate,
+    ReindexRequest,
+    SearchHitRead,
     ToolOutputRead,
 )
 
@@ -62,9 +77,15 @@ def _pattern_error_handler(request, exc):
 
 
 @app.exception_handler(UploadError)
-def _upload_error_handler(request, exc):
-    # UploadError subclasses ValueError; Starlette picks the most specific handler.
+@app.exception_handler(service.FieldError)
+def _unprocessable_handler(request, exc):
+    # Both subclass ValueError; Starlette picks the most specific handler.
     return _json_error(422, str(exc))
+
+
+@app.exception_handler(service.PermissionDenied)
+def _permission_denied_handler(request, exc):
+    return _json_error(403, str(exc))
 
 
 @app.exception_handler(ValueError)
@@ -80,40 +101,63 @@ def _json_error(status_code: int, detail: str):
     return JSONResponse(status_code=status_code, content={"detail": detail})
 
 
-def _read(session: Session, node) -> FileRead:
-    data = FileRead.model_validate(node)
+# --------------------------------------------------------------------------
+# Committing writes (kb.service.commit keeps the semantic index in step)
+# --------------------------------------------------------------------------
+
+
+def _commit(session: Session, background_tasks: BackgroundTasks) -> None:
+    """Commit the request's writes *now* via service.commit, which then schedules
+    indexing of whatever they touched as a background task (if KB_AUTO_INDEX is on).
+
+    The explicit commit is what guarantees the indexer (which opens its own session)
+    sees the new state. FastAPI 0.115 happens to close yield-dependencies -- and so run
+    get_session's commit -- before background tasks, but that ordering has changed
+    between FastAPI releases, so it isn't relied on. get_session's own commit is then
+    a harmless no-op. If the commit raises, nothing is scheduled.
+    """
+    service.commit(session, schedule=background_tasks.add_task)
+
+
+def _read(session: Session, node) -> NodeRead:
+    data = NodeRead.model_validate(node)
     data.warnings = service.get_warnings(session, node)
     return data
 
 
 # --------------------------------------------------------------------------
-# Files
+# Nodes (files and folders)
 # --------------------------------------------------------------------------
 
 
-@app.post("/files", response_model=FileRead, status_code=201)
-def create_file(body: FileCreate, session: Session = Depends(get_session)):
-    # exclude_unset lets DB server defaults (aliases='{}', tags='{}', sources='[]',
-    # verified='[]', status='draft') apply when the client omits those fields --
-    # except `kind`/`parent_id`, which dal.create_file requires explicitly (no
-    # server-side fallback in the function signature), so their schema defaults
-    # ("file" / None-for-root) are restored if the client left them out.
+@app.post("/nodes", response_model=NodeRead, status_code=201)
+def create_node(
+    body: NodeCreate, background_tasks: BackgroundTasks, session: Session = Depends(get_session)
+):
+    # exclude_unset lets DB server defaults (kind='manual', tags='{}', status='draft',
+    # ...) apply when the client omits those fields.
     payload = body.model_dump(exclude_unset=True)
-    payload.setdefault("kind", body.kind)
+    node_type = payload.pop("type", body.type)
     payload.setdefault("parent_id", body.parent_id)
-    node = service.create_file(session, **payload)
+    if node_type == "folder":
+        node = service.create_folder(session, **payload)
+    else:
+        node = service.create_file(session, **payload)
+    _commit(session, background_tasks)
     return _read(session, node)
 
 
-@app.get("/files/roots", response_model=list[FileSummary])
+@app.get("/nodes/roots", response_model=list[NodeSummary])
 def list_roots(include_deleted: bool = False, session: Session = Depends(get_session)):
     return service.list_children(session, None, include_deleted=include_deleted)
 
 
-@app.get("/files", response_model=list[FileSummary])
-def query_files(
+@app.get("/nodes", response_model=list[NodeSummary])
+def query_nodes(
     tags: list[str] | None = Query(None),
     status: str | None = None,
+    type: str | None = Query(None, pattern="^(file|folder)$"),
+    kind: str | None = None,
     parent_id: uuid.UUID | None = None,
     include_deleted: bool = False,
     session: Session = Depends(get_session),
@@ -122,43 +166,74 @@ def query_files(
         session,
         tags=tags,
         status=status,
+        node_type=type,
+        kind=kind,
         parent_id=parent_id,
         include_deleted=include_deleted,
     )
 
 
-@app.get("/files/{node_id}", response_model=FileRead)
-def get_file(node_id: uuid.UUID, session: Session = Depends(get_session)):
+@app.get("/nodes/{node_id}", response_model=NodeRead)
+def get_node(node_id: uuid.UUID, session: Session = Depends(get_session)):
     node = service.get_node(session, node_id)
     if node is None:
         raise HTTPException(404, f"no such node: {node_id}")
     return _read(session, node)
 
 
-@app.patch("/files/{node_id}", response_model=FileRead)
-def update_file(node_id: uuid.UUID, body: FileUpdate, session: Session = Depends(get_session)):
+@app.get("/nodes/{node_id}/raw", response_class=Response)
+def get_node_raw(node_id: uuid.UUID, session: Session = Depends(get_session)):
+    """The retained original (e.g. the uploaded PDF), 404 if the node has none."""
+    original = service.get_original(session, node_id)
+    if original is None:
+        raise HTTPException(404, f"node {node_id} has no retained original")
+    data, mime, filename = original
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.patch("/nodes/{node_id}", response_model=NodeRead)
+def update_node(
+    node_id: uuid.UUID,
+    body: NodeUpdate,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
     node = service.update_node(session, node_id, **body.model_dump(exclude_unset=True))
+    _commit(session, background_tasks)
     return _read(session, node)
 
 
-@app.post("/files/{node_id}/move", response_model=FileRead)
-def move_file(node_id: uuid.UUID, body: MoveRequest, session: Session = Depends(get_session)):
+@app.post("/nodes/{node_id}/move", response_model=NodeRead)
+def move_node(node_id: uuid.UUID, body: MoveRequest, session: Session = Depends(get_session)):
     node = service.move_node(session, node_id, body.new_parent_id)
     return _read(session, node)
 
 
-@app.post("/files/{node_id}/restore", response_model=FileRead)
-def restore_file(node_id: uuid.UUID, session: Session = Depends(get_session)):
+@app.post("/nodes/{node_id}/restore", response_model=NodeRead)
+def restore_node(
+    node_id: uuid.UUID, background_tasks: BackgroundTasks, session: Session = Depends(get_session)
+):
     node = service.restore_node(session, node_id)
+    _commit(session, background_tasks)
     return _read(session, node)
 
 
-@app.delete("/files/{node_id}", status_code=204, response_class=Response)
-def delete_file(node_id: uuid.UUID, cascade: bool = True, session: Session = Depends(get_session)):
+@app.delete("/nodes/{node_id}", status_code=204, response_class=Response)
+def delete_node(
+    node_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    cascade: bool = True,
+    session: Session = Depends(get_session),
+):
     service.delete_node(session, node_id, cascade=cascade)
+    _commit(session, background_tasks)
 
 
-@app.get("/files/{node_id}/children", response_model=list[FileSummary])
+@app.get("/nodes/{node_id}/children", response_model=list[NodeSummary])
 def list_children(
     node_id: uuid.UUID, include_deleted: bool = False, session: Session = Depends(get_session)
 ):
@@ -200,7 +275,7 @@ def add_manifest_member(
     manifest_id: uuid.UUID, body: ManifestMemberCreate, session: Session = Depends(get_session)
 ):
     service.add_manifest_member(
-        session, manifest_id, file_id=body.file_id, child_manifest_id=body.child_manifest_id
+        session, manifest_id, node_id=body.node_id, child_manifest_id=body.child_manifest_id
     )
     return Response(status_code=201)
 
@@ -208,16 +283,16 @@ def add_manifest_member(
 @app.delete("/manifests/{manifest_id}/members", status_code=204, response_class=Response)
 def remove_manifest_member(
     manifest_id: uuid.UUID,
-    file_id: uuid.UUID | None = None,
+    node_id: uuid.UUID | None = None,
     child_manifest_id: uuid.UUID | None = None,
     session: Session = Depends(get_session),
 ):
     service.remove_manifest_member(
-        session, manifest_id, file_id=file_id, child_manifest_id=child_manifest_id
+        session, manifest_id, node_id=node_id, child_manifest_id=child_manifest_id
     )
 
 
-@app.get("/manifests/{manifest_id}/resolve", response_model=list[FileSummary])
+@app.get("/manifests/{manifest_id}/resolve", response_model=list[NodeSummary])
 def resolve_manifest(manifest_id: uuid.UUID, session: Session = Depends(get_session)):
     return list(service.resolve_manifest(session, manifest_id))
 
@@ -279,6 +354,42 @@ def read_lines(
     )
 
 
+@app.get("/manifests/{manifest_id}/semantic", response_model=list[SearchHitRead])
+def semantic_search(
+    manifest_id: uuid.UUID,
+    q: str = Query(..., min_length=1),
+    k: int = Query(8, ge=1, le=100),
+    tags: list[str] | None = Query(None),
+    status: str | None = None,
+    session: Session = Depends(get_session),
+):
+    """Embedding search over the manifest's indexed chunks, best first. A sync route on
+    purpose: the vector store's sync API must not run inside the event loop."""
+    return service.semantic_search(session, manifest_id, q, k=k, tags=tags, status=status)
+
+
+# --------------------------------------------------------------------------
+# Semantic index maintenance
+# --------------------------------------------------------------------------
+
+
+@app.post("/index/reindex", response_model=IndexResultRead)
+def reindex(body: ReindexRequest | None = Body(None)):
+    """(Re)index the given node ids, or the whole KB when `file_ids` is omitted. Runs
+    synchronously and returns the counts; ignores KB_AUTO_INDEX (it's an explicit ask)."""
+    if body is None or body.file_ids is None:
+        result = service.reindex_all()
+    else:
+        result = service.index_files(body.file_ids)
+    return IndexResultRead(
+        num_added=result.num_added,
+        num_updated=result.num_updated,
+        num_skipped=result.num_skipped,
+        num_deleted=result.num_deleted,
+        failed=[IndexFailure(file_id=f, error=e) for f, e in result.failed],
+    )
+
+
 # --------------------------------------------------------------------------
 # Ingestion (folder upload)
 # --------------------------------------------------------------------------
@@ -292,6 +403,7 @@ def ingest_extensions():
 
 @app.post("/ingest", response_model=IngestReportRead, status_code=201)
 def ingest(
+    background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
     # Relative path of each file, same order as `files` (e.g. "docs/guide/setup.md").
     # Sent separately because multipart filenames aren't reliably kept with directories.
@@ -308,6 +420,7 @@ def ingest(
         parent_id=parent_id,
         tags=tags,
     )
+    _commit(session, background_tasks)
     return IngestReportRead(
         root_id=report.root_id,
         files_created=report.files_created,

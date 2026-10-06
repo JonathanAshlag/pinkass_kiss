@@ -1,12 +1,13 @@
 """
 Evaluates the KB against a committed 20-paper QASPER slice (regenerate with `python
-scripts/load_qasper.py --limit 20 --out tests/fixtures/qasper_20.jsonl`). No network needed.
+scripts/eval/load_qasper.py --limit 20 --out tests/eval/fixtures/qasper_20.jsonl`). No network needed.
 
 The corpus is the papers, loaded through the real loader (`load_qasper.load_into_kb`)
 into the folder layout documented there. Then:
 
 - layout: each paper's tree mirrors its own outline (numbered section files/folders,
-  figures/, tables/, metadata.md); the paper folder holds title, abstract and outline
+  figures/, tables/, metadata.md); the paper's 00-overview.md holds title, abstract and
+  outline (folders hold no content)
 - ingestion: no section text is lost, every section keeps its heading and a role tag
 - manifests: one manifest per paper resolves to exactly that paper's subtree
 - DCI grep: an annotator's evidence paragraph is found by a search of the paper's
@@ -21,17 +22,19 @@ import uuid
 import load_qasper
 
 ROOT_TITLE = "QASPER"
+OVERVIEW = load_qasper.OVERVIEW
 
 
 def _path(paper: dict, rel: str = "") -> str:
-    # mirrors kb.dci's path segment for a (unique-among-siblings) title
+    # mirrors kb.retrieval.dci's path segment for a (unique-among-siblings) title
     base = f"{ROOT_TITLE}/{paper['title'].replace('/', '-').strip()}"
     return f"{base}/{rel}" if rel else base
 
 
 def _subtree(session, folder_id) -> dict[str, object]:
     """{path relative to the paper folder: node}"""
-    from kb import dal, service
+    from kb import service
+    from kb.storage import dal
 
     out = {}
     for node in dal.list_descendants(session, uuid.UUID(folder_id)):
@@ -71,29 +74,36 @@ def test_layout_and_ingestion(session, papers, ids):
         assert set(tree) == set(expected) - {""}, paper["id"]
         for path, node in tree.items():
             want = expected[path]
-            assert (node.kind, node.content, node.description) == (want.kind, want.content, want.description), path
-            assert node.tags == want.tags and node.aliases == want.aliases, path
+            got = (node.node_type, getattr(node, "content", None), node.description)
+            assert got == (want.type, want.content, want.fields["description"]), path
+            assert node.tags == want.fields["tags"], path
+            assert getattr(node, "aliases", None) == want.fields.get("aliases"), path
 
-        # paper folder: title, abstract and outline; metadata.md points at arXiv
-        assert folder.title == paper["title"]
-        assert paper["abstract"] in folder.content and "## Outline" in folder.content
+        # paper folder: titled after the paper; 00-overview.md has the abstract and outline;
+        # metadata.md points at arXiv
+        assert folder.title == paper["title"] and folder.node_type == "folder"
+        overview = tree[OVERVIEW].content
+        assert paper["abstract"] in overview and "## Outline" in overview
         assert f"arxiv.org/abs/{paper['id']}" in tree["metadata.md"].content
 
-        # sections are numbered in reading order and carry their heading and a role
-        sections = [p for p in expected if p[:1].isdigit()]  # paper_nodes yields reading order
+        # sections are numbered in reading order and carry a role (files: their heading too)
+        sections = [p for p in expected if p[:1].isdigit() and p != OVERVIEW]  # reading order
         top = [p for p in sections if "/" not in p]
         assert top == sorted(top) and top[0].startswith("01-")  # so `ls` order is reading order
         for path in sections:
-            assert tree[path].aliases and any(t.startswith("role:") for t in tree[path].tags), path
+            assert any(t.startswith("role:") for t in tree[path].tags), path
+            if tree[path].node_type == "file":
+                assert tree[path].aliases, path
 
-        # nothing lost: every section's text is stored inside one section node
-        bodies = [tree[p].content or "" for p in sections]
+        # nothing lost: every section's text is stored inside one section file
+        # (a section folder's lead text lives in its 00-overview.md)
+        bodies = [tree[p].content for p in sections if tree[p].node_type == "file"]
         for name, text in paper["sections"]:
             if text.strip():
                 assert any(text.strip() in b for b in bodies), (paper["id"], name)
 
         # one file per figure/table caption
-        captions = [tree[p].content for p in tree if p.startswith(("figures/", "tables/")) and tree[p].kind == "file"]
+        captions = [tree[p].content for p in tree if p.startswith(("figures/", "tables/")) and tree[p].node_type == "file"]
         assert sorted(captions) == sorted(f["caption"] for f in paper["floats"])
 
 
@@ -164,7 +174,7 @@ def test_read_lines_returns_paper_overview(session, papers, manifests):
     from kb import service
 
     paper = papers[0]
-    out = service.read_lines(session, manifests[paper["id"]], _path(paper))
+    out = service.read_lines(session, manifests[paper["id"]], _path(paper, OVERVIEW))
     assert not out.truncated
     assert paper["abstract"] in out.text
 
@@ -187,8 +197,8 @@ def test_api_serves_search_and_files(ids, papers, manifests):
     paper = papers[0]
     ev = _evidence(paper)[0][1]
 
-    body = client.get(f"/files/{ids[paper['id']]}").json()
-    assert body["title"] == paper["title"] and body["kind"] == "folder"
+    body = client.get(f"/nodes/{ids[paper['id']]}").json()
+    assert body["title"] == paper["title"] and body["type"] == "folder" and body["kind"] == "manual"
 
     r = client.get(
         f"/manifests/{manifests[paper['id']]}/search",
@@ -197,3 +207,18 @@ def test_api_serves_search_and_files(ids, papers, manifests):
     assert r.status_code == 200
     hits = set(r.json()["text"].split("\n"))
     assert hits & {_path(paper, n.path) for n in load_qasper.paper_nodes(paper)}
+
+
+def test_agent_tools_return_text_and_report_errors(papers, manifests):
+    from kb.retrieval.agent_tools import AgentTools
+
+    paper = papers[0]
+    tools = AgentTools(manifests[paper["id"]])
+
+    assert _path(paper, "metadata.md") in tools.list_paths(recursive=True)
+    assert paper["abstract"] in tools.read_lines(_path(paper, OVERVIEW), limit=500)
+    # bad agent input comes back as text the model can read, never as an exception
+    assert tools.search_lines("(").startswith("error: invalid pattern")
+    assert tools.read_lines("no/such/path").startswith("error: no such path")
+    assert tools.read_lines(_path(paper), offset=0).startswith("error:")
+    assert _path(papers[1], "metadata.md") not in tools.list_paths(recursive=True)  # scoped

@@ -3,9 +3,15 @@
 import re
 from pathlib import Path
 
-from kb.ingest.base import ProcessedDocument
+from kb.ingest.processors.base import ProcessedDocument
 
 _H1 = re.compile(r"^#\s+(.+?)\s*#*\s*$", re.MULTILINE)
+
+
+def title_from_markdown(content: str, path: Path) -> str:
+    """The first `# ` H1 in `content`, else the file name's stem."""
+    match = _H1.search(content)
+    return match.group(1) if match else path.stem
 
 
 class MarkdownProcessor:
@@ -14,6 +20,4 @@ class MarkdownProcessor:
 
     def process(self, path: Path) -> ProcessedDocument:
         content = path.read_text(encoding="utf-8")  # UnicodeDecodeError -> reported as failed
-        match = _H1.search(content)
-        title = match.group(1) if match else path.stem
-        return ProcessedDocument(title=title, content=content)
+        return ProcessedDocument(title=title_from_markdown(content, path), content=content)

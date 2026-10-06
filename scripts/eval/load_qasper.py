@@ -10,11 +10,13 @@ evidence).
 With --to-kb, the papers are loaded into the knowledge base: a root "QASPER" folder,
 and under it one folder per paper that mirrors the paper's own outline:
 
-    <paper title>/            content: title, abstract, outline; description: abstract's first sentence
+    <paper title>/            description: abstract's first sentence
+    ├── 00-overview.md        title, abstract, outline
     ├── metadata.md           id, arXiv link, counts
     ├── 01-introduction.md
     ├── 02-related-work.md
-    ├── 03-approach/          a section with subsections; content: its lead text, if any
+    ├── 03-approach/          a section with subsections
+    │   ├── 00-overview.md    its lead text, if any (folders hold no content)
     │   ├── 01-masked-and-translation-language-model-pretraining.md
     │   └── 02-transfer-protocol.md
     ├── ...
@@ -32,8 +34,11 @@ Needs DATABASE_URL for --to-kb (see .env.example).
 
 Usage:
     pip install datasets
-    python scripts/load_qasper.py --split validation --limit 20 --out tests/fixtures/qasper_20.jsonl
-    python scripts/load_qasper.py --to-kb --limit 20
+    python scripts/eval/load_qasper.py --split validation --limit 20 --out tests/eval/fixtures/qasper_20.jsonl
+    python scripts/eval/load_qasper.py --to-kb --limit 20 [--index]
+
+--index also embeds the loaded papers into the semantic index (kb_chunks); it needs
+the embeddings model (EMBEDDINGS_MODEL) reachable. Off by default.
 
 Importable too: `from load_qasper import load_qasper`.
 """
@@ -48,7 +53,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")  # HF_TOKEN, DATABASE_URL (for --to-kb)
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")  # HF_TOKEN, DATABASE_URL (for --to-kb)
+
+from kb.ingest.plan import PlannedNode  # noqa: E402 -- after load_dotenv: kb.storage.db reads DATABASE_URL on import
 
 ROOT_TITLE = "QASPER"
 TAG = "qasper"
@@ -149,17 +156,25 @@ def load_qasper(split: str = "validation", limit: int | None = None) -> Iterator
 # --------------------------------------------------------------------------
 
 
-@dataclass
-class Node:
-    """One KB node to create, addressed by its path under the paper folder."""
+OVERVIEW = "00-overview.md"  # a folder's own text: folders hold no content
 
-    path: str  # "" is the paper folder itself
-    kind: str  # "file" | "folder"
-    content: str | None = None
-    description: str | None = None
-    aliases: list[str] = field(default_factory=list)
-    tags: list[str] = field(default_factory=list)
-    sources: list[dict] = field(default_factory=list)
+
+def _node(
+    path: str,
+    type: str,
+    content: str | None = None,
+    description: str | None = None,
+    aliases: list[str] | None = None,
+    tags: list[str] | None = None,
+    sources: list[dict] | None = None,
+    title: str | None = None,
+) -> PlannedNode:
+    """One planned node under the paper folder ("" is the folder itself), with every
+    frontmatter column the loader sets spelled out (folders only have description/tags)."""
+    fields = {"description": description, "tags": tags or []}
+    if type == "file":
+        fields |= {"aliases": aliases or [], "sources": sources or []}
+    return PlannedNode(path, type, title=title, content=content, fields=fields)
 
 
 @dataclass
@@ -207,9 +222,9 @@ def _float_name(file: str, used: set[str]) -> tuple[str, str]:
     return folder, name
 
 
-def paper_nodes(paper: dict) -> list[Node]:
+def paper_nodes(paper: dict) -> list[PlannedNode]:
     """Every node for one paper, parents before children, the paper folder first."""
-    nodes: list[Node] = []
+    nodes: list[PlannedNode] = []
     outline_lines: list[str] = []
 
     def add(sections: list[_Section], prefix: str, depth: int, parent_role: str = "other") -> None:
@@ -220,13 +235,13 @@ def paper_nodes(paper: dict) -> list[Node]:
             common = {"aliases": [s.heading], "tags": [TAG, f"role:{role}"]}
             if s.children:
                 path = f"{prefix}{name}"
-                nodes.append(
-                    Node(path, "folder", content=f"# {s.heading}\n\n{body}" if body else None, **common)
-                )
+                nodes.append(_node(path, "folder", tags=common["tags"]))
+                if body:
+                    nodes.append(_node(f"{path}/{OVERVIEW}", "file", content=f"# {s.heading}\n\n{body}", **common))
                 outline_lines.append(f"{'  ' * depth}- {name}/ -- {s.heading}")
                 add(list(s.children.values()), f"{path}/", depth + 1, role)
             else:
-                nodes.append(Node(f"{prefix}{name}.md", "file", content=f"# {s.heading}\n\n{body}", **common))
+                nodes.append(_node(f"{prefix}{name}.md", "file", content=f"# {s.heading}\n\n{body}", **common))
                 outline_lines.append(f"{'  ' * depth}- {name}.md -- {s.heading}")
 
     add(_outline(paper["sections"]), "", 0)
@@ -236,7 +251,7 @@ def paper_nodes(paper: dict) -> list[Node]:
     for f in paper["floats"]:
         folder, name = _float_name(f["file"], used)
         floats.append(
-            Node(
+            _node(
                 f"{folder}/{name}",
                 "file",
                 content=f["caption"],
@@ -246,27 +261,34 @@ def paper_nodes(paper: dict) -> list[Node]:
         )
     n_figures = sum(n.path.startswith("figures/") for n in floats)
     n_tables = len(floats) - n_figures
-    float_folders = [Node(name, "folder", tags=[TAG]) for name in ("figures", "tables") if any(n.path.startswith(f"{name}/") for n in floats)]
+    float_folders = [_node(name, "folder", tags=[TAG]) for name in ("figures", "tables") if any(n.path.startswith(f"{name}/") for n in floats)]
     for name in (n.path for n in float_folders):
         outline_lines.append(f"- {name}/ -- {n_figures if name == 'figures' else n_tables} captions")
 
     arxiv = f"https://arxiv.org/abs/{paper['id']}"
-    folder = Node(
+    folder = _node(
         "",
         "folder",
+        title=paper["title"],
+        description=first_sentence(paper["abstract"]) if paper["abstract"] else None,
+        tags=[TAG],
+    )
+    overview = _node(
+        OVERVIEW,
+        "file",
         content=(
             f"# {paper['title']}\n\n## Abstract\n\n{paper['abstract'] or '(none)'}\n\n"
             "## Outline\n\n" + "\n".join(["- metadata.md -- paper id, links, counts", *outline_lines])
         ),
-        description=first_sentence(paper["abstract"]) if paper["abstract"] else None,
-        tags=[TAG],
+        description="Title, abstract and outline of the paper",
+        tags=[TAG, "role:overview"],
     )
-    metadata = Node(
+    metadata = _node(
         "metadata.md",
         "file",
         content=(
             f"# {paper['title']}\n\n- paper id: {paper['id']}\n- arXiv: {arxiv}\n"
-            f"- sections: {sum(n.kind == 'file' and n.path[:1].isdigit() for n in nodes)} "
+            f"- sections: {sum(n.type == 'file' and n.path[:1].isdigit() and not n.path.endswith(OVERVIEW) for n in nodes)} "
             f"(top level: {sum('/' not in n.path for n in nodes)})\n"
             f"- figures: {n_figures}\n- tables: {n_tables}\n"
         ),
@@ -274,7 +296,7 @@ def paper_nodes(paper: dict) -> list[Node]:
         tags=[TAG, "role:metadata"],
         sources=[{"resource": arxiv}],
     )
-    return [folder, metadata, *nodes, *float_folders, *floats]
+    return [folder, overview, metadata, *nodes, *float_folders, *floats]
 
 
 # --------------------------------------------------------------------------
@@ -282,40 +304,37 @@ def paper_nodes(paper: dict) -> list[Node]:
 # --------------------------------------------------------------------------
 
 
-def load_into_kb(papers: list[dict]) -> dict[str, str]:
-    """Create the KB from the papers. Returns {paper id: paper folder node id}."""
+def load_into_kb(papers: list[dict], *, index: bool = False) -> dict[str, str]:
+    """Create the KB from the papers. Returns {paper id: paper folder node id}. With
+    `index`, every created node is also added to the semantic index after the commit."""
     from kb import service
-    from kb.db import SessionLocal
+    from kb.storage.db import SessionLocal
+    from kb.ingest import materialize
 
     with SessionLocal() as session:
         if any(n.title == ROOT_TITLE for n in service.list_children(session, None)):
             sys.exit(f"a root '{ROOT_TITLE}' folder already exists; reset the DB or delete it first")
-        root = service.create_file(
+        root = service.create_folder(
             session,
             parent_id=None,
-            kind="folder",
             title=ROOT_TITLE,
             description="QASPER papers, one folder per paper, laid out like the paper's own outline.",
             tags=[TAG],
         )
         ids: dict[str, str] = {}
         for paper in papers:
-            created: dict[str, object] = {}
-            for node in paper_nodes(paper):
-                parent_path, _, name = node.path.rpartition("/")
-                created[node.path] = service.create_file(
-                    session,
-                    parent_id=root.id if node.path == "" else created[parent_path].id,
-                    kind=node.kind,
-                    title=paper["title"] if node.path == "" else name,
-                    content=node.content,
-                    description=node.description,
-                    aliases=node.aliases,
-                    tags=node.tags,
-                    sources=node.sources,
-                )
+            created = materialize(session, paper_nodes(paper), parent_id=root.id)
             ids[paper["id"]] = str(created[""].id)
-        session.commit()
+        committed = service.commit(session, index=index)
+    if index:
+        result = committed.indexed
+        if result is None:
+            sys.exit("--index: indexing failed, see the log above")
+        print(
+            f"indexed {len(committed.touched)} nodes: {result.num_added} chunks added, "
+            f"{result.num_skipped} unchanged, {len(result.failed)} failed",
+            file=sys.stderr,
+        )
     return ids
 
 
@@ -329,13 +348,16 @@ def main() -> None:
         action="store_true",
         help="load the first --limit papers into the KB DB and write the eval set (questions only) to --out",
     )
+    p.add_argument("--index", action="store_true", help="with --to-kb: also build the semantic index")
     args = p.parse_args()
 
+    if args.index and not args.to_kb:
+        p.error("--index requires --to-kb")
     if args.to_kb and args.limit is None:
         p.error("--to-kb requires --limit")
     papers = list(load_qasper(args.split, args.limit))
     if args.to_kb:
-        ids = load_into_kb(papers)
+        ids = load_into_kb(papers, index=args.index)
         out_path = "qasper_eval.jsonl" if args.out == "-" else args.out
         with open(out_path, "w", encoding="utf-8") as f:
             for paper in papers:

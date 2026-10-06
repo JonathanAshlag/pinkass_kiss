@@ -8,7 +8,10 @@ subtree -- there is no dedupe.
 Needs DATABASE_URL (see .env.example).
 
 Usage:
-    python scripts/ingest_folder.py PATH [--parent-id UUID] [--tag TAG ...] [--dry-run]
+    python scripts/ingest_folder.py PATH [--parent-id UUID] [--tag TAG ...] [--dry-run] [--index]
+
+--index embeds the created nodes into the semantic index (kb_chunks) after the commit;
+it needs the embeddings model (EMBEDDINGS_MODEL, see .env.example) to be reachable.
 """
 
 import argparse
@@ -28,9 +31,11 @@ def main() -> None:
     p.add_argument("--parent-id", type=uuid.UUID, default=None, help="folder node to ingest under (default: root)")
     p.add_argument("--tag", action="append", default=[], help="tag applied to every created node (repeatable)")
     p.add_argument("--dry-run", action="store_true", help="roll back instead of committing")
+    p.add_argument("--index", action="store_true", help="after committing, add the created nodes to the semantic index")
     args = p.parse_args()
 
-    from kb.db import SessionLocal
+    from kb import service
+    from kb.storage.db import SessionLocal
     from kb.ingest import ingest_folder
 
     with SessionLocal() as session:
@@ -41,7 +46,8 @@ def main() -> None:
         if args.dry_run:
             session.rollback()
         else:
-            session.commit()
+            # --index: index everything the ingest touched, synchronously, after the commit
+            committed = service.commit(session, index=args.index)
 
     print(f"{'[dry run] ' if args.dry_run else ''}root: {report.root_id}")
     print(f"files created:   {len(report.files_created)}")
@@ -54,6 +60,20 @@ def main() -> None:
         print(f"failed: {len(report.failed)}")
         for path, error in report.failed:
             print(f"  {path}: {error}")
+
+    if args.index and not args.dry_run:
+        print_index_result(committed.indexed)
+
+
+def print_index_result(result) -> None:
+    if result is None:  # service.commit logged why (e.g. index stack not installed)
+        sys.exit("--index: indexing failed, see the log above")
+    print(
+        f"indexed: {result.num_added} chunks added, {result.num_updated} updated, "
+        f"{result.num_skipped} unchanged, {result.num_deleted} deleted"
+    )
+    for file_id, error in result.failed:
+        print(f"  index failed {file_id}: {error}")
 
 
 if __name__ == "__main__":
