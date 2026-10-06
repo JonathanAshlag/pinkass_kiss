@@ -86,8 +86,21 @@ class _Scope:
             except ValueError:
                 pass
         if node is None:
-            raise ValueError(f"no such path in manifest: {path_or_id}")
+            raise ValueError(f"no such path in manifest: {path_or_id}{self._suggest(key)}")
         return node
+
+    def _suggest(self, key: str, limit: int = 3) -> str:
+        """` (did you mean: a | b)` for a path that doesn't resolve: paths it is a prefix of
+        (the usual mistake is a shortened path, e.g. cut at a ':' in a title), else the
+        deepest existing path it starts with (a guessed child of a real folder)."""
+        wanted = key.lower()
+        if not wanted:
+            return ""
+        close = sorted((p for p in self.by_path if p.lower().startswith(wanted)), key=lambda p: (len(p), p))
+        if not close:
+            parents = [p for p in self.by_path if wanted.startswith(p.lower() + "/")]
+            close = [max(parents, key=len)] if parents else []
+        return f" (did you mean: {' | '.join(close[:limit])})" if close else ""
 
     def _path_of(self, node: Node) -> str:
         if node.id not in self._paths:
