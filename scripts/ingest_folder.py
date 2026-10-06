@@ -34,6 +34,7 @@ def main() -> None:
     p.add_argument("--index", action="store_true", help="after committing, add the created nodes to the semantic index")
     args = p.parse_args()
 
+    from kb import service
     from kb.storage.db import SessionLocal
     from kb.ingest import ingest_folder
 
@@ -45,7 +46,8 @@ def main() -> None:
         if args.dry_run:
             session.rollback()
         else:
-            session.commit()
+            # --index: index everything the ingest touched, synchronously, after the commit
+            committed = service.commit(session, index=args.index)
 
     print(f"{'[dry run] ' if args.dry_run else ''}root: {report.root_id}")
     print(f"files created:   {len(report.files_created)}")
@@ -60,16 +62,12 @@ def main() -> None:
             print(f"  {path}: {error}")
 
     if args.index and not args.dry_run:
-        index_created([report.root_id, *report.folders_created, *report.files_created])
+        print_index_result(committed.indexed)
 
 
-def index_created(file_ids: list[uuid.UUID]) -> None:
-    from kb import service
-
-    try:
-        result = service.index_files(file_ids)
-    except ImportError as exc:  # index stack not installed
-        sys.exit(f"--index: semantic index unavailable: {exc}")
+def print_index_result(result) -> None:
+    if result is None:  # service.commit logged why (e.g. index stack not installed)
+        sys.exit("--index: indexing failed, see the log above")
     print(
         f"indexed: {result.num_added} chunks added, {result.num_updated} updated, "
         f"{result.num_skipped} unchanged, {result.num_deleted} deleted"

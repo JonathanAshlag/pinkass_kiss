@@ -10,11 +10,13 @@ evidence).
 With --to-kb, the papers are loaded into the knowledge base: a root "QASPER" folder,
 and under it one folder per paper that mirrors the paper's own outline:
 
-    <paper title>/            content: title, abstract, outline; description: abstract's first sentence
+    <paper title>/            description: abstract's first sentence
+    ├── 00-overview.md        title, abstract, outline
     ├── metadata.md           id, arXiv link, counts
     ├── 01-introduction.md
     ├── 02-related-work.md
-    ├── 03-approach/          a section with subsections; content: its lead text, if any
+    ├── 03-approach/          a section with subsections
+    │   ├── 00-overview.md    its lead text, if any (folders hold no content)
     │   ├── 01-masked-and-translation-language-model-pretraining.md
     │   └── 02-transfer-protocol.md
     ├── ...
@@ -154,9 +156,12 @@ def load_qasper(split: str = "validation", limit: int | None = None) -> Iterator
 # --------------------------------------------------------------------------
 
 
+OVERVIEW = "00-overview.md"  # a folder's own text: folders hold no content
+
+
 def _node(
     path: str,
-    kind: str,
+    type: str,
     content: str | None = None,
     description: str | None = None,
     aliases: list[str] | None = None,
@@ -165,9 +170,11 @@ def _node(
     title: str | None = None,
 ) -> PlannedNode:
     """One planned node under the paper folder ("" is the folder itself), with every
-    frontmatter column the loader sets spelled out."""
-    fields = {"description": description, "aliases": aliases or [], "tags": tags or [], "sources": sources or []}
-    return PlannedNode(path, kind, title=title, content=content, fields=fields)
+    frontmatter column the loader sets spelled out (folders only have description/tags)."""
+    fields = {"description": description, "tags": tags or []}
+    if type == "file":
+        fields |= {"aliases": aliases or [], "sources": sources or []}
+    return PlannedNode(path, type, title=title, content=content, fields=fields)
 
 
 @dataclass
@@ -228,9 +235,9 @@ def paper_nodes(paper: dict) -> list[PlannedNode]:
             common = {"aliases": [s.heading], "tags": [TAG, f"role:{role}"]}
             if s.children:
                 path = f"{prefix}{name}"
-                nodes.append(
-                    _node(path, "folder", content=f"# {s.heading}\n\n{body}" if body else None, **common)
-                )
+                nodes.append(_node(path, "folder", tags=common["tags"]))
+                if body:
+                    nodes.append(_node(f"{path}/{OVERVIEW}", "file", content=f"# {s.heading}\n\n{body}", **common))
                 outline_lines.append(f"{'  ' * depth}- {name}/ -- {s.heading}")
                 add(list(s.children.values()), f"{path}/", depth + 1, role)
             else:
@@ -263,19 +270,25 @@ def paper_nodes(paper: dict) -> list[PlannedNode]:
         "",
         "folder",
         title=paper["title"],
+        description=first_sentence(paper["abstract"]) if paper["abstract"] else None,
+        tags=[TAG],
+    )
+    overview = _node(
+        OVERVIEW,
+        "file",
         content=(
             f"# {paper['title']}\n\n## Abstract\n\n{paper['abstract'] or '(none)'}\n\n"
             "## Outline\n\n" + "\n".join(["- metadata.md -- paper id, links, counts", *outline_lines])
         ),
-        description=first_sentence(paper["abstract"]) if paper["abstract"] else None,
-        tags=[TAG],
+        description="Title, abstract and outline of the paper",
+        tags=[TAG, "role:overview"],
     )
     metadata = _node(
         "metadata.md",
         "file",
         content=(
             f"# {paper['title']}\n\n- paper id: {paper['id']}\n- arXiv: {arxiv}\n"
-            f"- sections: {sum(n.kind == 'file' and n.path[:1].isdigit() for n in nodes)} "
+            f"- sections: {sum(n.type == 'file' and n.path[:1].isdigit() and not n.path.endswith(OVERVIEW) for n in nodes)} "
             f"(top level: {sum('/' not in n.path for n in nodes)})\n"
             f"- figures: {n_figures}\n- tables: {n_tables}\n"
         ),
@@ -283,7 +296,7 @@ def paper_nodes(paper: dict) -> list[PlannedNode]:
         tags=[TAG, "role:metadata"],
         sources=[{"resource": arxiv}],
     )
-    return [folder, metadata, *nodes, *float_folders, *floats]
+    return [folder, overview, metadata, *nodes, *float_folders, *floats]
 
 
 # --------------------------------------------------------------------------
@@ -301,25 +314,24 @@ def load_into_kb(papers: list[dict], *, index: bool = False) -> dict[str, str]:
     with SessionLocal() as session:
         if any(n.title == ROOT_TITLE for n in service.list_children(session, None)):
             sys.exit(f"a root '{ROOT_TITLE}' folder already exists; reset the DB or delete it first")
-        root = service.create_file(
+        root = service.create_folder(
             session,
             parent_id=None,
-            kind="folder",
             title=ROOT_TITLE,
             description="QASPER papers, one folder per paper, laid out like the paper's own outline.",
             tags=[TAG],
         )
         ids: dict[str, str] = {}
-        node_ids = [root.id]
         for paper in papers:
             created = materialize(session, paper_nodes(paper), parent_id=root.id)
             ids[paper["id"]] = str(created[""].id)
-            node_ids.extend(n.id for n in created.values())
-        session.commit()
+        committed = service.commit(session, index=index)
     if index:
-        result = service.index_files(node_ids)
+        result = committed.indexed
+        if result is None:
+            sys.exit("--index: indexing failed, see the log above")
         print(
-            f"indexed {len(node_ids)} nodes: {result.num_added} chunks added, "
+            f"indexed {len(committed.touched)} nodes: {result.num_added} chunks added, "
             f"{result.num_skipped} unchanged, {len(result.failed)} failed",
             file=sys.stderr,
         )

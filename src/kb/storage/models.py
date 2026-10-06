@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime
+from typing import ClassVar
 
-from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, Text, text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, ForeignKey, Index, Text, text
 from sqlalchemy.dialects.postgresql import ARRAY, ENUM, JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -9,29 +10,78 @@ from sqlalchemy.sql import func
 from kb.storage.db import Base
 
 FileStatus = ENUM("draft", "stable", "deprecated", name="file_status", create_type=False)
-FileKind = ENUM("file", "folder", name="file_kind", create_type=False)
+# Who may change a node (see kb.policy). 'auto_updated' is reserved for auto-update
+# jobs, which don't exist yet -- kb.service refuses to set it.
+FolderKind = ENUM("skeleton", "manual", "auto_updated", name="folder_kind", create_type=False)
+FileKind = ENUM("manual", "auto_updated", name="file_kind", create_type=False)
+
+
+class Folder(Base):
+    """
+    A tree container that organizes and scopes files. Folders carry only
+    organizational fields -- no content, sources or status; knowledge lives in
+    `File` rows. `parent_id` is a self-referencing adjacency list (NULL = root).
+    """
+
+    __tablename__ = "folders"
+    node_type: ClassVar[str] = "folder"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("folders.id", ondelete="SET NULL"), nullable=True
+    )
+
+    kind: Mapped[str] = mapped_column(FolderKind, nullable=False, server_default="manual")
+    # Blocks agent writes to this folder and the files directly in it, not sub-folders (see kb.policy).
+    agent_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tags: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
+
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    # Kept in sync by the trg_folders_set_updated_at DB trigger, not the ORM.
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    # Soft delete, same as File: deleting a folder cascades to its subtree.
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+    parent: Mapped["Folder | None"] = relationship(remote_side=[id], back_populates="children")
+    children: Mapped[list["Folder"]] = relationship(back_populates="parent")
+    files: Mapped[list["File"]] = relationship(back_populates="folder")
+
+    __table_args__ = (
+        Index("ix_folders_parent_id", "parent_id"),
+        Index("ix_folders_tags", "tags", postgresql_using="gin"),
+    )
 
 
 class File(Base):
     """
     One row per knowledge file: YAML frontmatter fields as typed columns,
-    markdown body in `content`. `parent_id` places the file in the OKF
-    directory tree (self-referencing adjacency list).
+    markdown body in `content`. `parent_id` is the folder the file lives in --
+    every file is inside one.
     """
 
     __tablename__ = "files"
+    node_type: ClassVar[str] = "file"
 
     # Matches the frontmatter `id` (uuid4) directly -- no separate internal PK.
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
     )
     parent_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("files.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True), ForeignKey("folders.id", ondelete="RESTRICT"), nullable=False
     )
 
-    # 'file' = leaf knowledge article (content required). 'folder' = tree
-    # container; content is optional (e.g. an explainer for what's inside).
-    kind: Mapped[str] = mapped_column(FileKind, nullable=False, server_default="file")
+    kind: Mapped[str] = mapped_column(FileKind, nullable=False, server_default="manual")
+    # Blocks agent writes to this file (a locked parent folder does too, see kb.policy).
+    agent_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
     title: Mapped[str] = mapped_column(Text, nullable=False)
     aliases: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
@@ -51,8 +101,7 @@ class File(Base):
     )
     status: Mapped[str] = mapped_column(FileStatus, nullable=False, server_default="draft")
 
-    # NULL only allowed when kind='folder' (see content_required_for_file).
-    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
@@ -73,16 +122,10 @@ class File(Base):
     blob_mime_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     blob_checksum: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    parent: Mapped["File | None"] = relationship(remote_side=[id], back_populates="children")
-    children: Mapped[list["File"]] = relationship(back_populates="parent")
+    folder: Mapped["Folder"] = relationship(back_populates="files")
 
     __table_args__ = (
-        CheckConstraint(
-            "kind = 'folder' OR content IS NOT NULL",
-            name="content_required_for_file",
-        ),
         Index("ix_files_parent_id", "parent_id"),
-        Index("ix_files_kind", "kind"),
         Index("ix_files_status", "status"),
         Index("ix_files_tags", "tags", postgresql_using="gin"),
         Index("ix_files_sources_gin", "sources", postgresql_using="gin"),
@@ -130,8 +173,8 @@ class Manifest(Base):
 
 class ManifestMember(Base):
     """
-    One membership row: exactly one of `file_id` (a file or directory node)
-    or `child_manifest_id` (a nested manifest) is set. Multi-hop cycle
+    One membership row: exactly one of `file_id`, `folder_id` (a directory --
+    its whole subtree) or `child_manifest_id` (a nested manifest) is set. Multi-hop cycle
     prevention for nested manifests is enforced in kb.storage.dal.add_manifest_member,
     not the database -- only the direct self-reference case is a CHECK here.
     """
@@ -147,6 +190,9 @@ class ManifestMember(Base):
     file_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("files.id", ondelete="CASCADE"), nullable=True
     )
+    folder_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("folders.id", ondelete="CASCADE"), nullable=True
+    )
     child_manifest_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("manifests.id", ondelete="CASCADE"), nullable=True
     )
@@ -159,12 +205,17 @@ class ManifestMember(Base):
         foreign_keys=[manifest_id], back_populates="members"
     )
     file: Mapped["File | None"] = relationship(foreign_keys=[file_id])
+    folder: Mapped["Folder | None"] = relationship(foreign_keys=[folder_id])
+
+    @property
+    def node_id(self) -> uuid.UUID | None:
+        """The member file or folder, whichever is set."""
+        return self.file_id or self.folder_id
     child_manifest: Mapped["Manifest | None"] = relationship(foreign_keys=[child_manifest_id])
 
     __table_args__ = (
         CheckConstraint(
-            "(file_id IS NOT NULL AND child_manifest_id IS NULL) "
-            "OR (file_id IS NULL AND child_manifest_id IS NOT NULL)",
+            "num_nonnulls(file_id, folder_id, child_manifest_id) = 1",
             name="manifest_member_exactly_one_target",
         ),
         CheckConstraint(
@@ -179,12 +230,24 @@ class ManifestMember(Base):
             postgresql_where=text("file_id IS NOT NULL"),
         ),
         Index(
-            "ux_manifest_members_bundle",
+            "ux_manifest_members_folder",
+            "manifest_id",
+            "folder_id",
+            unique=True,
+            postgresql_where=text("folder_id IS NOT NULL"),
+        ),
+        Index(
+            "ux_manifest_members_manifest",
             "manifest_id",
             "child_manifest_id",
             unique=True,
             postgresql_where=text("child_manifest_id IS NOT NULL"),
         ),
         Index("ix_manifest_members_file_id", "file_id"),
+        Index("ix_manifest_members_folder_id", "folder_id"),
         Index("ix_manifest_members_child_manifest_id", "child_manifest_id"),
     )
+
+
+# Any tree node. Ids come from gen_random_uuid() in both tables, so they don't collide.
+Node = File | Folder

@@ -9,7 +9,8 @@ Create Date: 2026-10-05
 langchain_metadata, plus the custom metadata columns file_id / heading / start_line /
 end_line). `upsertion_record` is langchain_classic's SQLRecordManager table, with DDL
 copied verbatim from its `UpsertionRecord` model (langchain-classic 1.0.8) so the
-migration is frozen and doesn't import LangChain.
+migration is frozen and doesn't import LangChain. Only `files` are indexed (folders
+carry no content), so `kb_chunks.file_id` references `files` alone.
 
 Downgrade drops both tables but leaves the `vector` extension installed (extensions
 are database-wide and harmless to keep; same as 0001 leaving pgcrypto).

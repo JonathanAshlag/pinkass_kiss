@@ -77,7 +77,7 @@ def test_plan_lists_root_then_files_only(tmp_path):
 
     plan = plan_folder(src, tags=["t"])
 
-    assert [(n.path, n.kind, n.title) for n in plan.nodes] == [
+    assert [(n.path, n.type, n.title) for n in plan.nodes] == [
         ("", "folder", "docs"),
         ("guide/deep/faq.md", "file", "faq"),
         ("readme.md", "file", "Readme"),
@@ -272,7 +272,7 @@ def test_mirrors_tree_and_skips_unsupported(db_session, tmp_path):
     assert report.failed == []
 
     root = children_by_title(db_session, None)["docs"]
-    assert root.id == report.root_id and root.kind == "folder"
+    assert root.id == report.root_id and root.node_type == "folder"
     top = children_by_title(db_session, root.id)
     assert set(top) == {"Readme", "guide"}
     guide = children_by_title(db_session, top["guide"].id)
@@ -290,7 +290,7 @@ def test_materialize_creates_implied_folders_once(db_session):
             PlannedNode("", "folder", title="Root"),
             PlannedNode("a/b/one.md", content="1"),
             PlannedNode("a/b/two.md", content="2", fields={"tags": ["x"]}),
-            PlannedNode("a", "folder", content="explainer"),  # explicit, listed after its child
+            PlannedNode("a", "folder", fields={"description": "explainer"}),  # explicit, listed after its child
             PlannedNode("empty", "folder"),  # explicit folders are kept even with no children
         ],
         folder_fields={"tags": ["implied"]},
@@ -298,8 +298,9 @@ def test_materialize_creates_implied_folders_once(db_session):
 
     assert list(created) == ["", "a", "a/b", "a/b/one.md", "a/b/two.md", "empty"]
     assert created[""].title == "Root" and created[""].parent_id is None
-    assert (created["a"].content, created["a"].tags) == ("explainer", [])
-    assert (created["a/b"].title, created["a/b"].kind, created["a/b"].tags) == ("b", "folder", ["implied"])
+    assert (created["a"].description, created["a"].tags) == ("explainer", [])
+    assert (created["a/b"].title, created["a/b"].node_type, created["a/b"].tags) == ("b", "folder", ["implied"])
+    assert created["a/b"].kind == "manual"
     assert created["a/b/two.md"].parent_id == created["a/b"].id
     assert created["a/b/two.md"].title == "two.md" and created["a/b/two.md"].tags == ["x"]
 
@@ -309,16 +310,22 @@ def test_materialize_rejects_bad_plans(db_session):
         materialize(db_session, [PlannedNode("a.md", content="x")])
     with pytest.raises(ValueError, match="twice"):
         materialize(db_session, [PlannedNode("", "folder", title="r"), PlannedNode("", "folder", title="r")])
+    with pytest.raises(ValueError, match="must be a folder"):
+        materialize(db_session, [PlannedNode("", content="x")])
+    with pytest.raises(ValueError, match="folders have no content"):
+        materialize(db_session, [PlannedNode("", "folder", content="x")])
+    with pytest.raises(ValueError, match="file has no content"):
+        materialize(db_session, [PlannedNode("", "folder"), PlannedNode("a.md")])
 
 
 def test_parent_must_be_an_existing_folder(db_session, tmp_path):
     from kb import service
 
-    note = service.create_file(db_session, parent_id=None, kind="file", title="n", content="x")
+    folder = service.create_folder(db_session, parent_id=None, title="f")
+    note = service.create_file(db_session, parent_id=folder.id, title="n", content="x")
     with pytest.raises(ValueError):
         ingest_folder(db_session, tmp_path, parent_id=note.id)
 
-    folder = service.create_file(db_session, parent_id=None, kind="folder", title="f")
     report = ingest_folder(db_session, tmp_path, parent_id=folder.id)
     assert service.get_node(db_session, report.root_id).parent_id == folder.id
 
@@ -476,14 +483,14 @@ def test_raw_original_endpoint(client, db_session, tmp_path):
         by_title = children_by_title(db_session, report.root_id)
         pdf_id, md_id = by_title["Quarterly Report"].id, by_title["Notes"].id
 
-        res = client.get(f"/files/{pdf_id}/raw")
+        res = client.get(f"/nodes/{pdf_id}/raw")
         assert res.status_code == 200 and res.content == pdf.read_bytes()
         assert res.headers["content-type"] == "application/pdf"
         assert 'filename="report.pdf"' in res.headers["content-disposition"]
-        assert client.get(f"/files/{pdf_id}").json()["blob_mime_type"] == "application/pdf"
+        assert client.get(f"/nodes/{pdf_id}").json()["blob_mime_type"] == "application/pdf"
 
-        assert client.get(f"/files/{md_id}/raw").status_code == 404  # markdown keeps no original
-        assert client.get(f"/files/{uuid.uuid4()}/raw").status_code == 404
+        assert client.get(f"/nodes/{md_id}/raw").status_code == 404  # markdown keeps no original
+        assert client.get(f"/nodes/{uuid.uuid4()}/raw").status_code == 404
     finally:
         blobs.reset_blob_store()
 
@@ -502,7 +509,7 @@ def test_ingest_endpoint(client, db_session):
     body = res.json()
     assert len(body["files_created"]) == 1 and len(body["folders_created"]) == 2
     assert body["skipped"] == ["notes/p.png"] and body["failed"] == []
-    assert client.get(f"/files/{body['root_id']}").json()["tags"] == ["t1", "t2"]
+    assert client.get(f"/nodes/{body['root_id']}").json()["tags"] == ["t1", "t2"]
 
     bad = client.post("/ingest", files=[("files", ("a.md", b"x"))], data={"paths": ["../a.md"]})
     assert bad.status_code == 422

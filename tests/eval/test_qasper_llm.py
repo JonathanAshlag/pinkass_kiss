@@ -49,7 +49,7 @@ from kb.retrieval.agent_tools import AgentTools  # noqa: E402
 SYSTEM_PROMPT = (
     "You answer questions about one scientific paper using only a small knowledge base "
     "you can explore with tools: list_paths (ls), search_lines (grep), read_lines (read). "
-    "The paper is a folder laid out like its own outline: read the folder itself for the "
+    "The paper is a folder laid out like its own outline: read its 00-overview.md for the "
     "title, abstract and outline; sections are numbered files/folders in reading order, "
     "and figures/ and tables/ hold captions. Search and read before answering. When "
     "done, reply with "

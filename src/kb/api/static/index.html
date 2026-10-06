@@ -96,11 +96,13 @@ function nodeEl(n) {
   const row = document.createElement('div');
   row.className = 'node' + (n.deleted_at ? ' del' : '') + (n.id === selectedId ? ' sel' : '');
   row.dataset.id = n.id;
-  const folder = n.kind === 'folder';
-  row.innerHTML = `<span class="twisty">${folder ? '▸' : ''}</span>${folder ? '📁' : '📄'} <span class="t">${esc(n.title)}</span><span class="badge">${esc(n.status)}</span>`;
+  const folder = n.type === 'folder';
+  const badges = [folder ? (n.kind !== 'manual' ? n.kind : '') : n.status, n.agent_locked ? '🔒 agents' : '']
+    .filter(Boolean).map(b => `<span class="badge">${esc(b)}</span>`).join('');
+  row.innerHTML = `<span class="twisty">${folder ? '▸' : ''}</span>${folder ? '📁' : '📄'} <span class="t">${esc(n.title)}</span>${badges}`;
   if (mode === 'mf' && activeManifest) {
     const add = document.createElement('button'); add.textContent = '＋'; add.className = 'addbtn'; add.title = 'add to manifest';
-    add.onclick = e => { e.stopPropagation(); addMember({ file_id: n.id }); };
+    add.onclick = e => { e.stopPropagation(); addMember({ node_id: n.id }); };
     row.append(add);
   }
   const kids = document.createElement('div'); kids.className = 'children hidden';
@@ -123,7 +125,7 @@ function nodeEl(n) {
   return wrap;
 }
 async function fillChildren(container, parentId) {
-  const path = parentId ? `/files/${parentId}/children` : '/files/roots';
+  const path = parentId ? `/nodes/${parentId}/children` : '/nodes/roots';
   const items = await api('GET', `${path}?${qs({include_deleted: showDel()})}`);
   container.innerHTML = '';
   items.forEach(n => container.append(nodeEl(n)));
@@ -133,7 +135,7 @@ async function renderTree(left = $('#left')) {
   left.innerHTML = '';
   if (mode === 'files') {
     const bar = document.createElement('div');
-    bar.innerHTML = '<button id="new-root">+ new at root</button> <button id="ingest-root">⇪ ingest folder</button> <button id="refresh">↻</button>';
+    bar.innerHTML = '<button id="new-root">+ new folder at root</button> <button id="ingest-root">⇪ ingest folder</button> <button id="refresh">↻</button>';
     left.append(bar);
     $('#new-root').onclick = () => newForm(null);
     $('#ingest-root').onclick = () => ingestForm(null);
@@ -162,7 +164,7 @@ function wireViewTabs(id) {
 }
 
 function frontmatter(n) {
-  const fields = { id: n.id, title: n.title, kind: n.kind, status: n.status, description: n.description, tags: n.tags, aliases: n.aliases,
+  const fields = { id: n.id, type: n.type, kind: n.kind, agent_locked: n.agent_locked || null, title: n.title, status: n.status, description: n.description, tags: n.tags, aliases: n.aliases,
     sources: n.sources, verified: n.verified, generated: n.generated, stale_after: n.stale_after, created_at: n.created_at, updated_at: n.updated_at };
   const lines = Object.entries(fields)
     .filter(([, v]) => v != null && v !== '' && !(Array.isArray(v) && !v.length))
@@ -177,7 +179,7 @@ function renderBrowse(n) {
     ${n.deleted_at ? `<div class="warn">deleted ${n.deleted_at}</div>` : ''}
     ${n.warnings.map(w => `<div class="warn">⚠ ${esc(w)}</div>`).join('')}
     <pre class="fm">${esc(frontmatter(n))}</pre>
-    <article class="md">${html || '<p class="meta">(no content)</p>'}</article>`;
+    ${n.type === 'folder' ? '' : `<article class="md">${html || '<p class="meta">(no content)</p>'}</article>`}`;
   wireViewTabs(n.id);
   // db://files/<id> links navigate within the UI instead of being dead anchors
   document.querySelectorAll('.md a[href^="db://files/"]').forEach(a => {
@@ -192,7 +194,7 @@ async function revealInTree(id) {
   if (filterResults) return;               // filter results are a flat list, nothing to expand
   const chain = [];                        // ancestors, nearest first
   for (let cur = id, hops = 0; cur && hops < 100; hops++) {
-    const res = await fetch(`/files/${cur}`);   // raw fetch: a deleted/missing ancestor shouldn't toast
+    const res = await fetch(`/nodes/${cur}`);   // raw fetch: a deleted/missing ancestor shouldn't toast
     if (!res.ok) break;
     cur = (await res.json()).parent_id;
     if (cur) chain.push(cur);
@@ -208,77 +210,95 @@ async function revealInTree(id) {
 
 async function selectNode(id) {
   selectedId = id; highlight();
-  const n = await api('GET', `/files/${id}`);
+  const n = await api('GET', `/nodes/${id}`);
   if (view === 'browse') return renderBrowse(n);
   renderEdit(n, id);
 }
 
+// auto_updated is reserved for future auto-update jobs; the API refuses to set it.
+const KINDS = { folder: ['skeleton', 'manual'], file: ['manual'] };
+const kindOptions = (type, current) => [...new Set([...KINDS[type], current].filter(Boolean))].map(k => `<option>${k}</option>`).join('');
+
 function renderEdit(n, id) {
-  const r = $('#right');
+  const r = $('#right'), isFile = n.type === 'file';
   r.innerHTML = viewTabs(id) + `
-    <div class="meta">id <code>${n.id}</code> · parent <code>${n.parent_id ?? 'root'}</code> · created ${n.created_at} · updated ${n.updated_at}${n.deleted_at ? ` · <b style="color:var(--bad)">deleted ${n.deleted_at}</b>` : ''}</div>
+    <div class="meta">${n.type} · id <code>${n.id}</code> · parent <code>${n.parent_id ?? 'root'}</code> · created ${n.created_at} · updated ${n.updated_at}${n.deleted_at ? ` · <b style="color:var(--bad)">deleted ${n.deleted_at}</b>` : ''}</div>
     ${n.warnings.map(w => `<div class="warn">⚠ ${esc(w)}</div>`).join('')}
     <div class="grid2">
       <div><label>title</label><input type="text" id="e-title" value="${esc(n.title)}"></div>
-      <div><label>kind</label><select id="e-kind"><option>file</option><option>folder</option></select></div>
-      <div><label>status</label><select id="e-status"><option>draft</option><option>stable</option><option>deprecated</option></select></div>
-      <div><label>stale_after (UTC, e.g. 2026-12-31T00:00:00)</label><input type="text" id="e-stale" value="${esc(toLocalInput(n.stale_after))}"></div>
+      <div><label>kind</label><select id="e-kind">${kindOptions(n.type, n.kind)}</select></div>
+      <div><label>agents</label><label style="margin:4px 0"><input type="checkbox" id="e-locked" ${n.agent_locked ? 'checked' : ''}> locked for agents${isFile ? '' : ' (with the files directly in it)'}</label></div>
+      ${isFile ? `<div><label>status</label><select id="e-status"><option>draft</option><option>stable</option><option>deprecated</option></select></div>
+      <div><label>stale_after (UTC, e.g. 2026-12-31T00:00:00)</label><input type="text" id="e-stale" value="${esc(toLocalInput(n.stale_after))}"></div>` : ''}
       <div><label>tags (comma)</label><input type="text" id="e-tags" value="${esc(n.tags.join(', '))}"></div>
-      <div><label>aliases (comma)</label><input type="text" id="e-aliases" value="${esc(n.aliases.join(', '))}"></div>
+      ${isFile ? `<div><label>aliases (comma)</label><input type="text" id="e-aliases" value="${esc(n.aliases.join(', '))}"></div>` : ''}
     </div>
     <label>description</label><input type="text" id="e-desc" value="${esc(n.description ?? '')}">
-    <label>content (markdown)</label><textarea id="e-content" rows="14">${esc(n.content ?? '')}</textarea>
-    ${jsonField('e-sources', 'sources', n.sources)}${jsonField('e-verified', 'verified', n.verified)}${jsonField('e-generated', 'generated', n.generated)}
+    ${isFile ? `<label>content (markdown)</label><textarea id="e-content" rows="14">${esc(n.content ?? '')}</textarea>
+    ${jsonField('e-sources', 'sources', n.sources)}${jsonField('e-verified', 'verified', n.verified)}${jsonField('e-generated', 'generated', n.generated)}` : ''}
     <div class="row">
       <button class="primary" id="b-save">Save</button>
-      <button id="b-child">New child…</button>
-      ${n.kind === 'folder' ? '<button id="b-ingest">Ingest folder here…</button>' : ''}
-      ${n.deleted_at ? '<button id="b-restore">Restore</button>' : '<button class="danger" id="b-del">Delete</button> <label style="margin:0"><input type="checkbox" id="b-cascade" checked> cascade</label>'}
+      ${isFile ? '' : '<button id="b-child">New child…</button> <button id="b-ingest">Ingest folder here…</button>'}
+      ${n.deleted_at ? '<button id="b-restore">Restore</button>' : `<button class="danger" id="b-del">Delete</button>${isFile ? '' : ' <label style="margin:0"><input type="checkbox" id="b-cascade" checked> cascade</label>'}`}
     </div>
-    <div class="row"><span>Move to parent:</span><input type="text" id="m-target" placeholder="parent id (blank = root)" style="width:300px">
+    <div class="row"><span>Move to folder:</span><input type="text" id="m-target" placeholder="folder id${isFile ? '' : ' (blank = root)'}" style="width:300px">
       <button id="m-pick">pick from tree</button><button id="m-go">Move</button></div>`;
   wireViewTabs(id);
-  $('#e-kind').value = n.kind; $('#e-status').value = n.status;
+  $('#e-kind').value = n.kind;
+  if (isFile) $('#e-status').value = n.status;
   const list = s => s.split(',').map(x => x.trim()).filter(Boolean);
   const parseJson = (id, orig) => { const raw = $(id).value.trim(); try { return raw ? JSON.parse(raw) : null; } catch { toast(`invalid JSON in ${id}`); throw 0; } };
   $('#b-save').onclick = async () => {
+    // Sending unchanged fields is fine: the API only permission-checks the ones that change.
     const body = {
-      title: $('#e-title').value, kind: $('#e-kind').value, status: $('#e-status').value,
-      description: $('#e-desc').value || null, content: $('#e-content').value,
-      tags: list($('#e-tags').value), aliases: list($('#e-aliases').value),
+      title: $('#e-title').value, kind: $('#e-kind').value, agent_locked: $('#e-locked').checked,
+      description: $('#e-desc').value || null, tags: list($('#e-tags').value),
+    };
+    if (isFile) Object.assign(body, {
+      status: $('#e-status').value, content: $('#e-content').value, aliases: list($('#e-aliases').value),
       stale_after: $('#e-stale').value.trim() ? $('#e-stale').value.trim() + (/[zZ+]|-\d\d:\d\d$/.test($('#e-stale').value.trim()) ? '' : 'Z') : null,
       sources: parseJson('#e-sources') ?? [], verified: parseJson('#e-verified') ?? [], generated: parseJson('#e-generated'),
-    };
-    if (body.kind === 'folder' && !body.content) body.content = null;
-    await api('PATCH', `/files/${id}`, body); toast('saved', true); await refreshKeep(id);
+    });
+    await api('PATCH', `/nodes/${id}`, body); toast('saved', true); await refreshKeep(id);
   };
-  $('#b-child').onclick = () => newForm(id);
+  if ($('#b-child')) $('#b-child').onclick = () => newForm(id);
   if ($('#b-ingest')) $('#b-ingest').onclick = () => ingestForm(id);
   if ($('#b-del')) $('#b-del').onclick = async () => {
-    if (!confirm('Delete this node' + ($('#b-cascade').checked ? ' and its subtree' : '') + '?')) return;
-    await api('DELETE', `/files/${id}?cascade=${$('#b-cascade').checked}`); toast('deleted', true); await refreshKeep(id);
+    const cascade = $('#b-cascade')?.checked ?? true;
+    if (!confirm('Delete this node' + (isFile ? '' : cascade ? ' and its subtree' : '') + '?')) return;
+    await api('DELETE', `/nodes/${id}?cascade=${cascade}`); toast('deleted', true); await refreshKeep(id);
   };
-  if ($('#b-restore')) $('#b-restore').onclick = async () => { await api('POST', `/files/${id}/restore`); toast('restored', true); await refreshKeep(id); };
-  $('#m-pick').onclick = () => { toast('click a node in the tree…', true); pickTarget = t => { $('#m-target').value = t; }; };
+  if ($('#b-restore')) $('#b-restore').onclick = async () => { await api('POST', `/nodes/${id}/restore`); toast('restored', true); await refreshKeep(id); };
+  $('#m-pick').onclick = () => { toast('click a folder in the tree…', true); pickTarget = t => { $('#m-target').value = t; }; };
   $('#m-go').onclick = async () => {
-    await api('POST', `/files/${id}/move`, { new_parent_id: $('#m-target').value.trim() || null });
+    await api('POST', `/nodes/${id}/move`, { new_parent_id: $('#m-target').value.trim() || null });
     toast('moved', true); await refreshKeep(id);
   };
 }
 async function refreshKeep(id) { await renderTree(); await selectNode(id); }
 
 function newForm(parentId) {
+  // Files always live inside a folder, so only folders can be created at the root.
   $('#right').innerHTML = `
     <h3>New node ${parentId ? `under <code>${parentId}</code>` : 'at root'}</h3>
     <div class="grid2">
       <div><label>title</label><input type="text" id="n-title"></div>
-      <div><label>kind</label><select id="n-kind"><option>file</option><option>folder</option></select></div>
+      <div><label>type</label><select id="n-type">${parentId ? '<option>file</option>' : ''}<option>folder</option></select></div>
+      <div><label>kind</label><select id="n-kind"></select></div>
     </div>
-    <label>content (markdown; optional for folders)</label><textarea id="n-content" rows="10"></textarea>
+    <div id="n-content-box"><label>content (markdown)</label><textarea id="n-content" rows="10"></textarea></div>
     <div class="row"><button class="primary" id="n-go">Create</button></div>`;
+  const sync = () => {
+    const type = $('#n-type').value;
+    $('#n-kind').innerHTML = kindOptions(type, 'manual'); $('#n-kind').value = 'manual';
+    $('#n-content-box').classList.toggle('hidden', type === 'folder');
+  };
+  $('#n-type').onchange = sync; sync();
   $('#n-go').onclick = async () => {
-    const kind = $('#n-kind').value, content = $('#n-content').value;
-    const n = await api('POST', '/files', { parent_id: parentId, kind, title: $('#n-title').value, content: content || (kind === 'folder' ? null : '') });
+    const type = $('#n-type').value;
+    const body = { parent_id: parentId, type, kind: $('#n-kind').value, title: $('#n-title').value };
+    if (type === 'file') body.content = $('#n-content').value;
+    const n = await api('POST', '/nodes', body);
     toast('created', true); await renderTree(); await selectNode(n.id);
   };
 }
@@ -360,17 +380,17 @@ async function openManifest(id, rerenderLeft = true) {
   // direct members -> display labels
   const labelOf = {};
   await Promise.all(members.map(async mem => {
-    if (mem.file_id) { const f = files.find(x => x.id === mem.file_id) || await api('GET', `/files/${mem.file_id}`).catch(() => null); labelOf[mem.id] = f ? `${f.kind === 'folder' ? '📁' : '📄'} ${f.title}` : `(missing file ${mem.file_id})`; }
+    if (mem.node_id) { const f = files.find(x => x.id === mem.node_id) || await api('GET', `/nodes/${mem.node_id}`).catch(() => null); labelOf[mem.id] = f ? `${f.type === 'folder' ? '📁' : '📄'} ${f.title}` : `(missing node ${mem.node_id})`; }
     else { const c = await api('GET', `/manifests/${mem.child_manifest_id}`).catch(() => null); labelOf[mem.id] = c ? `🗂 ${c.name}` : `(missing manifest ${mem.child_manifest_id})`; }
   }));
   $('#right').innerHTML = `
     <h3>${esc(m.name)}</h3><div class="meta">id <code>${m.id}</code> ${esc(m.description ?? '')}</div>
     <div class="sect">Members (${members.length}) — pick more from the left pane with ＋</div>
-    ${members.map(mem => `<div class="row" style="margin:2px 0"><span>${esc(labelOf[mem.id])}</span><button class="danger rm" data-file="${mem.file_id ?? ''}" data-child="${mem.child_manifest_id ?? ''}">remove</button></div>`).join('') || '<div class="meta">(none yet)</div>'}
+    ${members.map(mem => `<div class="row" style="margin:2px 0"><span>${esc(labelOf[mem.id])}</span><button class="danger rm" data-node="${mem.node_id ?? ''}" data-child="${mem.child_manifest_id ?? ''}">remove</button></div>`).join('') || '<div class="meta">(none yet)</div>'}
     <div class="sect">Resolved — everything agents see (${files.length})</div>
-    ${files.map(f => `<div>${f.kind === 'folder' ? '📁' : '📄'} ${esc(f.title)} <code class="meta">${f.id}</code></div>`).join('') || '<div class="meta">(nothing)</div>'}`;
+    ${files.map(f => `<div>${f.type === 'folder' ? '📁' : '📄'} ${esc(f.title)} <code class="meta">${f.id}</code></div>`).join('') || '<div class="meta">(nothing)</div>'}`;
   document.querySelectorAll('#right .rm').forEach(b => b.onclick = async () => {
-    await api('DELETE', `/manifests/${id}/members?${qs({ file_id: b.dataset.file, child_manifest_id: b.dataset.child })}`);
+    await api('DELETE', `/manifests/${id}/members?${qs({ node_id: b.dataset.node, child_manifest_id: b.dataset.child })}`);
     toast('removed', true); openManifest(id, false);
   });
   if (switching || rerenderLeft) await renderManifests();   // refresh ＋ buttons / selection for the new active manifest
@@ -387,7 +407,7 @@ $('#tab-files').onclick = () => setMode('files'); $('#tab-mf').onclick = () => s
 $('#show-deleted').onchange = () => setMode(mode);
 $('#f-go').onclick = async () => {
   const tags = $('#f-tags').value.split(',').map(s => s.trim()).filter(Boolean);
-  filterResults = await api('GET', `/files?${qs({tags, status: $('#f-status').value, include_deleted: showDel()})}`); renderTree();
+  filterResults = await api('GET', `/nodes?${qs({tags, status: $('#f-status').value, include_deleted: showDel()})}`); renderTree();
 };
 $('#f-clear').onclick = () => { filterResults = null; $('#f-tags').value = ''; $('#f-status').value = ''; renderTree(); };
 setMode('files');

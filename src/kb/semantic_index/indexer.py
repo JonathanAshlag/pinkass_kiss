@@ -1,10 +1,10 @@
 """Keeps the semantic index (`kb_chunks`) in step with the canonical `files` table.
 
-- `index_files(ids)`   -- for any ids a write touched: active nodes with content are
-                          (re)indexed incrementally; deleted / missing / content-less
-                          ones are unindexed. Never raises for a per-file problem.
+- `index_files(ids)`   -- for any ids a write touched: active files are
+                          (re)indexed incrementally; deleted / missing ones and folders
+                          are unindexed. Never raises for a per-file problem.
 - `unindex_files(ids)` -- drop every chunk of those files.
-- `reindex_all()`      -- rebuild from every active node with content, then remove
+- `reindex_all()`      -- rebuild from every active file, then remove
                           every chunk not (re)confirmed by this run ("full" cleanup).
 
 All three read the DB through their own sessions (`session_factory`, default
@@ -93,7 +93,7 @@ def index_files(
     session_factory=None,
 ) -> IndexResult:
     """(Re)index the given nodes. Accepts any touched ids: ids that are soft-deleted,
-    missing, or have null/blank content are unindexed (counted in `num_deleted`);
+    missing, folders, or have blank content are unindexed (counted in `num_deleted`);
     the rest are indexed with `cleanup="incremental"`, so unchanged chunks are
     skipped and stale ones deleted. Per-file failures land in `failed`, never raise."""
     ids = list(dict.fromkeys(uuid.UUID(str(i)) for i in file_ids))
@@ -134,9 +134,9 @@ def unindex_files(file_ids: Iterable[uuid.UUID], *, store: IndexStore | None = N
 
 
 def reindex_all(*, store: IndexStore | None = None, session_factory=None) -> IndexResult:
-    """Rebuild the index from every active node with content, with "full" cleanup:
+    """Rebuild the index from every active file, with "full" cleanup:
     afterwards the index holds chunks only for those nodes (chunks of deleted,
-    content-less or vanished nodes are removed).
+    folders and vanished nodes are removed).
 
     Semantically `index(all_chunks, cleanup="full")`, but run file by file so one
     failing file doesn't abort the rebuild: each file is indexed incrementally, then

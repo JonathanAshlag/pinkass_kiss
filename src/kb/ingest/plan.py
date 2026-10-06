@@ -15,16 +15,16 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from kb import service
-from kb.storage.models import File
+from kb.storage.models import Node
 
 
 @dataclass
 class PlannedNode:
     path: str  # "" is the plan's root; "guide/setup.md" is two levels below it
-    kind: str = "file"  # "file" | "folder"
+    type: str = "file"  # "file" | "folder"
     title: str | None = None  # default: the last path segment
-    content: str | None = None
-    # Other `files` columns (aliases, description, tags, sources, ...).
+    content: str | None = None  # required for files; folders have none
+    # Other columns of `files` / `folders` (kind, aliases, description, tags, sources, ...).
     fields: dict[str, Any] = field(default_factory=dict)
 
 
@@ -34,27 +34,32 @@ def materialize(
     *,
     parent_id: uuid.UUID | None = None,
     folder_fields: dict[str, Any] | None = None,
-) -> dict[str, File]:
+) -> dict[str, Node]:
     """
     Creates every planned node, plus any implied ancestor folders (with `folder_fields`),
     under `parent_id`, which must be an existing folder (None = the KB root). The plan
-    must contain its root (""). Returns {path: node}, in creation order. Never commits.
+    must contain its root (""), which must be a folder; files need content, folders
+    can't have any. Returns {path: node}, in creation order. Never commits.
     """
-    if parent_id is not None:
-        parent = service.get_node(session, parent_id)
-        if parent is None or parent.kind != "folder":
-            raise ValueError(f"no such folder: {parent_id}")
+    if parent_id is not None and service.get_folder(session, parent_id) is None:
+        raise ValueError(f"no such folder: {parent_id}")
     planned: dict[str, PlannedNode] = {}
     for node in plan:
         if node.path in planned:
             raise ValueError(f"path planned twice: {node.path!r}")
+        if node.type == "folder" and node.content is not None:
+            raise ValueError(f"folders have no content: {node.path!r}")
+        if node.type == "file" and node.content is None:
+            raise ValueError(f"file has no content: {node.path!r}")
         planned[node.path] = node
     if "" not in planned:
         raise ValueError("plan has no root node (path '')")
+    if planned[""].type != "folder":
+        raise ValueError("the plan's root (path '') must be a folder")
 
-    created: dict[str, File] = {}
+    created: dict[str, Node] = {}
 
-    def ensure(path: str) -> File:
+    def ensure(path: str) -> Node:
         if path in created:
             return created[path]
         node = planned.get(path) or PlannedNode(path, "folder", fields=dict(folder_fields or {}))
@@ -62,14 +67,15 @@ def materialize(
             node_parent_id = parent_id
         else:
             node_parent_id = ensure(path.rpartition("/")[0]).id
-        created[path] = service.create_file(
-            session,
-            parent_id=node_parent_id,
-            kind=node.kind,
-            title=node.title if node.title is not None else path.rpartition("/")[2],
-            content=node.content,
-            **node.fields,
-        )
+        title = node.title if node.title is not None else path.rpartition("/")[2]
+        if node.type == "folder":
+            created[path] = service.create_folder(
+                session, parent_id=node_parent_id, title=title, **node.fields
+            )
+        else:
+            created[path] = service.create_file(
+                session, parent_id=node_parent_id, title=title, content=node.content, **node.fields
+            )
         return created[path]
 
     for node in plan:

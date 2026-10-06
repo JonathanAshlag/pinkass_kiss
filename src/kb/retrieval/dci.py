@@ -15,24 +15,26 @@ an agent's context. Outputs are plain text in familiar CLI shapes, ready to hand
 agent as a tool result.
 
 What gets searched/read is a node's *virtual file*: its frontmatter rendered as a
-YAML block, followed by its markdown `content` (see `render_virtual_file`), so a
-search for a tag, alias or description hits the same way it would in an OKF bundle
-on disk.
+YAML block, followed by its markdown `content` (empty for folders, which only carry
+organizational fields), so a search for a tag, alias or description hits the same way
+it would in an OKF bundle on disk. The rendering and its line coordinates are owned by
+`kb.okf.render_virtual_file`, the same text the semantic index numbers its chunk lines
+in, so `search_lines`/`read_lines` line numbers and semantic-search hits agree.
 
 Paths are derived at read time, not stored: `/`-joined node titles from the KB root
 down. Since titles aren't unique among siblings, colliding titles get a `~<first 8
 hex of id>` suffix. Every tool that takes a path also accepts a raw node uuid.
 """
 
-import json
 import re
 import uuid
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from kb.okf import render_virtual_file
 from kb.storage import dal
-from kb.storage.models import File
+from kb.storage.models import File, Folder, Node
 
 DEFAULT_MAX_CHARS = 20_000
 MAX_CHARS_LIMIT = 50_000
@@ -71,10 +73,10 @@ class _Scope:
             self._path_of(node)
         self.by_path = {self._paths[node_id]: node for node_id, node in self.nodes.items()}
 
-    def path(self, node: File) -> str:
+    def path(self, node: Node) -> str:
         return self._paths[node.id]
 
-    def lookup(self, path_or_id: str) -> File:
+    def lookup(self, path_or_id: str) -> Node:
         """A node in scope by path or uuid; ValueError if it isn't in this manifest."""
         key = path_or_id.strip().strip("/")
         node = self.by_path.get(key)
@@ -87,14 +89,14 @@ class _Scope:
             raise ValueError(f"no such path in manifest: {path_or_id}")
         return node
 
-    def _path_of(self, node: File) -> str:
+    def _path_of(self, node: Node) -> str:
         if node.id not in self._paths:
-            parent = self._session.get(File, node.parent_id) if node.parent_id else None
+            parent = self._session.get(Folder, node.parent_id) if node.parent_id else None
             prefix = f"{self._path_of(parent)}/" if parent is not None else ""
             self._paths[node.id] = prefix + self._segment(node)
         return self._paths[node.id]
 
-    def _segment(self, node: File) -> str:
+    def _segment(self, node: Node) -> str:
         if node.id not in self._segments:
             siblings = dal.list_children(self._session, node.parent_id)
             if node not in siblings:
@@ -113,36 +115,6 @@ class _Scope:
 
 def _title_segment(title: str) -> str:
     return title.replace("/", "-").strip() or "untitled"
-
-
-def render_virtual_file(node: File) -> str:
-    """
-    The text the DCI tools see for `node`: a YAML frontmatter block (values written
-    as JSON, which is valid YAML) followed by the markdown content. Empty optional
-    fields are omitted.
-    """
-    fields: dict[str, object] = {
-        "id": str(node.id),
-        "kind": node.kind,
-        "title": node.title,
-        "status": node.status,
-    }
-    if node.aliases:
-        fields["aliases"] = node.aliases
-    if node.description:
-        fields["description"] = node.description
-    if node.tags:
-        fields["tags"] = node.tags
-    if node.stale_after is not None:
-        fields["stale_after"] = node.stale_after.isoformat()
-    if node.sources:
-        fields["sources"] = node.sources
-
-    frontmatter = "\n".join(
-        f"{key}: {json.dumps(value, ensure_ascii=False)}" for key, value in fields.items()
-    )
-    body = node.content or ""
-    return f"---\n{frontmatter}\n---\n{body}"
 
 
 def _bounded(lines: list[str], max_chars: int, hint: str) -> ToolOutput:
@@ -188,8 +160,9 @@ def list_paths(
     nodes whose parent is out of scope); with `under` (a path or uuid), that node's
     in-scope children. `recursive=True` lists whole subtrees instead.
 
-    One line per node: `<path>[/]  [<status>]  <description>` -- folders end in `/`,
-    and description is omitted when unset.
+    One line per node: `<path>  [<status>]  <description>` for files and
+    `<path>/  <description>` for folders (which have no status); description is omitted
+    when unset.
     """
     scope = _Scope(session, manifest_id)
 
@@ -199,7 +172,7 @@ def list_paths(
         root = scope.lookup(under)
         frontier = [n for n in scope.nodes.values() if n.parent_id == root.id]
 
-    listed: list[File] = []
+    listed: list[Node] = []
     while frontier:
         listed.extend(frontier)
         if not recursive:
@@ -209,7 +182,10 @@ def list_paths(
 
     lines = []
     for node in sorted(listed, key=scope.path):
-        line = scope.path(node) + ("/" if node.kind == "folder" else "") + f"  [{node.status}]"
+        if isinstance(node, Folder):
+            line = scope.path(node) + "/"
+        else:
+            line = scope.path(node) + f"  [{node.status}]"
         if node.description:
             line += f"  {node.description}"
         lines.append(line)

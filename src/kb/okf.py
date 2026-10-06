@@ -3,15 +3,21 @@ OKF document layer: frontmatter-aware behavior built on top of the DAL.
 
 Depends only on kb.storage.models, never on kb.storage.dal -- kb.storage.dal doesn't import this
 module at all, so there's no circularity to worry about either way.
+
+Also owns the *virtual file*: the one text rendering of a node (frontmatter block +
+markdown body) and its line coordinates. DCI's `search_lines`/`read_lines` read it,
+and the semantic index numbers its chunk lines in it, so both agree by construction
+(see `render_virtual_file` / `body_line_offset`).
 """
 
+import json
 import re
 import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from kb.storage.models import File
+from kb.storage.models import File, Folder, Node
 
 _LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 _INTERNAL_LINK_PREFIX = "db://files/"
@@ -46,7 +52,7 @@ def find_broken_links(session: Session, node_id: uuid.UUID) -> list[str]:
         except ValueError:
             broken.append(target)
             continue
-        target_node = session.get(File, target_id)
+        target_node = session.get(File, target_id) or session.get(Folder, target_id)
         if target_node is None or target_node.deleted_at is not None:
             broken.append(target)
     return broken
@@ -135,3 +141,62 @@ def is_stale(node: File, *, now: datetime | None = None) -> bool:
     if node.stale_after is None:
         return False
     return (now or datetime.now(timezone.utc)) >= node.stale_after
+
+
+# --------------------------------------------------------------------------
+# Virtual file: the rendered text agents see, and its line coordinates
+# --------------------------------------------------------------------------
+
+
+def render_frontmatter(node: Node) -> str:
+    """
+    The frontmatter part of `node`'s virtual file: `---`, one `key: <JSON value>` line
+    per field (JSON is valid YAML), `---`, and the newline that ends that line -- so
+    the body starts right after it. Empty optional fields are omitted, which means the
+    block's line count depends on which fields are set.
+    """
+    is_file = isinstance(node, File)
+    fields: dict[str, object] = {
+        "id": str(node.id),
+        "type": "file" if is_file else "folder",
+        "kind": node.kind,
+        "title": node.title,
+    }
+    if is_file:
+        fields["status"] = node.status
+        if node.aliases:
+            fields["aliases"] = node.aliases
+    if node.description:
+        fields["description"] = node.description
+    if node.tags:
+        fields["tags"] = node.tags
+    if is_file and node.stale_after is not None:
+        fields["stale_after"] = node.stale_after.isoformat()
+    if is_file and node.sources:
+        fields["sources"] = node.sources
+
+    lines = "\n".join(
+        f"{key}: {json.dumps(value, ensure_ascii=False)}" for key, value in fields.items()
+    )
+    return f"---\n{lines}\n---\n"
+
+
+def virtual_file_body(node: Node) -> str:
+    """The body part of `node`'s virtual file: a file's markdown content, `""` for a folder."""
+    return (node.content or "") if isinstance(node, File) else ""
+
+
+def render_virtual_file(node: Node) -> str:
+    """
+    The text the DCI tools see for `node` (and whose line numbers semantic-search hits
+    use): `render_frontmatter(node)` followed by `virtual_file_body(node)`.
+    """
+    return render_frontmatter(node) + virtual_file_body(node)
+
+
+def body_line_offset(node: Node) -> int:
+    """
+    Number of lines of `node`'s virtual file that precede its body, so body line `i`
+    (1-based) is virtual-file line `body_line_offset(node) + i`.
+    """
+    return render_frontmatter(node).count("\n")

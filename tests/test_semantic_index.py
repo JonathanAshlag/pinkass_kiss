@@ -124,11 +124,14 @@ def db(migrated_db):
         yield s
 
 
-def make(db, *, kind="file", content=None, title=None, parent_id=None, **cols):
+def make(db, *, content="", title=None, parent_id=None, **cols):
+    """A file (in a fresh root folder unless `parent_id` is given); returns its id."""
     from kb import service
 
+    if parent_id is None:
+        parent_id = service.create_folder(db, parent_id=None, title=f"f-{uuid.uuid4().hex[:8]}").id
     node = service.create_file(
-        db, parent_id=parent_id, kind=kind, title=title or f"n-{uuid.uuid4().hex[:8]}", content=content, **cols
+        db, parent_id=parent_id, title=title or f"n-{uuid.uuid4().hex[:8]}", content=content, **cols
     )
     db.commit()
     return node.id
@@ -159,7 +162,7 @@ def test_create_then_index(db, store):
     assert result.failed == []
     assert result.num_added == len(rows) > 1
     assert rows[0].heading == "Top"
-    assert rows[0].start_line == 7  # 6 frontmatter lines (---, id, kind, title, status, ---)
+    assert rows[0].start_line == 8  # 7 frontmatter lines (---, id, type, kind, title, status, ---)
     assert all(r.start_line <= r.end_line for r in rows)
 
 
@@ -243,15 +246,15 @@ def test_missing_id_is_harmless(store):
     assert result.failed == [] and result.num_deleted == 0
 
 
-def test_folders_indexed_only_with_content(db, store):
+def test_folders_are_never_indexed(db, store):
+    from kb import service
     from kb.semantic_index.indexer import index_files
 
-    with_content = make(db, kind="folder", content="# About\n\nwhat lives here")
-    empty = make(db, kind="folder")
-    result = index_files([with_content, empty])
-    assert result.failed == []
-    assert len(chunks_of(with_content)) == 1
-    assert chunks_of(empty) == []
+    folder = service.create_folder(db, parent_id=None, title="box", description="what lives here")
+    db.commit()
+    result = index_files([folder.id])
+    assert result.failed == [] and result.num_added == 0
+    assert chunks_of(folder.id) == []
 
 
 def test_embedding_failure_is_isolated(db, failing_store):
@@ -302,7 +305,7 @@ def test_line_ranges_round_trip_through_read_lines(db, store):
     content = "# Paper\n\nintro\n\n" + "".join(section(i, words=100) for i in range(6))
     fid = make(db, content=content, tags=["t1", "t2"], description="desc", aliases=["P"])
     m = service.create_manifest(db, f"idx-{uuid.uuid4().hex[:8]}")
-    service.add_manifest_member(db, m.id, file_id=fid)
+    service.add_manifest_member(db, m.id, node_id=fid)
     db.commit()
     index_files([fid])
 

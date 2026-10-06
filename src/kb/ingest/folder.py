@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from kb.storage.blobs import get_blob_store, guess_mime, put_original
 from kb.ingest.processors.base import ProcessorRegistry, default_registry
 from kb.ingest.plan import PlannedNode, materialize
+from kb.storage.models import Folder
 
 
 @dataclass
@@ -151,8 +152,8 @@ def ingest_folder(
     created = materialize(session, plan.nodes, parent_id=parent_id, folder_fields=plan.folder_fields)
     return IngestReport(
         root_id=created[""].id,
-        files_created=[n.id for n in created.values() if n.kind == "file"],
-        folders_created=[n.id for n in created.values() if n.kind == "folder"],
+        files_created=[n.id for n in created.values() if not isinstance(n, Folder)],
+        folders_created=[n.id for n in created.values() if isinstance(n, Folder)],
         skipped=plan.skipped,
         failed=plan.failed,
     )

@@ -1,19 +1,20 @@
 """Turns KB nodes into LangChain `Document`s and splits them into line-addressed chunks.
 
-`FileNodeLoader` yields one `Document` per active node with content; `split_documents`
+`FileNodeLoader` yields one `Document` per active file (folders have no content and
+are never indexed); `split_documents`
 cuts those into chunks whose metadata (`file_id`, `heading`, `start_line`, `end_line`,
 `title`) matches the `kb_chunks` columns in `kb.semantic_index.vectorstore`.
 
 Decisions:
 
 - **What gets embedded: the markdown body, not the frontmatter.** A node's virtual file
-  (`kb.retrieval.dci.render_virtual_file`) is a YAML frontmatter block followed by
-  `node.content`. Only the content is indexed, so retagging, a status change or a
-  description edit doesn't re-embed anything (frontmatter is reachable via
-  `search_lines` already). The loader records how many lines precede the body in the
-  rendered file (`line_offset`, derived from `render_virtual_file` itself, not
-  re-implemented), and the line numbers on every chunk are **line numbers in the
-  rendered virtual file**, so they go straight into
+  (`kb.okf.render_virtual_file`, the single owner of that rendering and its line
+  coordinates) is a YAML frontmatter block followed by `node.content`. Only the content
+  is indexed, so retagging, a status change or a description edit doesn't re-embed
+  anything (frontmatter is reachable via `search_lines` already). The loader records
+  how many lines precede the body in the rendered file (`line_offset`, from
+  `kb.okf.body_line_offset`), and the line numbers on every chunk are **line numbers in
+  the rendered virtual file**, so they go straight into
   `read_lines(path, offset=start_line, limit=end_line - start_line + 1)`.
   Caveat: if the frontmatter changes *line count* (e.g. tags go from unset to set,
   adding a `tags:` line), every chunk's line numbers shift and all of that file's
@@ -33,7 +34,7 @@ Decisions:
   heading line includes that heading. Headings inside fenced code blocks are ignored.
   `None` when no heading precedes the chunk.
 
-Imports kb.storage.db / kb.retrieval.dci / kb.storage.models only (kb.service will import this module).
+Imports kb.storage.db / kb.okf / kb.storage.models only (kb.service will import this module).
 """
 
 from __future__ import annotations
@@ -47,8 +48,8 @@ from langchain_core.documents import Document
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 from sqlalchemy import select
 
+from kb.okf import body_line_offset
 from kb.storage.db import SessionLocal
-from kb.retrieval.dci import render_virtual_file
 from kb.storage.models import File
 
 DEFAULT_CHUNK_SIZE = 1500
@@ -60,18 +61,10 @@ _HEADING_RE = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
 _FENCE_RE = re.compile(r"^ {0,3}(```|~~~)")
 
 
-def body_line_offset(node: File) -> int:
-    """Number of lines in the rendered virtual file that precede `node.content`."""
-    rendered = render_virtual_file(node)
-    body = node.content or ""
-    assert rendered.endswith(body), "render_virtual_file no longer ends with the content"
-    return rendered[: len(rendered) - len(body)].count("\n")
-
-
 class FileNodeLoader(BaseLoader):
-    """One `Document` per active (non-deleted) node with non-null content, files and
-    folders alike. `file_ids=None` loads every such node; otherwise only those ids
-    (ids that are missing, deleted or content-less are silently not yielded).
+    """One `Document` per active (non-deleted) file. `file_ids=None` loads every such
+    file; otherwise only those ids (ids that are missing, deleted or folders are
+    silently not yielded).
 
     `page_content` is `node.content`; metadata is `file_id` (str), `title`, and
     `line_offset` (lines before the content in the rendered virtual file, consumed
@@ -83,7 +76,7 @@ class FileNodeLoader(BaseLoader):
         self.session_factory = session_factory
 
     def lazy_load(self) -> Iterator[Document]:
-        stmt = select(File).where(File.deleted_at.is_(None), File.content.is_not(None))
+        stmt = select(File).where(File.deleted_at.is_(None))
         if self.file_ids is not None:
             if not self.file_ids:
                 return

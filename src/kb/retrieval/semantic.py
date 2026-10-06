@@ -4,10 +4,11 @@ Semantic (embedding) search over the derived `kb_chunks` index, scoped to a mani
 The canonical data stays in `files`; this module only reads chunks that
 `kb.semantic_index.indexer` derived from it. Every hit is mapped back to the DCI path of its file
 (the same path `kb.retrieval.dci.read_lines` accepts), and its `start_line`/`end_line` are line
-numbers in the virtual file DCI renders -- so an agent can go straight from a hit to
+numbers in the virtual file `kb.okf.render_virtual_file` renders (the one owner of that text
+and its line coordinates, which DCI reads too) -- so an agent can go straight from a hit to
 `read_lines(path, offset=start_line)`.
 
-Scope = the content-bearing nodes the manifest resolves to (`kb.storage.dal.resolve_manifest`),
+Scope = the files the manifest resolves to (`kb.storage.dal.resolve_manifest`),
 optionally intersected with a tags/status `query_metadata` filter. Soft-deleted nodes
 drop out of the scope even if their chunks haven't been unindexed yet.
 
@@ -27,6 +28,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from kb.storage import dal
+from kb.storage.models import File
 from kb.retrieval.dci import _Scope
 
 SNIPPET_CHARS = 240
@@ -38,7 +40,7 @@ class SearchHit:
     path: str  # DCI path, valid for read_lines/search_lines in the same manifest
     title: str
     heading: str | None
-    start_line: int  # 1-based, in the DCI-rendered virtual file
+    start_line: int  # 1-based, in the virtual file (kb.okf.render_virtual_file)
     end_line: int
     snippet: str
     score: float  # cosine similarity (1 - cosine distance): higher = closer, in [-1, 1]
@@ -59,13 +61,13 @@ def semantic_search(
     status: str | None = None,
     store=None,
 ) -> list[SearchHit]:
-    """The `k` chunks closest to `query` among the manifest's content-bearing nodes
+    """The `k` chunks closest to `query` among the manifest's files
     (optionally only those with all `tags` / with `status`), best first. ValueError for
     an unknown manifest or k < 1. Empty scope -> [] without touching the index."""
     if k < 1:
         raise ValueError("k must be >= 1")
     scope = _Scope(session, manifest_id)  # ValueError on unknown manifest
-    in_scope = {node_id: node for node_id, node in scope.nodes.items() if node.content is not None}
+    in_scope = {node_id: node for node_id, node in scope.nodes.items() if isinstance(node, File)}
     if tags or status is not None:
         allowed = {n.id for n in dal.query_metadata(session, tags=tags, status=status)}
         in_scope = {node_id: node for node_id, node in in_scope.items() if node_id in allowed}

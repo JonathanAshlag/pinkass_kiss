@@ -47,30 +47,51 @@ class KB:
 
         self.store = store
         self.session = SessionLocal()
-        self.file_ids: list[uuid.UUID] = []
+        self.node_ids: list[uuid.UUID] = []  # files and folders, cleaned up in close()
         self.manifest_ids: list[uuid.UUID] = []
+        self._root = None
 
-    def node(self, title, content="", *, parent=None, kind="file", **fields):
+    @property
+    def root(self):
+        """A root folder for files created without a parent (files can't be roots)."""
+        if self._root is None:
+            self._root = self.folder(f"kbtest-{uuid.uuid4().hex[:8]}")
+        return self._root
+
+    def path(self, *segments):
+        """The DCI path of a node under `root`."""
+        return "/".join([self.root.title, *segments])
+
+    def node(self, title, content="", *, parent=None, **fields):
         from kb import service
 
         node = service.create_file(
             self.session,
-            parent_id=parent.id if parent is not None else None,
-            kind=kind,
+            parent_id=(parent or self.root).id,
             title=title,
-            content=content if kind == "file" or content else None,
+            content=content,
             **fields,
         )
         self.session.commit()
-        self.file_ids.append(node.id)
+        self.node_ids.append(node.id)
         return node
+
+    def folder(self, title, *, parent=None, **fields):
+        from kb import service
+
+        folder = service.create_folder(
+            self.session, parent_id=parent.id if parent is not None else None, title=title, **fields
+        )
+        self.session.commit()
+        self.node_ids.append(folder.id)
+        return folder
 
     def manifest(self, *members):
         from kb import service
 
         m = service.create_manifest(self.session, f"test-search-{uuid.uuid4().hex[:8]}")
         for member in members:
-            service.add_manifest_member(self.session, m.id, file_id=member.id)
+            service.add_manifest_member(self.session, m.id, node_id=member.id)
         self.session.commit()
         self.manifest_ids.append(m.id)
         return m
@@ -78,7 +99,7 @@ class KB:
     def chunk(self, node, line_text, heading=None):
         """Seed one chunk whose text is `line_text`, located where that line sits in
         the DCI-rendered virtual file (so start_line matches read_lines)."""
-        from kb.retrieval.dci import render_virtual_file
+        from kb.okf import render_virtual_file
 
         lines = render_virtual_file(node).split("\n")
         line_no = lines.index(line_text) + 1
@@ -113,10 +134,11 @@ class KB:
                 self.session.execute(
                     text("DELETE FROM manifests WHERE id = ANY(:ids)"), {"ids": self.manifest_ids}
                 )
-            if self.file_ids:  # kb_chunks rows go with them (FK ON DELETE CASCADE)
-                self.session.execute(
-                    text("DELETE FROM files WHERE id = ANY(:ids)"), {"ids": self.file_ids}
-                )
+            if self.node_ids:  # kb_chunks rows go with the files (FK ON DELETE CASCADE)
+                for table in ("files", "folders"):  # files first: they reference folders
+                    self.session.execute(
+                        text(f"DELETE FROM {table} WHERE id = ANY(:ids)"), {"ids": self.node_ids}
+                    )
         self.session.close()
 
 
@@ -149,11 +171,11 @@ def test_manifest_scoping(kb):
     # the out-of-scope chunk is an exact match for this query, yet never appears
     hits = search(kb, m, "the secret recipe is in here too", k=10)
     assert [h.file_id for h in hits] == [inside.id]
-    assert hits[0].path == "inside" and hits[0].title == "inside"
+    assert hits[0].path == kb.path("inside") and hits[0].title == "inside"
 
 
 def test_tag_and_status_filters(kb):
-    folder = kb.node("box", kind="folder")
+    folder = kb.folder("box")
     a = kb.node("a", "alpha line", parent=folder, tags=["x", "y"], status="stable")
     b = kb.node("b", "beta line", parent=folder, tags=["x"], status="draft")
     c = kb.node("c", "gamma line", parent=folder, tags=["z"], status="stable")
@@ -201,7 +223,7 @@ def test_soft_deleted_file_excluded(kb):
 def test_hit_path_roundtrips_into_read_lines(kb):
     from kb import service
 
-    folder = kb.node("papers", kind="folder")
+    folder = kb.folder("papers")
     doc = kb.node("doc.md", "# Methods\n\nwe fine-tune on wikitext\n\nmore text", parent=folder)
     line_no = kb.chunk(doc, "we fine-tune on wikitext", heading="Methods")
     m = kb.manifest(folder)
@@ -222,7 +244,7 @@ def test_hit_path_roundtrips_into_read_lines(kb):
 def test_empty_scope_returns_nothing(kb):
     from kb.retrieval import semantic as search_mod
 
-    folder = kb.node("only-a-folder", kind="folder")  # no content -> not searchable
+    folder = kb.folder("only-a-folder")  # no files -> nothing searchable
     m_folder = kb.manifest(folder)
     m_empty = kb.manifest()
 
@@ -262,7 +284,7 @@ def test_narrow_manifest_gets_its_hits_among_many_files(kb):
     from kb.semantic_index.vectorstore import _iterative_hnsw_options
 
     assert "hnsw.iterative_scan = relaxed_order" in _iterative_hnsw_options().to_parameter()
-    noise_root = kb.node("noise", kind="folder")
+    noise_root = kb.folder("noise")
     noise_lines = []
     for i in range(300):
         node = kb.node(f"n{i}", f"noise line {i}", parent=noise_root)
@@ -310,7 +332,7 @@ def test_semantic_route(kb, client):
     assert r.status_code == 200, r.text
     (hit,) = r.json()
     assert hit["file_id"] == str(doc.id)
-    assert (hit["path"], hit["heading"], hit["start_line"]) == ("route-doc", "H", line_no)
+    assert (hit["path"], hit["heading"], hit["start_line"]) == (kb.path("route-doc"), "H", line_no)
 
     r = client.get(f"/manifests/{m.id}/semantic", params={"q": "x", "tags": ["absent"]})
     assert r.status_code == 200 and r.json() == []
@@ -356,7 +378,7 @@ def recorder(monkeypatch, kb):
             seen = {}
             for fid in file_ids:
                 node = service.get_node(fresh, fid, include_deleted=True)
-                seen[fid] = None if node is None else (node.content, node.deleted_at is not None)
+                seen[fid] = None if node is None else (getattr(node, "content", None), node.deleted_at is not None)
         calls.append((list(file_ids), seen))
 
     monkeypatch.setattr(service, "index_files", fake_index_files)
@@ -364,30 +386,33 @@ def recorder(monkeypatch, kb):
 
 
 def test_index_hook_runs_after_commit(kb, client, recorder):
-    r = client.post("/files", json={"kind": "folder", "title": "hook-root"})
+    r = client.post("/nodes", json={"type": "folder", "title": "hook-root"})
     assert r.status_code == 201
     root = uuid.UUID(r.json()["id"])
-    kb.file_ids.append(root)
-    r = client.post("/files", json={"parent_id": str(root), "title": "hook-doc", "content": "v1"})
+    kb.node_ids.append(root)
+    r = client.post("/nodes", json={"parent_id": str(root), "title": "hook-doc", "content": "v1"})
     doc = uuid.UUID(r.json()["id"])
-    kb.file_ids.append(doc)
+    kb.node_ids.append(doc)
     assert recorder[-1] == ([doc], {doc: ("v1", False)})
 
-    client.patch(f"/files/{doc}", json={"content": "v2"})
+    client.patch(f"/nodes/{doc}", json={"content": "v2"})
     assert recorder[-1] == ([doc], {doc: ("v2", False)})
 
     # move: no reindex
     n_calls = len(recorder)
-    client.post(f"/files/{doc}/move", json={"new_parent_id": None})
-    client.post(f"/files/{doc}/move", json={"new_parent_id": str(root)})
+    assert client.post(f"/nodes/{doc}/move", json={"new_parent_id": str(kb.root.id)}).status_code == 200
+    assert client.post(f"/nodes/{doc}/move", json={"new_parent_id": str(root)}).status_code == 200
     assert len(recorder) == n_calls
 
     # cascade delete: the folder and its (active) descendants, all seen as deleted
-    assert client.delete(f"/files/{root}").status_code == 204
+    assert client.delete(f"/nodes/{root}").status_code == 204
     ids, seen = recorder[-1]
     assert set(ids) == {root, doc} and all(deleted for _, deleted in seen.values())
 
-    client.post(f"/files/{doc}/restore")
+    # restore is single-node, and a node's folder must be restored first
+    assert client.post(f"/nodes/{doc}/restore").status_code == 422
+    assert client.post(f"/nodes/{root}/restore").status_code == 200
+    assert client.post(f"/nodes/{doc}/restore").status_code == 200
     assert recorder[-1] == ([doc], {doc: ("v2", False)})
 
 
@@ -400,7 +425,7 @@ def test_index_hook_on_ingest(kb, client, recorder):
     assert r.status_code == 201, r.text
     body = r.json()
     created = {uuid.UUID(i) for i in [body["root_id"], *body["files_created"], *body["folders_created"]]}
-    kb.file_ids.extend(created)
+    kb.node_ids.extend(created)
     ids, seen = recorder[-1]
     assert set(ids) == created and all(v is not None for v in seen.values())
 
@@ -414,15 +439,15 @@ def test_index_hook_failure_never_fails_request(kb, client, monkeypatch):
         raise RuntimeError("embeddings server down")
 
     monkeypatch.setattr(service, "index_files", boom)
-    r = client.post("/files", json={"title": "still-created", "content": "x"})
+    r = client.post("/nodes", json={"parent_id": str(kb.root.id), "title": "still-created", "content": "x"})
     assert r.status_code == 201
-    kb.file_ids.append(uuid.UUID(r.json()["id"]))
+    kb.node_ids.append(uuid.UUID(r.json()["id"]))
 
 
 def test_index_hook_disabled_by_env(kb, client, recorder, monkeypatch):
     monkeypatch.setenv("KB_AUTO_INDEX", "0")
-    r = client.post("/files", json={"title": "no-index", "content": "x"})
-    kb.file_ids.append(uuid.UUID(r.json()["id"]))
+    r = client.post("/nodes", json={"parent_id": str(kb.root.id), "title": "no-index", "content": "x"})
+    kb.node_ids.append(uuid.UUID(r.json()["id"]))
     assert recorder == []
 
 
@@ -441,7 +466,7 @@ def test_agent_semantic_search_tool(kb):
     tools = AgentTools(m.id)
     out = tools.semantic_search("we train for ten epochs", k=3)
     first, snippet, *_, hint = out.split("\n")
-    assert first == f"agent-doc:{line_no}-{line_no} [Setup] (1.00)"
+    assert first == f"{kb.path('agent-doc')}:{line_no}-{line_no} [Setup] (1.00)"
     assert snippet.strip() == "we train for ten epochs"
     assert "read_lines" in hint
     assert AgentTools(uuid.uuid4()).semantic_search("x").startswith("error:")
@@ -464,7 +489,7 @@ def test_agent_semantic_search_tool(kb):
 def test_index_files_roundtrip(kb):
     from kb import service
 
-    folder = kb.node("synced", kind="folder")
+    folder = kb.folder("synced")
     doc = kb.node(
         "paper.md",
         "# Intro\n\nTransformers are great.\n\n## Data\n\nWe use the Penn Treebank corpus.",

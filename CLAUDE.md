@@ -12,7 +12,7 @@ this project" below for what was deliberately adopted, adapted, or skipped.
 ## Architecture: three layers
 
 1. **Postgres DAL / storage layer** — **built.**
-   Owns the virtual filesystem: nodes/files, parent-child hierarchy, generic metadata,
+   Owns the virtual filesystem: folders and files (two tables), parent-child hierarchy, generic metadata,
    timestamps, soft delete, and "manifests" (curated per-agent file lists). Exposes
    clean primitives (`get_node`, `list_children`, `create_file`, `move_node`,
    `delete_node`, `get_content`, `query_metadata`, plus manifest operations). Doesn't
@@ -27,10 +27,12 @@ this project" below for what was deliberately adopted, adapted, or skipped.
    (`is_stale`).
 
 3. **KB service / CRUD API** — **built.** `src/kb/service.py`: a thin passthrough
-   chokepoint over the DAL (plus one real piece of logic, `get_warnings`) that every
+   chokepoint over the DAL (plus two real pieces of logic: `get_warnings`, and the
+   `kb.policy` permission check on every mutation) that every
    consumer — REST API, agents, ingestion jobs — goes through instead of calling
    `kb.storage.dal` directly. `src/kb/api/app.py`: a FastAPI REST surface over it. Still
-   explicitly deferred: authz, manifest boundaries beyond storage, concurrency checks,
+   explicitly deferred: authn (the actor is just a `"human"|"agent"` argument), agent
+   write tools, manifest boundaries beyond storage, concurrency checks,
    real validation hooks (constraint violations currently surface as a raw 500).
 
 4. **Semantic index** — **built.** `src/kb/semantic_index/`: a *derived* pgvector index
@@ -49,10 +51,12 @@ and goes **out** through `service` → `api/` / `retrieval/`.
 src/kb/
   service.py          the chokepoint every consumer goes through; imports storage.dal, okf,
                       retrieval.dci (semantic_index/retrieval.semantic/storage.blobs lazily)
-  okf.py              layer 2: advisory OKF checks; imports only storage.models, never dal
+  okf.py              layer 2: advisory OKF checks + the virtual file (render_virtual_file,
+                      body_line_offset); imports only storage.models, never dal
+  policy.py           who may do what: folder/file kinds + agent lock; pure, imports only storage.models
   storage/            layer 1: canonical data
     db.py             Base, engine, SessionLocal (reads DATABASE_URL from env)
-    models.py         SQLAlchemy models: File, Manifest, ManifestMember
+    models.py         SQLAlchemy models: Folder, File (Node = File | Folder), Manifest, ManifestMember
     dal.py            the DAL primitives (see below); does not import kb.okf
     blobs.py          raw-original storage (S3 / local ByteStore), see "Folder ingestion"
   ingest/             data coming in; imports kb.service only (+ storage.blobs)
@@ -68,8 +72,8 @@ src/kb/
     chunking.py       files -> chunks (FileNodeLoader, splitter, line/heading annotator)
     indexer.py        index_files / unindex_files / reindex_all
   retrieval/          data going out to agents
-    dci.py            direct corpus interaction: list_paths / search_lines / read_lines,
-                      render_virtual_file (see reference/paper.md)
+    dci.py            direct corpus interaction: list_paths / search_lines / read_lines
+                      (see reference/paper.md)
     semantic.py       semantic_search over semantic_index, scoped by manifest
     agent_tools.py    AgentTools(manifest_id): both of the above as agent tools
   api/                REST surface (`uvicorn kb.api:app`); imports kb.service
@@ -96,30 +100,83 @@ Embeddings come from Ollama (`brew services start ollama`, model `nomic-embed-te
 
 To run migrations locally: `set -a && source .env && set +a && alembic upgrade head`
 (a local Postgres with a `pinkas` database, trust auth, is what's been used for
-verification so far — adjust `.env` if that changes). It is at `0002` (head) and its
-content has been indexed (`scripts/reindex.py --all`).
+verification so far — adjust `.env` if that changes). It is at `0002` (head) with the
+files/folders schema, holds only `scripts/seed_db.py` data, and that has been indexed
+(`scripts/reindex.py --all`). It was wiped for the split: the rewritten 0001 can't
+downgrade a pre-split DB, so the old objects were dropped by hand first.
 
 To run the API locally: `set -a && source .env && set +a && uvicorn kb.api:app
 --app-dir src --reload` — then see `/docs` for the interactive OpenAPI UI.
 
 ## Schema as it stands (migration 0001)
 
-### `files` — one row per node (file OR folder), self-referencing tree
+Folders and files are **two tables** (split from one `files` table with a
+`kind = file|folder` discriminator; 0001 was compacted again for it, no data
+migration). Ids come from `gen_random_uuid()` in both, so a bare node id is unambiguous;
+`dal.get_node` looks in `files` then `folders`. Each model has a `node_type` class
+attribute (`"file"` / `"folder"`), which the API exposes as `type`.
+
+### `folders` — tree containers, organizational fields only
+
+| Column | Notes |
+|---|---|
+| `id` | uuid PK |
+| `parent_id` | self-FK, `ON DELETE SET NULL`, nullable (NULL = root folder) |
+| `kind` | enum `folder_kind`: `skeleton` \| `manual` (default) \| `auto_updated`, see "Permissions" |
+| `agent_locked` | bool, default false; blocks agent writes to this folder **and the files directly in it** (not sub-folders) |
+| `title`, `description`, `tags[]` (GIN) | no content, sources, status or other OKF fields: knowledge lives in files |
+| `created_at`, `updated_at`, `deleted_at` | `trg_folders_set_updated_at`; soft delete like files |
+
+### `files` — one row per unit of knowledge, always inside a folder
 
 | Column | Notes |
 |---|---|
 | `id` | uuid PK, doubles as the OKF frontmatter `id` — no separate internal PK |
-| `parent_id` | self-FK, `ON DELETE SET NULL`; adjacency-list tree (no separate `name`/slug — `title` is the only label, no sibling-uniqueness constraint) |
-| `kind` | enum `file` \| `folder`. `folder` nodes may have `content = NULL` (pure container) or filled in (e.g. an explainer for what's inside) |
+| `parent_id` | FK → `folders`, **NOT NULL** (files are never roots), `ON DELETE RESTRICT` (deletes are soft anyway). No separate `name`/slug — `title` is the only label, no sibling-uniqueness constraint |
+| `kind` | enum `file_kind`: `manual` (default) \| `auto_updated` |
+| `agent_locked` | bool, default false |
 | `title`, `aliases[]`, `description`, `tags[]` (GIN indexed) | frontmatter fields, plain columns |
-| `sources`, `verified` | JSONB arrays, unnormalized, GIN indexed. `sources[].resource` can point externally (`okf://...`) or internally (`db://files/<id>`) — internal refs are **not** enforced as real FKs, just opaque text (deliberate — matches the project's lean bias) |
+| `sources`, `verified` | JSONB arrays, unnormalized, GIN indexed. `sources[].resource` can point externally (`okf://...`) or internally (`db://files/<id>`) — internal refs are **not** enforced as real FKs, just opaque text (deliberate — matches the project's lean bias). A `db://files/<id>` link may target a folder too |
 | `generated` | nullable JSONB **object** (not array) — OKF's `{by, at}` provenance field, added alongside `verified`. `NULL` = no provenance recorded |
 | `stale_after` | nullable `timestamptz` — an absolute instant, not a relative TTL, matching OKF's semantics exactly; `kb.okf.is_stale(node)` compares it against now |
 | `status` (enum `draft`\|`stable`\|`deprecated`) | lifecycle field |
-| `content` | markdown body; NOT NULL unless `kind='folder'` (`content_required_for_file` CHECK) |
+| `content` | markdown body, NOT NULL |
 | `deleted_at` | soft delete, NULL = active |
 | `blob_key`, `blob_size_bytes`, `blob_mime_type`, `blob_checksum` | the retained original of a converted file (PDF, ...): content-addressed key `sha256/<hex>` in the `kb.storage.blobs` store, checksum `sha256:<hex>`. NULL for markdown nodes or when no blob store is configured |
 | `created_at`, `updated_at` | `updated_at` kept current by a DB trigger (`trg_files_set_updated_at` → `set_updated_at()`), not the ORM |
+
+### Permissions (`src/kb/policy.py`)
+
+| Folder kind  | View | Create inside, edit | Rename, move, delete | Agent: create inside, edit | Agent: rename, move, delete |
+| ------------ | ---- | ------------------- | -------------------- | -------------------------- | --------------------------- |
+| Skeleton     | Yes  | Yes                 | **Locked**           | Yes, unless agent-locked   | **Locked**                  |
+| Manual       | Yes  | Yes                 | Yes                  | Yes, unless agent-locked   | Yes, unless agent-locked    |
+| Auto-updated | Yes  | **Locked**          | **Locked**           | **Locked**                 | **Locked**                  |
+
+- `check(actor, action, node, ancestors)` raises `PermissionDenied` (a plain
+  `Exception`, not `ValueError`) → API **403**. Actions: `CREATE_INSIDE`, `EDIT`,
+  `RENAME`, `MOVE`, `DELETE`, `SET_KIND`, `SET_AGENT_LOCK`.
+- A skeleton's lock covers **that folder only**: its contents (manual sub-folders,
+  files) are freely renamed/moved/deleted, and deleting a manual folder cascades
+  through skeletons inside it. The only way to change a skeleton is to switch its
+  `kind` to `manual` first (a separate update — checks run against the current state).
+- Files: locked if the file or its folder is `auto_updated`; files can't contain nodes.
+- Agents: same rules, plus `agent_locked` on the node, or on a file's own folder,
+  blocks every write (incl. creating/moving into a locked folder), and agents can never
+  change a kind or a lock. **Not recursive** (user's choice): a locked folder covers
+  itself and the files directly in it; its sub-folders and everything below them stay
+  open to agents.
+- **`auto_updated` is out of scope** (no auto-update jobs yet): it exists in the enums
+  and the policy, but `kb.service` refuses to set it on create or update. Only the DAL
+  can write it (tests do, to exercise the lock).
+- Service composes the checks: create → `CREATE_INSIDE` on the parent (plus `SET_KIND`/
+  `SET_AGENT_LOCK` on it for a non-default kind/lock); move → `MOVE` on the node +
+  `CREATE_INSIDE` on the destination; delete → `DELETE`; restore → `CREATE_INSIDE` on
+  the parent, which must be active (restoring into a deleted folder is a `FieldError`/422 —
+  restore the folder first); update → per **changed** field: `title` → `RENAME`, `kind` → `SET_KIND`,
+  `agent_locked` → `SET_AGENT_LOCK`, else `EDIT`.
+- Enforced now for `actor="human"` (the API's only actor). Agents have no write tools
+  yet; `actor="agent"` is wired through service for when they do.
 
 ### `manifests` / `manifest_members` — curated per-agent file lists
 
@@ -137,10 +194,12 @@ doesn't exist yet).
 
 - `manifests`: `id`, `name` (globally unique), `description`, `deleted_at`, timestamps
   (same trigger pattern as `files`)
-- `manifest_members`: polymorphic membership row — exactly one of `file_id` (a file
-  *or* directory node) or `child_manifest_id` (nested manifest) is set (CHECK
-  constraint), plus a CHECK blocking direct self-reference, and partial unique indexes
-  preventing duplicate membership rows
+- `manifest_members`: polymorphic membership row — exactly one of `file_id` (FK →
+  files), `folder_id` (FK → folders, a directory) or `child_manifest_id` (nested
+  manifest) is set (CHECK `num_nonnulls(...) = 1`), plus a CHECK blocking direct
+  self-reference, and partial unique indexes preventing duplicate membership rows.
+  Service/API take a single `node_id` and pick the column (`ManifestMember.node_id`
+  reads it back)
 - **Directory membership is dynamic**: including a folder means its whole subtree,
   resolved at read time — a file added under that folder *after* the manifest was
   created is automatically included, nothing needs re-syncing.
@@ -174,6 +233,9 @@ doesn't exist yet).
 - **DAL/OKF separation is code-level, not schema-level** — the `files` table is not
   split into a generic-DAL table + separate OKF-owned table. OKF-specific columns live
   directly on `files`, but `dal.py` still has zero import-level dependency on `okf.py`.
+  (The files/folders split is a different axis: knowledge vs. organization.)
+- **Folders hold no content** — text that describes a folder goes in a child file
+  (QASPER uses `00-overview.md`). Don't re-add `content` to folders without asking.
 - **Delete is soft, not hard** — `deleted_at`, with cascading soft-delete for folders
   (deleting a folder soft-deletes its whole subtree). `restore_node` only restores the
   single node, not descendants (deliberate — some descendants may have been
@@ -193,11 +255,17 @@ doesn't exist yet).
 All functions take an explicit `Session` — no global/module-level session usage. Reads
 default to excluding soft-deleted rows (`include_deleted=False`).
 
-Nodes: `get_node`, `list_children`, `list_descendants` (recursive CTE on `parent_id`,
-relied on by cascade-delete/cycle-detection), `create_file`, `update_node`, `move_node`
-(raises `TreeCycleError` if the move would place a node under its own descendant),
-`delete_node` (cascading soft delete), `restore_node`, `get_content`, `query_metadata`
-(filter by tags/status/kind/parent_id).
+Nodes: `get_node` (either table) / `get_file` / `get_folder`, `list_ancestors`
+(folders above a node, nearest first — what the policy check needs), `list_children`
+(sub-folders then files; `None` = root folders), `list_descendants` (recursive CTE over
+`folders`, then their files; relied on by cascade-delete/cycle-detection), `create_file`
+(parent must be a folder), `create_folder`, `update_node` (raises `FieldError` for a
+column the node's table lacks), `move_node` (raises `TreeCycleError` if a folder would
+land under its own descendant, `FieldError` for a file moved to the root or anything
+moved into a file), `delete_node` (cascading soft delete), `restore_node`, `get_content`
+(None for folders), `query_metadata` (filter by tags/status/`node_type`/kind/parent_id;
+a status filter yields files only). `FieldError` is a `ValueError` subclass → API 422.
+The DAL stays policy-unaware.
 
 Manifests: `create_manifest`, `get_manifest`, `list_manifests`, `add_manifest_member`
 (raises `ManifestCycleError` on a would-be cycle), `remove_manifest_member`,
@@ -228,34 +296,52 @@ Two calling conventions, by whether cross-node lookups are needed:
 **Pure, no node at all**: `extract_links(content)` — every markdown link target in a
 string, in order.
 
+**Virtual file** (take a `File`/`Folder`, no `Session`) — the one owner of the text
+agents see and its line coordinates. `render_frontmatter(node)` (`---`, one
+`key: <JSON>` line per set field, `---\n`), `virtual_file_body(node)` (content; `""`
+for a folder), `render_virtual_file(node)` = the two concatenated (what DCI's
+`search_lines`/`read_lines` read), `body_line_offset(node)` = the frontmatter's line
+count, so body line `i` is virtual-file line `offset + i` (what semantic chunks are
+numbered in). Pinned by golden strings in `tests/test_virtual_file.py` — changing the
+rendering shifts every chunk's line numbers, so reindex after.
+
 ## KB service / API primitives (`src/kb/service.py`, `src/kb/api/app.py`)
 
-`service.py` re-exports every `kb.storage.dal` node/manifest function 1:1, same
+`service.py` re-exports the `kb.storage.dal` node/manifest functions, same
 explicit-`Session`-argument style, same exceptions (`TreeCycleError`,
-`ManifestCycleError`, plain `ValueError` for "no such node/manifest") — it's the
-chokepoint future authz/validation hooks will land in, not a redesign of the DAL's
-surface. The one new function: `get_warnings(session, node)` composes all four
-`kb.okf` advisory checks into a single `list[str]` report for a node.
+`ManifestCycleError`, `FieldError`, plain `ValueError` for "no such node/manifest") plus
+`PermissionDenied`. Mutations take `actor="human"` and run the policy check first (see
+"Permissions"); manifest member functions take `node_id` instead of `file_id`/`folder_id`.
+`get_warnings(session, node)` composes all four `kb.okf` advisory checks into a single
+`list[str]` report for a file (`[]` for a folder).
 
 `api/app.py` is a thin FastAPI wrapper: no business logic, just request/response shaping
 via `schemas.py` and HTTP-status mapping (`TreeCycleError`/`ManifestCycleError` → 409,
-`ValueError` → 404). Routes: `POST/GET/PATCH/DELETE /files/{id}`,
-`POST /files/{id}/move`, `POST /files/{id}/restore`, `GET /files/{id}/children`,
-`GET /files/roots`, `GET /files` (query filters), and the `/manifests` equivalents
+`PermissionDenied` → 403, `FieldError`/`UploadError` → 422, `ValueError` → 404). One
+unified **`/nodes`** surface for files and folders: `POST /nodes` (body `type:
+"file"|"folder"`; a file needs `parent_id` + `content`, a folder takes no file-only
+field — both 422 at the Pydantic layer), `GET/PATCH/DELETE /nodes/{id}`,
+`POST /nodes/{id}/move`, `POST /nodes/{id}/restore`, `GET /nodes/{id}/children`,
+`GET /nodes/{id}/raw`, `GET /nodes/roots`, `GET /nodes` (query filters incl. `type`,
+`kind`), and the `/manifests` equivalents
 (`POST/GET /manifests`, `GET /manifests/{id}`, `POST/DELETE /manifests/{id}/members`,
-`GET /manifests/{id}/resolve`), and `GET /ingest/extensions` / `POST /ingest` (folder upload). Single-resource file responses (`FileRead`) include a
-`warnings` field from `get_warnings`; list responses (`FileSummary`) omit `content` and
-`warnings` to avoid running the advisory checks on every row of a listing.
+`GET /manifests/{id}/resolve`), and `GET /ingest/extensions` / `POST /ingest` (folder upload). Single-resource responses (`NodeRead`) include a
+`warnings` field from `get_warnings` and the file-only fields (None on folders); list
+responses (`NodeSummary`: `id, type, parent_id, kind, agent_locked, title, description,
+tags, status`) omit `content` and `warnings` to avoid running the advisory checks on
+every row of a listing.
 
 A static dev UI (`src/kb/api/static/index.html`, vanilla JS, no logic) is mounted at `/ui` for
-browsing the tree and exercising the CRUD/manifest routes.
+browsing the tree and exercising the CRUD/manifest routes (shows/edits `kind` and
+`agent_locked`; only folders at the root; `auto_updated` isn't offered).
 
-`FileUpdate` deliberately excludes `parent_id` — moving a node has to go through
-`POST /files/{id}/move`, which runs `move_node`'s cycle detection; `update_node` does
-not. `ManifestMemberCreate` enforces "exactly one of `file_id`/`child_manifest_id`" at
-the Pydantic layer (a native 422), so `dal.add_manifest_member`'s `ValueError` for that
-same shape problem is effectively unreachable through the API — the global `ValueError`
-→ 404 handler stays correct (it only ever means "no such id").
+`NodeUpdate` deliberately excludes `parent_id` — moving a node has to go through
+`POST /nodes/{id}/move`, which runs `move_node`'s cycle detection and the MOVE/
+CREATE_INSIDE policy checks; `update_node` does not. `ManifestMemberCreate` enforces
+"exactly one of `node_id`/`child_manifest_id`" at the Pydantic layer (a native 422), so
+the service's `ValueError` for that same shape problem is effectively unreachable
+through the API — the global `ValueError` → 404 handler stays correct (it only ever
+means "no such id").
 
 ## Folder ingestion (`src/kb/ingest/`, `scripts/ingest_folder.py`)
 
@@ -269,14 +355,17 @@ commits; the caller owns the transaction. Re-ingest always creates a new subtree
 dedupe/upsert, deliberate).
 
 It's two steps. **`plan_folder(root, ...) -> FolderPlan`** walks the dir and runs the
-processors without touching the DB. It returns `PlannedNode`s (the root plus one per
+processors without touching the DB. It returns `PlannedNode(path, type, title, content,
+fields)`s (the root plus one per
 file, addressed by `/`-joined path) and the skipped/failed lists. Then
 **`materialize(session, plan, *, parent_id, folder_fields)`** (`ingest/plan.py`) is the one place
 a plan becomes nodes. Ancestors the plan doesn't list are *implied* and created as plain
 folders (title = path segment, `folder_fields`) only when something below them is
 created, which is why empty dirs get no node. Explicit folders are always created.
-`parent_id` must be an existing folder and the plan must contain its root (`""`), else
-`ValueError`. It returns `{path: File}` in creation order. Any producer that builds a
+`parent_id` must be an existing folder and the plan must contain its root (`""`), which
+must be a folder; files need content and folders can't have any — else `ValueError`.
+Everything is created through `service.create_file`/`create_folder` (actor human,
+kinds default to manual). It returns `{path: File}` in creation order. Any producer that builds a
 subtree should emit a plan and call `materialize` (the QASPER loader does), not loop
 over `create_file` by hand.
 
@@ -333,10 +422,10 @@ Built from LangChain parts; only KB-specific glue is hand-written.
   `DeterministicFakeEmbedding`. Searches run with `hnsw.iterative_scan=relaxed_order`
   so narrow `$in` filters still return k hits. `chunk_key_encoder` makes uuid chunk ids
   (the default sha1 one warns; sha256 hex doesn't fit the uuid column).
-- **Chunking** (`semantic_index/chunking.py`): `FileNodeLoader` yields one Document per active node with
-  content (files *and* folders). Only the markdown **body** is embedded, not frontmatter
+- **Chunking** (`semantic_index/chunking.py`): `FileNodeLoader` yields one Document per active **file**
+  (folders have no content and are never indexed; `kb_chunks.file_id` → `files`). Only the markdown **body** is embedded, not frontmatter
   (so retags re-embed nothing), but `start_line`/`end_line` are lines of the
-  `dci`-rendered virtual file, so `read_lines(path, offset=start_line)` returns the
+  virtual file (`kb.okf.body_line_offset`), so `read_lines(path, offset=start_line)` returns the
   chunk. `RecursiveCharacterTextSplitter.from_language(MARKDOWN)`, 1500 chars / 200
   overlap. `heading` = heading path at the chunk start ("Methods > Data"). Embedded text
   is prefixed with `"<title> > <heading>"`; `chunk_text(doc)` strips it.
@@ -348,14 +437,21 @@ Built from LangChain parts; only KB-specific glue is hand-written.
   cleanup runs after every batch, so a file split across the default 100-chunk batches
   had its later chunks deleted and re-embedded on every run (bug hit on a 162-chunk
   page; regression test `test_reindex_unchanged_large_file_is_all_skipped`).
-  `unindex_files(ids)` goes through record-manager keys (incremental cleanup can't drop
+  A folder id is treated like a missing one (unindexed, a no-op). `unindex_files(ids)` goes through record-manager keys (incremental cleanup can't drop
   a file absent from the batch). `reindex_all()` = full cleanup, file by file. All open
   their own session: call them **after commit**, and not inside a running event loop.
-- **Index after writes** (`api/app.py`): create/patch/delete (+ descendants)/restore/ingest
-  commit explicitly, then schedule `index_files` as a `BackgroundTask`; failures are only
-  logged. Move/manifest routes don't reindex. `KB_AUTO_INDEX=0` turns it off (dev
-  without an embeddings server). Repair: `POST /index/reindex` or `scripts/reindex.py
-  --all`. `scripts/ingest_folder.py --index` and `scripts/eval/load_qasper.py --index` opt in.
+- **Index after writes** (`service.commit`): service mutations (create/update/restore,
+  delete + the descendants its cascade soft-deletes; ingest via `materialize`) record
+  touched ids in `session.info`; `service.touched_ids(session)` reads them. Ending the
+  outermost transaction (commit or rollback) clears them, so a rolled-back write is never
+  indexed. `service.commit(session, *, index=None, schedule=None) -> CommitResult(touched,
+  indexed)` commits, then indexes those ids — synchronously, or via `schedule(fn, ids)`
+  (the API passes `BackgroundTasks.add_task`). `index=None` follows `KB_AUTO_INDEX`
+  (default on; `0` for dev without an embeddings server). Failures are logged, never
+  raised. A plain `session.commit()` indexes nothing. Move/manifest ops record nothing
+  (chunks store no paths or membership). Repair: `POST /index/reindex` or
+  `scripts/reindex.py --all`. `scripts/ingest_folder.py --index` and
+  `scripts/eval/load_qasper.py --index` force sync indexing. Tests: `tests/test_write_sync.py`.
 - **Search** (`retrieval/semantic.py`): `service.semantic_search(session, manifest_id, query, *, k,
   tags, status)` → `SearchHit(file_id, path, title, heading, start_line, end_line,
   snippet, score)`. Scope = manifest nodes (∩ `query_metadata` tags/status) as a
@@ -388,8 +484,12 @@ the local Postgres and exercising the full golden path plus error-mapping cases
 (self-cycle move → 409, unknown id → 404, malformed manifest-member body → 422) with
 `curl`; the DB was reset to empty afterward (`alembic downgrade base && alembic upgrade
 head`). There is now a committed pytest suite (`pytest -m "not llm"`, needs
-`TEST_DATABASE_URL` pointing at a pgvector Postgres whose DB name ends in `_test`); it
-passes in the `kb` env (86 passed, Docling test skipped). The tests use fake embeddings;
+`TEST_DATABASE_URL` pointing at a pgvector Postgres whose DB name ends in `_test` — a
+local `pinkas_test` DB exists for this on the Homebrew Postgres; it is **not** in `.env`,
+so set it explicitly or every DB test silently skips:
+`TEST_DATABASE_URL=postgresql+psycopg://yonatanashlag@localhost:5432/pinkas_test`); it passes in the `kb`
+env (130 passed, Docling test skipped), including `tests/test_policy.py` (pure
+permission matrix) and `tests/test_permissions.py` (service + `/nodes` enforcement). The tests use fake embeddings;
 real Ollama embeddings were verified on the dev DB (6 pages → 222 chunks, a second
 `reindex.py --all` skips all of them, and manifest-scoped `semantic_search` returns
 ranked hits).
@@ -401,9 +501,11 @@ ranked hits).
 paper that **mirrors the paper's own outline**: sections become numbered files
 (`01-introduction.md`), sections with subsections become numbered folders (their lead
 text as folder content), plus `metadata.md` (id, arXiv link, counts) and `figures/` /
-`tables/` (one file per caption). The paper folder's content is title + abstract +
-outline, and its `description` is the abstract's first sentence. Each section keeps
-its original heading as an alias and gets a `role:<role>` tag (intro / related /
+`tables/` (one file per caption). Folders hold no content, so the paper's title +
+abstract + outline go in its `00-overview.md` (and a section folder's lead text in
+*its* `00-overview.md`); the paper folder's `description` is the abstract's first
+sentence. Each section file keeps its original heading as an alias and every section
+node gets a `role:<role>` tag (intro / related /
 method / training / setup / baselines / results / conclusion / other) from keyword
 heuristics (`classify_section`) -- a label only, it never moves text. An earlier
 fixed-template layout (introduction.md, methods/, experiments/...) was replaced by this

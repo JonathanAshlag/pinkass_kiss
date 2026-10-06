@@ -50,7 +50,7 @@ def _truncate() -> None:
     from kb.storage.db import engine
 
     with engine.begin() as conn:
-        conn.execute(text("TRUNCATE kb_chunks, upsertion_record, manifest_members, manifests, files CASCADE"))
+        conn.execute(text("TRUNCATE kb_chunks, upsertion_record, manifest_members, manifests, files, folders CASCADE"))
 
 
 # --------------------------------------------------------------------------
@@ -84,11 +84,11 @@ def manifests(ids, papers):
     with SessionLocal() as session:
         for paper in papers:
             m = service.create_manifest(session, f"qasper-p-{paper['id']}")
-            service.add_manifest_member(session, m.id, file_id=uuid.UUID(ids[paper["id"]]))
+            service.add_manifest_member(session, m.id, node_id=uuid.UUID(ids[paper["id"]]))
             out[paper["id"]] = m.id
         corpus = service.create_manifest(session, "qasper-corpus")
         root = next(n for n in service.list_children(session, None) if n.title == ROOT_TITLE)
-        service.add_manifest_member(session, corpus.id, file_id=root.id)
+        service.add_manifest_member(session, corpus.id, node_id=root.id)
         out["corpus"] = corpus.id
         session.commit()
     return out

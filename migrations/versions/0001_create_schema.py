@@ -1,4 +1,4 @@
-"""create schema: files, manifests, manifest_members
+"""create schema: folders, files, manifests, manifest_members
 
 Revision ID: 0001
 Revises:
@@ -20,12 +20,16 @@ depends_on: Union[str, Sequence[str], None] = None
 file_status = postgresql.ENUM(
     "draft", "stable", "deprecated", name="file_status", create_type=False
 )
-file_kind = postgresql.ENUM("file", "folder", name="file_kind", create_type=False)
+folder_kind = postgresql.ENUM(
+    "skeleton", "manual", "auto_updated", name="folder_kind", create_type=False
+)
+file_kind = postgresql.ENUM("manual", "auto_updated", name="file_kind", create_type=False)
 
 
 def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
     file_status.create(op.get_bind(), checkfirst=True)
+    folder_kind.create(op.get_bind(), checkfirst=True)
     file_kind.create(op.get_bind(), checkfirst=True)
 
     op.execute(
@@ -37,6 +41,52 @@ def upgrade() -> None:
           RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;
+        """
+    )
+
+    # --- folders -----------------------------------------------------------
+    op.create_table(
+        "folders",
+        sa.Column(
+            "id",
+            postgresql.UUID(as_uuid=True),
+            primary_key=True,
+            server_default=sa.text("gen_random_uuid()"),
+        ),
+        sa.Column(
+            "parent_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("folders.id", ondelete="SET NULL"),
+            nullable=True,
+        ),
+        sa.Column("kind", folder_kind, nullable=False, server_default="manual"),
+        sa.Column("agent_locked", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("title", sa.Text(), nullable=False),
+        sa.Column("description", sa.Text(), nullable=True),
+        sa.Column("tags", postgresql.ARRAY(sa.Text()), nullable=False, server_default="{}"),
+        sa.Column(
+            "created_at",
+            sa.TIMESTAMP(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.TIMESTAMP(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.Column("deleted_at", sa.TIMESTAMP(timezone=True), nullable=True),
+    )
+    op.create_index("ix_folders_parent_id", "folders", ["parent_id"])
+    op.create_index("ix_folders_tags", "folders", ["tags"], postgresql_using="gin")
+
+    op.execute(
+        """
+        CREATE TRIGGER trg_folders_set_updated_at
+        BEFORE UPDATE ON folders
+        FOR EACH ROW
+        EXECUTE FUNCTION set_updated_at();
         """
     )
 
@@ -52,10 +102,11 @@ def upgrade() -> None:
         sa.Column(
             "parent_id",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("files.id", ondelete="SET NULL"),
-            nullable=True,
+            sa.ForeignKey("folders.id", ondelete="RESTRICT"),
+            nullable=False,
         ),
-        sa.Column("kind", file_kind, nullable=False, server_default="file"),
+        sa.Column("kind", file_kind, nullable=False, server_default="manual"),
+        sa.Column("agent_locked", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("title", sa.Text(), nullable=False),
         sa.Column(
             "aliases", postgresql.ARRAY(sa.Text()), nullable=False, server_default="{}"
@@ -79,7 +130,7 @@ def upgrade() -> None:
         ),
         sa.Column("stale_after", sa.TIMESTAMP(timezone=True), nullable=True),
         sa.Column("status", file_status, nullable=False, server_default="draft"),
-        sa.Column("content", sa.Text(), nullable=True),
+        sa.Column("content", sa.Text(), nullable=False),
         sa.Column(
             "created_at",
             sa.TIMESTAMP(timezone=True),
@@ -97,14 +148,9 @@ def upgrade() -> None:
         sa.Column("blob_size_bytes", sa.BigInteger(), nullable=True),
         sa.Column("blob_mime_type", sa.Text(), nullable=True),
         sa.Column("blob_checksum", sa.Text(), nullable=True),
-        sa.CheckConstraint(
-            "kind = 'folder' OR content IS NOT NULL",
-            name="content_required_for_file",
-        ),
     )
 
     op.create_index("ix_files_parent_id", "files", ["parent_id"])
-    op.create_index("ix_files_kind", "files", ["kind"])
     op.create_index("ix_files_status", "files", ["status"])
     op.create_index("ix_files_tags", "files", ["tags"], postgresql_using="gin")
     op.create_index("ix_files_sources_gin", "files", ["sources"], postgresql_using="gin")
@@ -177,6 +223,12 @@ def upgrade() -> None:
             nullable=True,
         ),
         sa.Column(
+            "folder_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("folders.id", ondelete="CASCADE"),
+            nullable=True,
+        ),
+        sa.Column(
             "child_manifest_id",
             postgresql.UUID(as_uuid=True),
             sa.ForeignKey("manifests.id", ondelete="CASCADE"),
@@ -189,8 +241,7 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
         ),
         sa.CheckConstraint(
-            "(file_id IS NOT NULL AND child_manifest_id IS NULL) "
-            "OR (file_id IS NULL AND child_manifest_id IS NOT NULL)",
+            "num_nonnulls(file_id, folder_id, child_manifest_id) = 1",
             name="manifest_member_exactly_one_target",
         ),
         sa.CheckConstraint(
@@ -207,13 +258,21 @@ def upgrade() -> None:
         postgresql_where=sa.text("file_id IS NOT NULL"),
     )
     op.create_index(
-        "ux_manifest_members_bundle",
+        "ux_manifest_members_folder",
+        "manifest_members",
+        ["manifest_id", "folder_id"],
+        unique=True,
+        postgresql_where=sa.text("folder_id IS NOT NULL"),
+    )
+    op.create_index(
+        "ux_manifest_members_manifest",
         "manifest_members",
         ["manifest_id", "child_manifest_id"],
         unique=True,
         postgresql_where=sa.text("child_manifest_id IS NOT NULL"),
     )
     op.create_index("ix_manifest_members_file_id", "manifest_members", ["file_id"])
+    op.create_index("ix_manifest_members_folder_id", "manifest_members", ["folder_id"])
     op.create_index(
         "ix_manifest_members_child_manifest_id", "manifest_members", ["child_manifest_id"]
     )
@@ -221,8 +280,10 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("ix_manifest_members_child_manifest_id", table_name="manifest_members")
+    op.drop_index("ix_manifest_members_folder_id", table_name="manifest_members")
     op.drop_index("ix_manifest_members_file_id", table_name="manifest_members")
-    op.drop_index("ux_manifest_members_bundle", table_name="manifest_members")
+    op.drop_index("ux_manifest_members_manifest", table_name="manifest_members")
+    op.drop_index("ux_manifest_members_folder", table_name="manifest_members")
     op.drop_index("ux_manifest_members_file", table_name="manifest_members")
     op.drop_table("manifest_members")
 
@@ -235,10 +296,15 @@ def downgrade() -> None:
     op.drop_index("ix_files_sources_gin", table_name="files")
     op.drop_index("ix_files_tags", table_name="files")
     op.drop_index("ix_files_status", table_name="files")
-    op.drop_index("ix_files_kind", table_name="files")
     op.drop_index("ix_files_parent_id", table_name="files")
     op.drop_table("files")
 
+    op.execute("DROP TRIGGER IF EXISTS trg_folders_set_updated_at ON folders")
+    op.drop_index("ix_folders_tags", table_name="folders")
+    op.drop_index("ix_folders_parent_id", table_name="folders")
+    op.drop_table("folders")
+
     op.execute("DROP FUNCTION IF EXISTS set_updated_at()")
     file_kind.drop(op.get_bind(), checkfirst=True)
+    folder_kind.drop(op.get_bind(), checkfirst=True)
     file_status.drop(op.get_bind(), checkfirst=True)
