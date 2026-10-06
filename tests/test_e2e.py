@@ -51,6 +51,7 @@ from langgraph.prebuilt import ToolNode, tools_condition  # noqa: E402
 
 from kb.evaluation.question import OpenQuestion  # noqa: E402
 from kb.evaluation.quiz import LLMJudge, Quiz  # noqa: E402
+from kb.evaluation.report import QuizReport  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Datasets: a knowledge base + a Quiz about it
@@ -351,8 +352,7 @@ def test_llm_answers_quizzes_with_kb_tools(dataset):
     provider = os.environ.get("E2E_LLM_PROVIDER", "anthropic").lower()
     model = getattr(llm, "model_name", None) or getattr(llm, "model", "?")
 
-    graded = []  # (question, answer, correct)
-    no_tools = []
+    reports, no_tools = [], []
     for case in dataset.truncated(n).cases:
         answers, tracers = [], []
         for question in case.quiz.questions:
@@ -374,16 +374,15 @@ def test_llm_answers_quizzes_with_kb_tools(dataset):
                 no_tools.append((case.id, question.question))
             answers.append(answer)
             tracers.append((tracer, calls))
-        results = case.quiz.grade(answers, judge)
-        for (tracer, calls), ok in zip(tracers, results):
-            opik_score(tracer, correct=float(ok), tool_calls=calls)
-        graded += zip(case.quiz.questions, answers, results)
+        report = case.quiz.report(answers, judge)
+        for (tracer, calls), item in zip(tracers, report.items):
+            opik_score(tracer, correct=float(item.correct), tool_calls=calls)
+        reports.append(report)
 
-    correct = sum(ok for _, _, ok in graded)
-    accuracy = correct / len(graded)
-    print(f"\n[{dataset.name}] accuracy {correct}/{len(graded)} = {accuracy:.0%}")
-    for question, got, ok in graded:
-        if not ok:
-            print(f"  WRONG: {question.question!r} gold={question.text_answer!r} got={got!r}")
+    report = QuizReport.combine(reports)
+    print(f"\n[{dataset.name}]\n{report}")
+    for item in report.items:
+        if not item.correct:
+            print(f"  {item.outcome}: {item.question!r} gold={item.reference!r} got={item.answer!r}")
     assert not no_tools, f"model answered without using the KB tools: {no_tools}"
-    assert accuracy >= min_acc, f"accuracy {accuracy:.0%} < {min_acc:.0%}"
+    assert report.accuracy >= min_acc, f"accuracy {report.accuracy:.0%} < {min_acc:.0%}"

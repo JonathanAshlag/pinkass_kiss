@@ -5,6 +5,7 @@ Quiz class for evaluation purposes.
 from typing import List, Optional, Union
 from pydantic import BaseModel
 from kb.evaluation.question import OpenQuestion, ClosedQuestion
+from kb.evaluation.report import ABSTAIN, ItemResult, QuizReport, classify, is_abstain
 
 JUDGE_PROMPT = (
     "You are grading an answer to a question against a reference answer. The answer is "
@@ -100,3 +101,44 @@ class Quiz(BaseModel):
                 results.append(_grade_closed(question, answer))
 
         return results
+
+    def report(
+        self,
+        answers: List[str],
+        judge: Optional[LLMJudge] = None,
+        *,
+        results: Optional[List[bool]] = None,
+        abstain: str = ABSTAIN,
+    ) -> QuizReport:
+        """
+        Grade `answers` and build a confusion-matrix report (see `kb.evaluation.report`).
+
+        Args:
+            answers: List of answers in the same order as the questions
+            judge: Grades open questions (as in `grade`)
+            results: Already-computed `grade()` output, to avoid judging twice
+            abstain: The marker meaning "unanswerable", for references and answers
+        """
+        if results is None:
+            results = self.grade(answers, judge)
+        items = []
+        for question, answer, correct in zip(self.questions, answers, results):
+            if isinstance(question, OpenQuestion):
+                reference = question.text_answer
+                answerable = not is_abstain(reference, abstain)
+            else:
+                reference = question.options[question.answer_index]
+                answerable = True
+            abstained = is_abstain(answer, abstain)
+            if not answerable:
+                correct = abstained  # the right answer to an unanswerable question
+            items.append(
+                ItemResult(
+                    question=question.question,
+                    reference=reference,
+                    answer=answer,
+                    correct=correct,
+                    outcome=classify(answerable, abstained, correct),
+                )
+            )
+        return QuizReport(items=items)
