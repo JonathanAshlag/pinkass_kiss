@@ -17,9 +17,10 @@ Two tests:
   (default 10) questions of the dataset, each E2E_LLM_K times (default 5), in parallel
   (E2E_LLM_WORKERS threads, default 8). Every (question, repetition) is answered by its own
   fresh agent; nothing is shared between runs. The report adds steps and runtime per
-  answer (mean/variance/...) and the wall-clock total. E2E_LLM_PROVIDER picks the model: "anthropic"
-  (default; costs money, needs ANTHROPIC_API_KEY), "ollama" (local and free; needs a
-  running server and a tool-calling model) or "openai" (any OpenAI-compatible server at
+  answer (mean/variance/...) and the wall-clock total. E2E_LLM_PROVIDER picks the model: "auto"
+  (default: the local Ollama when it's reachable, else Anthropic), "anthropic" (costs money,
+  needs ANTHROPIC_API_KEY), "ollama" (local and free; needs a running server and a
+  tool-calling model) or "openai" (any OpenAI-compatible server at
   OPENAI_BASE_URL, e.g. vLLM / vllm-mlx with tool calling enabled). Skipped when
   unavailable. Asserts the model used the tools on every question and that accuracy
   meets E2E_LLM_MIN_ACC (default 0.3).
@@ -27,7 +28,8 @@ Two tests:
 Env (all read from .env, see .env.example): E2E_DATASET, E2E_LLM_PROVIDER, E2E_LLM_MODEL
 (default claude-opus-5-5 / qwen3-coder:30b), E2E_LLM_N, E2E_LLM_K, E2E_LLM_WORKERS, E2E_LLM_MIN_ACC,
 ANTHROPIC_API_KEY, OLLAMA_BASE_URL, OPENAI_BASE_URL; judge: OPENAI_API_KEY, JUDGE_MODEL
-(default gpt-4o-mini), JUDGE_BASE_URL.
+(default gpt-4o-mini), JUDGE_BASE_URL. With no judge key/URL set, the judge also falls
+back to the local Ollama (its OpenAI-compatible /v1 endpoint, same model).
 
 Observability: when OPIK_API_KEY is set (Comet cloud; also OPIK_WORKSPACE, optional
 OPIK_PROJECT_NAME, default "pinkass-kiss-e2e"), every question of the real-LLM test
@@ -171,19 +173,38 @@ def make_tools(manifest_id: uuid.UUID) -> list:
             except (ValueError, service.PatternError) as exc:
                 return f"error: {exc}"
 
+    def top_level(path: str | None) -> str | None:
+        # models habitually pass "." or "/" for "the root"; that means "no `under`"
+        path = (path or "").strip()
+        return None if path in {"", ".", "./", "/"} else path.removeprefix("./")
+
     @tool
     def list_paths(under: str | None = None, recursive: bool = False) -> str:
-        """List documents in the knowledge base (like `ls`/`find`)."""
-        return run(service.list_paths, under=under, recursive=recursive)
+        """List documents in the knowledge base (like `ls`/`find`).
+
+        Call it with no arguments first to see the top level. Pass `under` only as a
+        path copied exactly from a previous listing (never "." or a guessed path).
+        `recursive=True` lists everything below.
+        """
+        out = run(service.list_paths, under=top_level(under), recursive=recursive)
+        if out.startswith("error: no such path"):
+            out += " -- call list_paths with no arguments to see valid paths"
+        return out
 
     @tool
     def search_lines(pattern: str, ignore_case: bool = True, files_only: bool = False) -> str:
-        """Regex search over all documents (like `grep -n`). Output: path:line:text."""
+        """Regex search over all documents (like `grep -n`). Output: path:line:text.
+
+        Use `files_only=True` to get just the matching paths, then `read_lines` them.
+        """
         return run(service.search_lines, pattern, ignore_case=ignore_case, files_only=files_only)
 
     @tool
     def read_lines(path: str, offset: int = 1, limit: int = 50) -> str:
-        """Read a line range of one document by path (like `sed -n`)."""
+        """Read a line range of one document (like `sed -n`).
+
+        `path` must be copied exactly from `list_paths` or `search_lines` output.
+        """
         return run(service.read_lines, path, offset=offset, limit=limit)
 
     return [list_paths, search_lines, read_lines]
@@ -267,21 +288,53 @@ def test_agent_graph_wiring(dataset):
     assert tools["search_lines"].invoke({"pattern": "("}).startswith("error:")
 
 
+def _ollama_available() -> tuple[str, str, str | None]:
+    """(base_url, model, problem): where a local Ollama should be, the model to use, and
+    why it isn't usable (None when it is: reachable and the model is pulled)."""
+    import httpx
+
+    base_url = os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434"
+    model = os.environ.get("E2E_LLM_MODEL") or "qwen3-coder:30b"
+    try:
+        tags = httpx.get(f"{base_url}/api/tags", timeout=5).json()["models"]
+    except Exception as exc:  # server down / unreachable
+        return base_url, model, f"ollama not reachable at {base_url}: {exc}"
+    if model not in {m["name"] for m in tags}:
+        return base_url, model, f"ollama model '{model}' not pulled (`ollama pull {model}`)"
+    return base_url, model, None
+
+
 def make_judge() -> LLMJudge:
-    """The LLM judge (langchain ChatOpenAI), or pytest.skip without credentials."""
+    """The LLM judge (langchain ChatOpenAI). Uses OpenAI (OPENAI_API_KEY) or any
+    OpenAI-compatible JUDGE_BASE_URL; with neither, falls back to the local Ollama's
+    OpenAI-compatible endpoint when it's available, else skips."""
     base_url = os.environ.get("JUDGE_BASE_URL") or None
-    if not os.environ.get("OPENAI_API_KEY") and not base_url:
-        pytest.skip("OPENAI_API_KEY not set (needed for the LLM judge)")
+    model = os.environ.get("JUDGE_MODEL")
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key and not base_url:
+        ollama_url, ollama_model, problem = _ollama_available()
+        if problem:
+            pytest.skip(f"no LLM judge: OPENAI_API_KEY not set and {problem}")
+        base_url, model = f"{ollama_url}/v1", model or ollama_model
     return LLMJudge(
-        model=os.environ.get("JUDGE_MODEL") or "gpt-4o-mini",
-        base_url=base_url,
-        api_key=os.environ.get("OPENAI_API_KEY") or "not-needed",
+        model=model or "gpt-4o-mini", base_url=base_url, api_key=api_key or "not-needed"
     )
 
 
+def resolve_provider() -> str:
+    """E2E_LLM_PROVIDER, with "auto" (the default) resolved to ollama if usable, else anthropic."""
+    provider = os.environ.get("E2E_LLM_PROVIDER", "auto").lower()
+    if provider != "auto":
+        return provider
+    return "ollama" if _ollama_available()[2] is None else "anthropic"
+
+
 def make_llm():
-    """The chat model for E2E_LLM_PROVIDER, or pytest.skip if it isn't available."""
-    provider = os.environ.get("E2E_LLM_PROVIDER", "anthropic").lower()
+    """The chat model for E2E_LLM_PROVIDER, or pytest.skip if it isn't available.
+
+    The default provider, "auto", uses the local Ollama when it's reachable (and has the
+    model), else Anthropic when ANTHROPIC_API_KEY is set, else skips."""
+    provider = resolve_provider()
     if provider == "anthropic":
         if not os.environ.get("ANTHROPIC_API_KEY"):
             pytest.skip("ANTHROPIC_API_KEY not set")
@@ -291,17 +344,11 @@ def make_llm():
             model=os.environ.get("E2E_LLM_MODEL") or "claude-opus-5-5", max_tokens=4096
         )
     if provider == "ollama":
-        import httpx
         from langchain_ollama import ChatOllama
 
-        base_url = os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434"
-        model = os.environ.get("E2E_LLM_MODEL") or "qwen3-coder:30b"
-        try:
-            tags = httpx.get(f"{base_url}/api/tags", timeout=5).json()["models"]
-        except Exception as exc:  # server down / unreachable
-            pytest.skip(f"ollama not reachable at {base_url}: {exc}")
-        if model not in {m["name"] for m in tags}:
-            pytest.skip(f"ollama model '{model}' not pulled (`ollama pull {model}`)")
+        base_url, model, problem = _ollama_available()
+        if problem:
+            pytest.skip(problem)
         return ChatOllama(model=model, base_url=base_url, temperature=0, num_ctx=8192)
     if provider == "openai":  # any OpenAI-compatible server: vLLM, vllm-mlx, LM Studio, ...
         import httpx
@@ -365,7 +412,7 @@ def test_llm_answers_quizzes_with_kb_tools(dataset):
     k = int(os.environ.get("E2E_LLM_K", "5"))
     workers = int(os.environ.get("E2E_LLM_WORKERS", "8"))
     min_acc = float(os.environ.get("E2E_LLM_MIN_ACC", "0.3"))
-    provider = os.environ.get("E2E_LLM_PROVIDER", "anthropic").lower()
+    provider = resolve_provider()
     model = getattr(llm, "model_name", None) or getattr(llm, "model", "?")
 
     cases = dataset.truncated(n).cases
