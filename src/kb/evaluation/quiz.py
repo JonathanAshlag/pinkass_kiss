@@ -2,81 +2,101 @@
 Quiz class for evaluation purposes.
 """
 
-from typing import List, Union
+from typing import List, Optional, Union
 from pydantic import BaseModel
 from kb.evaluation.question import OpenQuestion, ClosedQuestion
+
+JUDGE_PROMPT = (
+    "You are grading an answer to a question against a reference answer. The answer is "
+    "correct if it conveys the same information as the reference (wording, formatting, "
+    "and extra brevity or detail that doesn't contradict the reference don't matter). "
+    "Reply with exactly one word: CORRECT or INCORRECT.\n\n"
+    "Question: {question}\nReference answer: {reference}\nAnswer to grade: {answer}"
+)
+
+
+class LLMJudge:
+    """An LLM-based judge for evaluating answers, backed by langchain's `ChatOpenAI`.
+
+    Pass a ready-made chat model as `llm` (any langchain chat model works, which keeps
+    tests injectable), or let it build a `ChatOpenAI` from `model` / `base_url` /
+    `api_key` (the key falls back to `OPENAI_API_KEY`).
+    """
+
+    def __init__(
+        self,
+        llm=None,
+        *,
+        model: str = "gpt-4o-mini",
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ):
+        if llm is None:
+            from langchain_openai import ChatOpenAI
+
+            llm = ChatOpenAI(model=model, base_url=base_url, api_key=api_key, temperature=0)
+        self.llm = llm
+
+    def grade_open_question(self, question: OpenQuestion, answer: str) -> bool:
+        """Ask the LLM whether `answer` matches the question's reference `text_answer`."""
+        verdict = self.llm.invoke(
+            JUDGE_PROMPT.format(
+                question=question.question, reference=question.text_answer, answer=answer
+            )
+        )
+        # "INCORRECT" contains "CORRECT", so test for the negative first
+        text = str(verdict.text).strip().upper()
+        return text.startswith("CORRECT")
+
+    def grade_closed_question(self, question: ClosedQuestion, answer: str) -> bool:
+        """
+        Grade a multiple choice question (no LLM needed).
+
+        Args:
+            question: The closed question
+            answer: The student's answer (as an index or text)
+
+        Returns:
+            True if the answer is correct, False otherwise
+        """
+        return _grade_closed(question, answer)
+
+
+def _grade_closed(question: ClosedQuestion, answer: str) -> bool:
+    answer = answer.strip()
+    if answer.isdigit() and int(answer) < len(question.options):
+        return int(answer) == question.answer_index
+    # If answer is text, check if it matches the correct option
+    if question.answer_index < len(question.options):
+        return answer == question.options[question.answer_index].strip()
+    return False
 
 
 class Quiz(BaseModel):
     """A collection of questions."""
     questions: List[Union[OpenQuestion, ClosedQuestion]]
-    
-    def grade(self, answers: List[str]) -> List[bool]:
+
+    def grade(self, answers: List[str], judge: Optional[LLMJudge] = None) -> List[bool]:
         """
         Grade a set of answers against the correct answers.
-        
+
         Args:
             answers: List of answers in the same order as the questions
-            
+            judge: Grades open questions; required if the quiz has any
+
         Returns:
             List of boolean values indicating whether each answer is correct
         """
         if len(answers) != len(self.questions):
             raise ValueError("Number of answers must match number of questions")
-            
+
         results = []
-        for i, (question, answer) in enumerate(zip(self.questions, answers)):
+        for question, answer in zip(self.questions, answers):
             if isinstance(question, OpenQuestion):
-                # For open questions, we can't automatically grade - return False
-                # In a real implementation, this would involve LLM comparison
-                results.append(False)
+                if judge is None:
+                    raise ValueError("an LLMJudge is required to grade open questions")
+                results.append(judge.grade_open_question(question, answer))
             else:  # ClosedQuestion
-                # Check if the answer index matches the correct answer index
-                if answer.isdigit() and int(answer) < len(question.options):
-                    results.append(int(answer) == question.answer_index)
-                else:
-                    results.append(False)
-        
+                results.append(_grade_closed(question, answer))
+
         return results
-
-
-# For LLM-based grading, we'll create a separate class
-class LLMJudge(BaseModel):
-    """An LLM-based judge for evaluating answers."""
-    
-    def grade_open_question(self, question: OpenQuestion, answer: str) -> bool:
-        """
-        Grade an open-ended question using LLM comparison.
-        
-        This is a placeholder implementation - in practice this would call
-        an actual LLM API to compare the answer with the correct answer.
-        
-        Args:
-            question: The open question
-            answer: The student's answer
-            
-        Returns:
-            True if the answer is considered correct, False otherwise
-        """
-        # In a real implementation, this would use an LLM to compare answers
-        # For now, we'll do a simple string comparison for demonstration
-        return answer.lower().strip() == question.text_answer.lower().strip()
-    
-    def grade_closed_question(self, question: ClosedQuestion, answer: str) -> bool:
-        """
-        Grade a multiple choice question.
-        
-        Args:
-            question: The closed question
-            answer: The student's answer (as an index or text)
-            
-        Returns:
-            True if the answer is correct, False otherwise
-        """
-        if answer.isdigit() and int(answer) < len(question.options):
-            return int(answer) == question.answer_index
-        else:
-            # If answer is text, check if it matches the correct option
-            if question.answer_index < len(question.options):
-                return answer.strip() == question.options[question.answer_index].strip()
-        return False

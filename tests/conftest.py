@@ -19,7 +19,7 @@ from sqlalchemy import make_url, text
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "eval"))  # for `import load_qasper`
 
-load_dotenv(ROOT / ".env")  # TEST_DATABASE_URL, ANTHROPIC_API_KEY, QASPER_LLM_* live here
+load_dotenv(ROOT / ".env")  # TEST_DATABASE_URL, ANTHROPIC_API_KEY, E2E_LLM_* live here
 TEST_URL = os.environ.get("TEST_DATABASE_URL")
 # kb.storage.db builds its engine at import time; create_engine doesn't connect, so a
 # placeholder is fine when the tests are going to be skipped anyway.
