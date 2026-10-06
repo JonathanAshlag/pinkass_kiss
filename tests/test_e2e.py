@@ -14,7 +14,10 @@ Two tests:
 - `test_agent_graph_wiring`: a scripted fake model drives the same graph + tools, so the
   tool-calling loop and the KB tool wrappers are checked for free (no API key).
 - `test_llm_answers_quizzes_with_kb_tools`: a real model answers the first E2E_LLM_N
-  (default 10) questions of the dataset. E2E_LLM_PROVIDER picks the model: "anthropic"
+  (default 10) questions of the dataset, each E2E_LLM_K times (default 5), in parallel
+  (E2E_LLM_WORKERS threads, default 8). Every (question, repetition) is answered by its own
+  fresh agent; nothing is shared between runs. The report adds steps and runtime per
+  answer (mean/variance/...) and the wall-clock total. E2E_LLM_PROVIDER picks the model: "anthropic"
   (default; costs money, needs ANTHROPIC_API_KEY), "ollama" (local and free; needs a
   running server and a tool-calling model) or "openai" (any OpenAI-compatible server at
   OPENAI_BASE_URL, e.g. vLLM / vllm-mlx with tool calling enabled). Skipped when
@@ -22,7 +25,7 @@ Two tests:
   meets E2E_LLM_MIN_ACC (default 0.3).
 
 Env (all read from .env, see .env.example): E2E_DATASET, E2E_LLM_PROVIDER, E2E_LLM_MODEL
-(default claude-opus-5-5 / qwen3-coder:30b), E2E_LLM_N, E2E_LLM_MIN_ACC,
+(default claude-opus-5-5 / qwen3-coder:30b), E2E_LLM_N, E2E_LLM_K, E2E_LLM_WORKERS, E2E_LLM_MIN_ACC,
 ANTHROPIC_API_KEY, OLLAMA_BASE_URL, OPENAI_BASE_URL; judge: OPENAI_API_KEY, JUDGE_MODEL
 (default gpt-4o-mini), JUDGE_BASE_URL.
 
@@ -35,7 +38,9 @@ scored with a `correct` feedback score. Without it, nothing is sent.
 
 import os
 import re
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -51,7 +56,7 @@ from langgraph.prebuilt import ToolNode, tools_condition  # noqa: E402
 
 from kb.evaluation.question import OpenQuestion  # noqa: E402
 from kb.evaluation.quiz import LLMJudge, Quiz  # noqa: E402
-from kb.evaluation.report import QuizReport  # noqa: E402
+from kb.evaluation.report import QuizReport, RunStats  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Datasets: a knowledge base + a Quiz about it
@@ -202,14 +207,20 @@ def build_agent(llm, tools):
 
 def ask(
     llm, manifest_id: uuid.UUID, question: str, system_prompt: str, callbacks: list | None = None
-) -> tuple[str, int]:
-    """Returns (final answer text, number of tool calls made). `callbacks` are LangChain
-    callback handlers for the run (e.g. an Opik tracer). An agent that never stops
-    calling tools (recursion limit) yields an empty answer, which grades as wrong."""
+) -> tuple[str, RunStats]:
+    """One question, answered by a fresh agent (its own graph, tools and message history).
+
+    Returns (final answer text, RunStats: model steps, tool calls, wall-clock seconds).
+    `callbacks` are LangChain callback handlers for the run (e.g. an Opik tracer). An agent
+    that never stops calling tools (recursion limit) yields an empty answer, which grades
+    as wrong.
+    """
     from langgraph.errors import GraphRecursionError
 
     app = build_agent(llm, make_tools(manifest_id))
     messages: list = []
+    answer = ""
+    start = time.perf_counter()
     try:
         for state in app.stream(
             {"messages": [SystemMessage(system_prompt), HumanMessage(question)]},
@@ -217,12 +228,14 @@ def ask(
             stream_mode="values",
         ):
             messages = state["messages"]
+        # reasoning models (Qwen3, ...) served without a reasoning parser inline their thoughts
+        answer = re.sub(r"<think>.*?</think>", "", str(messages[-1].text), flags=re.DOTALL).strip()
     except GraphRecursionError:
-        return "", sum(len(m.tool_calls) for m in messages if isinstance(m, AIMessage))
-    calls = sum(len(m.tool_calls) for m in messages if isinstance(m, AIMessage))
-    # reasoning models (Qwen3, ...) served without a reasoning parser inline their thoughts
-    answer = re.sub(r"<think>.*?</think>", "", str(messages[-1].text), flags=re.DOTALL)
-    return answer.strip(), calls
+        pass
+    seconds = time.perf_counter() - start
+    ai = [m for m in messages if isinstance(m, AIMessage)]
+    stats = RunStats(steps=len(ai), tool_calls=sum(len(m.tool_calls) for m in ai), seconds=seconds)
+    return answer, stats
 
 
 class _ScriptedModel(FakeMessagesListChatModel):
@@ -244,8 +257,9 @@ def test_agent_graph_wiring(dataset):
             AIMessage(content="unanswerable"),
         ]
     )
-    answer, calls = ask(script, case.manifest_id, question, dataset.system_prompt)
-    assert calls == 1 and answer == "unanswerable"
+    answer, stats = ask(script, case.manifest_id, question, dataset.system_prompt)
+    assert answer == "unanswerable"
+    assert stats.tool_calls == 1 and stats.steps == 2 and stats.seconds > 0
 
     # the tools are backed by the KB: the manifest has documents, a bad regex is reported
     tools = {t.name: t for t in make_tools(case.manifest_id)}
@@ -348,41 +362,82 @@ def test_llm_answers_quizzes_with_kb_tools(dataset):
     llm = make_llm()
     judge = make_judge()
     n = int(os.environ.get("E2E_LLM_N", "10"))
+    k = int(os.environ.get("E2E_LLM_K", "5"))
+    workers = int(os.environ.get("E2E_LLM_WORKERS", "8"))
     min_acc = float(os.environ.get("E2E_LLM_MIN_ACC", "0.3"))
     provider = os.environ.get("E2E_LLM_PROVIDER", "anthropic").lower()
     model = getattr(llm, "model_name", None) or getattr(llm, "model", "?")
 
-    reports, no_tools = [], []
-    for case in dataset.truncated(n).cases:
-        answers, tracers = [], []
-        for question in case.quiz.questions:
-            tracer = opik_tracer(
-                dataset=dataset.name,
-                provider=provider,
-                model=model,
-                case_id=case.id,
-                gold=question.text_answer,
-            )
-            answer, calls = ask(
-                llm,
-                case.manifest_id,
-                question.question,
-                dataset.system_prompt,
-                [tracer] if tracer else None,
-            )
-            if calls == 0:
-                no_tools.append((case.id, question.question))
-            answers.append(answer)
-            tracers.append((tracer, calls))
-        report = case.quiz.report(answers, judge)
-        for (tracer, calls), item in zip(tracers, report.items):
-            opik_score(tracer, correct=float(item.correct), tool_calls=calls)
-        reports.append(report)
+    cases = dataset.truncated(n).cases
+    # every (question, repetition) is its own job, answered by its own fresh agent
+    jobs = [
+        (ci, qi, rep)
+        for ci, case in enumerate(cases)
+        for qi in range(len(case.quiz.questions))
+        for rep in range(k)
+    ]
 
-    report = QuizReport.combine(reports)
-    print(f"\n[{dataset.name}]\n{report}")
+    def answer_job(job):
+        ci, qi, rep = job
+        case, question = cases[ci], cases[ci].quiz.questions[qi]
+        tracer = opik_tracer(
+            dataset=dataset.name,
+            provider=provider,
+            model=model,
+            case_id=case.id,
+            question_index=qi,
+            repetition=rep,
+            gold=question.text_answer,
+        )
+        answer, stats = ask(
+            llm, case.manifest_id, question.question, dataset.system_prompt,
+            [tracer] if tracer else None,
+        )
+        return answer, stats, tracer
+
+    start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        outputs = dict(zip(jobs, pool.map(answer_job, jobs)))
+    wall = time.perf_counter() - start
+
+    def grade_repetition(key):  # one quiz repetition: judge calls run in parallel too
+        ci, rep = key
+        case = cases[ci]
+        row = [outputs[(ci, qi, rep)] for qi in range(len(case.quiz.questions))]
+        return case.quiz.report(
+            [answer for answer, _, _ in row],
+            judge,
+            stats=[stats for _, stats, _ in row],
+            repetition=rep,
+            case_id=case.id,
+        )
+
+    keys = [(ci, rep) for ci in range(len(cases)) for rep in range(k)]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        reports = list(pool.map(grade_repetition, keys))
+
+    for (ci, rep), rep_report in zip(keys, reports):
+        for qi, item in enumerate(rep_report.items):
+            _, stats, tracer = outputs[(ci, qi, rep)]
+            opik_score(
+                tracer,
+                correct=float(item.correct),
+                steps=stats.steps,
+                tool_calls=stats.tool_calls,
+                seconds=stats.seconds,
+            )
+
+    report = QuizReport.combine(reports, wall_seconds=wall)
+    print(f"\n[{dataset.name}] {k} repetition(s) per question, {workers} workers\n{report}")
+    print("per question (correct rate / steps / seconds):")
+    for q in report.by_question():
+        print(
+            f"  {q.correct_rate:>4.0%}  steps {q.steps.mean:>4.1f} (var {q.steps.variance:.2f})  "
+            f"{q.seconds.mean:>6.1f}s (var {q.seconds.variance:.2f})  {q.question[:70]!r}"
+        )
     for item in report.items:
         if not item.correct:
             print(f"  {item.outcome}: {item.question!r} gold={item.reference!r} got={item.answer!r}")
+    no_tools = [(i.case_id, i.question) for i in report.items if i.stats.tool_calls == 0]
     assert not no_tools, f"model answered without using the KB tools: {no_tools}"
     assert report.accuracy >= min_acc, f"accuracy {report.accuracy:.0%} < {min_acc:.0%}"
