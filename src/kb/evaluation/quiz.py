@@ -5,7 +5,7 @@ Quiz class for evaluation purposes.
 from typing import List, Optional, Union
 from pydantic import BaseModel
 from kb.evaluation.question import OpenQuestion, ClosedQuestion
-from kb.evaluation.report import ABSTAIN, ItemResult, QuizReport, classify, is_abstain
+from kb.evaluation.report import ABSTAIN, ItemResult, QuizReport, RunStats, classify, is_abstain
 
 JUDGE_PROMPT = (
     "You are grading an answer to a question against a reference answer. The answer is "
@@ -108,6 +108,9 @@ class Quiz(BaseModel):
         judge: Optional[LLMJudge] = None,
         *,
         results: Optional[List[bool]] = None,
+        stats: Optional[List[RunStats]] = None,
+        repetition: int = 0,
+        case_id: str = "",
         abstain: str = ABSTAIN,
     ) -> QuizReport:
         """
@@ -117,12 +120,18 @@ class Quiz(BaseModel):
             answers: List of answers in the same order as the questions
             judge: Grades open questions (as in `grade`)
             results: Already-computed `grade()` output, to avoid judging twice
+            stats: Per-answer cost (steps, tool calls, seconds), same order as the answers
+            repetition: Which repetition of the quiz these answers are
+            case_id: Label for the quiz, to tell several quizzes apart when combining
             abstain: The marker meaning "unanswerable", for references and answers
         """
         if results is None:
             results = self.grade(answers, judge)
+        stats = stats or [RunStats()] * len(answers)
         items = []
-        for question, answer, correct in zip(self.questions, answers, results):
+        for index, (question, answer, correct, run) in enumerate(
+            zip(self.questions, answers, results, stats)
+        ):
             if isinstance(question, OpenQuestion):
                 reference = question.text_answer
                 answerable = not is_abstain(reference, abstain)
@@ -139,6 +148,10 @@ class Quiz(BaseModel):
                     answer=answer,
                     correct=correct,
                     outcome=classify(answerable, abstained, correct),
+                    question_index=index,
+                    repetition=repetition,
+                    case_id=case_id,
+                    stats=run,
                 )
             )
         return QuizReport(items=items)
