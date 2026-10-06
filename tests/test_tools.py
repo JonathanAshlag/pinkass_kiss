@@ -29,16 +29,16 @@ from sqlalchemy import text
 @pytest.fixture(scope="module")
 def corpus(migrated_db):
     from kb import service
-    from kb.db import SessionLocal
+    from kb.storage.db import SessionLocal
 
     tag = uuid.uuid4().hex[:8]
     with SessionLocal() as s:
 
         def folder(title, parent):
-            return service.create_file(s, parent_id=parent, kind="folder", title=title)
+            return service.create_folder(s, parent_id=parent, title=title)
 
         def file(title, parent, content, **cols):
-            return service.create_file(s, parent_id=parent, kind="file", title=title, content=content, **cols)
+            return service.create_file(s, parent_id=parent, title=title, content=content, **cols)
 
         root = folder(f"tools-{tag}", None)
         alpha, beta = folder("alpha", root.id), folder("beta", root.id)
@@ -55,9 +55,9 @@ def corpus(migrated_db):
         dup_a, dup_b = file("Dup", root.id, "first dup"), file("Dup", root.id, "second dup")
 
         m_alpha = service.create_manifest(s, f"tools-alpha-{tag}")
-        service.add_manifest_member(s, m_alpha.id, file_id=alpha.id)
+        service.add_manifest_member(s, m_alpha.id, node_id=alpha.id)
         m_all = service.create_manifest(s, f"tools-all-{tag}")
-        service.add_manifest_member(s, m_all.id, file_id=root.id)
+        service.add_manifest_member(s, m_all.id, node_id=root.id)
         s.commit()
 
         ns = SimpleNamespace(
@@ -70,20 +70,19 @@ def corpus(migrated_db):
     with SessionLocal() as s:  # committed rows (the API needs them), so clean up by hand
         s.execute(text("DELETE FROM manifest_members WHERE manifest_id IN (:a, :b)"), {"a": ns.alpha, "b": ns.all})
         s.execute(text("DELETE FROM manifests WHERE id IN (:a, :b)"), {"a": ns.alpha, "b": ns.all})
-        s.execute(
-            text(
-                "WITH RECURSIVE t AS (SELECT id FROM files WHERE title = :t AND parent_id IS NULL"
-                " UNION ALL SELECT f.id FROM files f JOIN t ON f.parent_id = t.id)"
-                " DELETE FROM files WHERE id IN (SELECT id FROM t)"
-            ),
-            {"t": ns.root},
+        # files RESTRICT their folder, so: files in the subtree, then the folders themselves
+        subtree = (
+            "WITH RECURSIVE t AS (SELECT id FROM folders WHERE title = :t AND parent_id IS NULL"
+            " UNION ALL SELECT f.id FROM folders f JOIN t ON f.parent_id = t.id)"
         )
+        s.execute(text(f"{subtree} DELETE FROM files WHERE parent_id IN (SELECT id FROM t)"), {"t": ns.root})
+        s.execute(text(f"{subtree} DELETE FROM folders WHERE id IN (SELECT id FROM t)"), {"t": ns.root})
         s.commit()
 
 
 @pytest.fixture
 def session(corpus):
-    from kb.db import SessionLocal
+    from kb.storage.db import SessionLocal
 
     with SessionLocal() as s:
         yield s
@@ -103,7 +102,7 @@ def test_list_top_level_is_the_manifest_root(session, corpus):
 
     out = service.list_paths(session, corpus.alpha)
     # alpha's parent (the root) is out of scope, so alpha itself is the top level
-    assert len(_lines(out)) == 1 and out.text.startswith(f"{corpus.root}/alpha/  [")
+    assert _lines(out) == [f"{corpus.root}/alpha/"]  # folders carry no status
     assert not out.truncated
 
 
@@ -113,7 +112,7 @@ def test_list_under_shows_children_with_status_and_description(session, corpus):
     out = service.list_paths(session, corpus.alpha, under=f"{corpus.root}/alpha")
     lines = _lines(out)
     assert any(l.startswith(f"{corpus.root}/alpha/notes.md  [") and l.endswith("First notes") for l in lines)
-    assert any(l.startswith(f"{corpus.root}/alpha/sub/  [") for l in lines)  # folders end in "/"
+    assert f"{corpus.root}/alpha/sub/" in lines  # folders end in "/" and have no status
     assert not any("deep.md" in l for l in lines)  # not recursive
 
 
@@ -311,6 +310,39 @@ def test_max_chars_out_of_range(session, corpus):
 
     with pytest.raises(ValueError):
         service.list_paths(session, corpus.all, max_chars=0)
+
+
+# --------------------------------------------------------------------------
+# agent-facing adapter (kb.retrieval.agent_tools)
+# --------------------------------------------------------------------------
+
+
+def test_agent_tools_treat_root_spellings_as_the_top_level(corpus):
+    from kb.retrieval.agent_tools import AgentTools
+
+    tools = AgentTools(corpus.alpha)
+    top = tools.list_paths()
+    assert top.startswith(f"{corpus.root}/alpha/")
+    for spelling in (".", "./", "/", "", "  "):
+        assert tools.list_paths(spelling) == top, spelling
+
+
+def test_agent_tools_bad_path_is_an_error_string_with_a_hint(corpus):
+    from kb.retrieval.agent_tools import AgentTools
+
+    tools = AgentTools(corpus.alpha)
+    out = tools.list_paths("no/such/place")
+    assert out.startswith("error: no such path") and "no arguments" in out  # recoverable, not raised
+    assert tools.read_lines("no/such/place").startswith("error:")
+    assert tools.search_lines("(unclosed").startswith("error:")
+
+
+def test_agent_tools_langchain_docstrings_explain_paths(corpus):
+    from kb.retrieval.agent_tools import AgentTools
+
+    described = {t.name: t.description for t in AgentTools(corpus.alpha).as_langchain()}
+    assert set(described) == {"list_paths", "search_lines", "read_lines"}
+    assert "no arguments" in described["list_paths"] and "copied exactly" in described["read_lines"]
 
 
 # --------------------------------------------------------------------------

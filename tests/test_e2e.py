@@ -163,51 +163,9 @@ def dataset(request) -> Dataset:
 
 def make_tools(manifest_id: uuid.UUID) -> list:
     """The KB's DCI tools as LangChain tools, scoped to one manifest."""
-    from kb import service
-    from kb.db import SessionLocal
+    from kb.retrieval.agent_tools import AgentTools
 
-    def run(fn, *args, **kwargs) -> str:
-        with SessionLocal() as session:
-            try:
-                return fn(session, manifest_id, *args, **kwargs).text
-            except (ValueError, service.PatternError) as exc:
-                return f"error: {exc}"
-
-    def top_level(path: str | None) -> str | None:
-        # models habitually pass "." or "/" for "the root"; that means "no `under`"
-        path = (path or "").strip()
-        return None if path in {"", ".", "./", "/"} else path.removeprefix("./")
-
-    @tool
-    def list_paths(under: str | None = None, recursive: bool = False) -> str:
-        """List documents in the knowledge base (like `ls`/`find`).
-
-        Call it with no arguments first to see the top level. Pass `under` only as a
-        path copied exactly from a previous listing (never "." or a guessed path).
-        `recursive=True` lists everything below.
-        """
-        out = run(service.list_paths, under=top_level(under), recursive=recursive)
-        if out.startswith("error: no such path"):
-            out += " -- call list_paths with no arguments to see valid paths"
-        return out
-
-    @tool
-    def search_lines(pattern: str, ignore_case: bool = True, files_only: bool = False) -> str:
-        """Regex search over all documents (like `grep -n`). Output: path:line:text.
-
-        Use `files_only=True` to get just the matching paths, then `read_lines` them.
-        """
-        return run(service.search_lines, pattern, ignore_case=ignore_case, files_only=files_only)
-
-    @tool
-    def read_lines(path: str, offset: int = 1, limit: int = 50) -> str:
-        """Read a line range of one document (like `sed -n`).
-
-        `path` must be copied exactly from `list_paths` or `search_lines` output.
-        """
-        return run(service.read_lines, path, offset=offset, limit=limit)
-
-    return [list_paths, search_lines, read_lines]
+    return AgentTools(manifest_id).as_langchain()
 
 
 def build_agent(llm, tools):
@@ -233,14 +191,16 @@ def ask(
 
     Returns (final answer text, RunStats: model steps, tool calls, wall-clock seconds).
     `callbacks` are LangChain callback handlers for the run (e.g. an Opik tracer). An agent
-    that never stops calling tools (recursion limit) yields an empty answer, which grades
-    as wrong.
+    that never stops calling tools (recursion limit), or a model/server error, yields an
+    empty answer with `stats.failure` set: reported as an ERR outcome, never as an
+    abstention.
     """
     from langgraph.errors import GraphRecursionError
 
     app = build_agent(llm, make_tools(manifest_id))
     messages: list = []
     answer = ""
+    failure = None
     start = time.perf_counter()
     try:
         for state in app.stream(
@@ -252,10 +212,17 @@ def ask(
         # reasoning models (Qwen3, ...) served without a reasoning parser inline their thoughts
         answer = re.sub(r"<think>.*?</think>", "", str(messages[-1].text), flags=re.DOTALL).strip()
     except GraphRecursionError:
-        pass
+        failure = "recursion limit"
+    except Exception as exc:  # model/server error: one failed run must not abort the whole eval
+        failure = f"error: {type(exc).__name__}: {exc}"
     seconds = time.perf_counter() - start
     ai = [m for m in messages if isinstance(m, AIMessage)]
-    stats = RunStats(steps=len(ai), tool_calls=sum(len(m.tool_calls) for m in ai), seconds=seconds)
+    stats = RunStats(
+        steps=len(ai),
+        tool_calls=sum(len(m.tool_calls) for m in ai),
+        seconds=seconds,
+        failure=failure,
+    )
     return answer, stats
 
 
@@ -485,6 +452,14 @@ def test_llm_answers_quizzes_with_kb_tools(dataset):
     for item in report.items:
         if not item.correct:
             print(f"  {item.outcome}: {item.question!r} gold={item.reference!r} got={item.answer!r}")
-    no_tools = [(i.case_id, i.question) for i in report.items if i.stats.tool_calls == 0]
+    for item in report.items:
+        if item.outcome == "ERR":
+            print(f"  ERR: {item.question!r} -- {item.stats.failure}")
+    infra = [i.stats.failure for i in report.items if (i.stats.failure or "").startswith("error:")]
+    assert not infra, f"{len(infra)} run(s) failed with model/server errors, e.g. {infra[0]}"
+    assert not judge.unparseable, f"judge gave {len(judge.unparseable)} unparseable verdict(s): {judge.unparseable[:3]}"
+    no_tools = [
+        (i.case_id, i.question) for i in report.items if i.stats.tool_calls == 0 and i.outcome != "ERR"
+    ]
     assert not no_tools, f"model answered without using the KB tools: {no_tools}"
     assert report.accuracy >= min_acc, f"accuracy {report.accuracy:.0%} < {min_acc:.0%}"

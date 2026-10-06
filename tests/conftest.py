@@ -54,7 +54,7 @@ def _truncate() -> None:
 
 
 # --------------------------------------------------------------------------
-# QASPER fixture data, loaded into the KB once per test session
+# QASPER fixture data, loaded into the KB once per test module (and removed afterwards)
 # --------------------------------------------------------------------------
 
 FIXTURE = Path(__file__).parent / "eval" / "fixtures" / "qasper_20.jsonl"
@@ -66,14 +66,35 @@ def papers():
     return [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines()]
 
 
-@pytest.fixture(scope="session")
+def _delete_qasper() -> None:
+    """Remove the QASPER corpus and its manifests (leaves everything else alone), so the
+    shared test DB isn't polluted for modules that assume they own the KB (reindex_all,
+    root-level path assertions, ...)."""
+    from kb.storage.db import engine
+
+    subtree = (
+        "WITH RECURSIVE t AS (SELECT id FROM folders WHERE title = :t AND parent_id IS NULL"
+        " UNION ALL SELECT f.id FROM folders f JOIN t ON f.parent_id = t.id)"
+    )
+    with engine.begin() as conn:
+        # members first: manifests are matched by name, then every row that points at the subtree
+        conn.execute(text("DELETE FROM manifest_members WHERE manifest_id IN (SELECT id FROM manifests WHERE name LIKE 'qasper-%')"))
+        conn.execute(text("DELETE FROM manifests WHERE name LIKE 'qasper-%'"))
+        conn.execute(text(f"{subtree} DELETE FROM files WHERE parent_id IN (SELECT id FROM t)"), {"t": ROOT_TITLE})
+        conn.execute(text(f"{subtree} DELETE FROM folders WHERE id IN (SELECT id FROM t)"), {"t": ROOT_TITLE})
+
+
+@pytest.fixture(scope="module")
 def ids(migrated_db, papers):
     import load_qasper
 
-    return load_qasper.load_into_kb(papers)  # {paper id: paper folder node id}
+    _delete_qasper()  # a previous aborted run may have left it behind (the loader refuses to overwrite)
+    loaded = load_qasper.load_into_kb(papers)  # {paper id: paper folder node id}
+    yield loaded
+    _delete_qasper()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def manifests(ids, papers):
     """{paper id: manifest id}, each holding exactly that paper's folder (so its whole
     subtree). Plus "corpus": a manifest over the whole QASPER folder."""

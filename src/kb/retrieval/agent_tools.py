@@ -67,7 +67,13 @@ class AgentTools:
         return "\n".join(lines)
 
     def list_paths(self, under: str | None = None, recursive: bool = False) -> str:
-        return self._run(service.list_paths, under=under, recursive=recursive)
+        # models habitually pass "." or "/" for "the root"; that means "no `under`"
+        under = (under or "").strip()
+        under = None if under in {"", ".", "./", "/"} else under.removeprefix("./")
+        out = self._run(service.list_paths, under=under, recursive=recursive)
+        if out.startswith("error: no such path"):
+            out += " -- call list_paths with no arguments to see valid paths"
+        return out
 
     def search_lines(self, pattern: str, ignore_case: bool = True, files_only: bool = False) -> str:
         return self._run(service.search_lines, pattern, ignore_case=ignore_case, files_only=files_only)
@@ -82,17 +88,28 @@ class AgentTools:
 
         @tool
         def list_paths(under: str | None = None, recursive: bool = False) -> str:
-            """List documents in the knowledge base (like `ls`/`find`)."""
+            """List documents in the knowledge base (like `ls`/`find`).
+
+            Call it with no arguments first to see the top level. Pass `under` only as a
+            path copied exactly from a previous listing (never "." or a guessed path).
+            `recursive=True` lists everything below.
+            """
             return self.list_paths(under, recursive)
 
         @tool
         def search_lines(pattern: str, ignore_case: bool = True, files_only: bool = False) -> str:
-            """Regex search over all documents (like `grep -n`). Output: path:line:text."""
+            """Regex search over all documents (like `grep -n`). Output: path:line:text.
+
+            Use `files_only=True` to get just the matching paths, then `read_lines` them.
+            """
             return self.search_lines(pattern, ignore_case, files_only)
 
         @tool
         def read_lines(path: str, offset: int = 1, limit: int = 50) -> str:
-            """Read a line range of one document by path (like `sed -n`)."""
+            """Read a line range of one document (like `sed -n`).
+
+            `path` must be copied exactly from `list_paths` or `search_lines` output.
+            """
             return self.read_lines(path, offset, limit)
 
         tools = [list_paths, search_lines, read_lines]

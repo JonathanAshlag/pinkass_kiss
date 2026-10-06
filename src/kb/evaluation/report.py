@@ -2,16 +2,21 @@
 Quiz report: a confusion matrix and the usual metrics derived from it.
 
 Positive = "the question has an answer" (its reference isn't the abstain marker).
-An answer is a *hit* when it is judged correct. Every question lands in exactly one cell:
+An answer is a *hit* when it is judged correct. Every answer lands in exactly one outcome:
 
 - TP: answerable, answered correctly
-- FN: answerable, but the agent abstained or answered wrongly
+- FN: answerable, but the agent abstained (a miss)
+- WA: answerable, answered, but wrongly (a confident wrong answer)
 - FP: unanswerable, but the agent gave an answer instead of abstaining
 - TN: unanswerable, and the agent abstained
+- ERR: the run itself failed (recursion limit, model/server error). Never graded, and
+  never credited as an abstention. Left out of precision/recall/specificity (so check
+  `err`), but counted in `total`, so it lowers accuracy.
 
-Metrics follow scikit-learn's definitions (ratios with a zero denominator are 0.0), and
-`confusion_matrix()` uses its layout: rows = reference, columns = prediction,
-`[[TN, FP], [FN, TP]]`.
+`confusion_matrix()` is scikit-learn's layout, rows = reference, columns = prediction
+(abstain/miss vs. hit): `[[TN, FP], [FN + WA, TP]]`. Precision is over the answers the
+agent actually gave, `TP / (TP + WA + FP)`, so wrong answers count against it.
+Ratios with a zero denominator are 0.0.
 """
 
 import re
@@ -22,13 +27,16 @@ from pydantic import BaseModel
 
 ABSTAIN = "unanswerable"
 
-Outcome = Literal["TP", "FN", "FP", "TN"]
+Outcome = Literal["TP", "FN", "WA", "FP", "TN", "ERR"]
 
 
 def is_abstain(text: str, marker: str = ABSTAIN) -> bool:
     """True if `text` is the abstain marker (case/punctuation-insensitive) or empty."""
-    cleaned = re.sub(r"[^\w\s]", "", text.lower()).strip()
-    return not cleaned or cleaned == marker
+    def clean(value: str) -> str:
+        return re.sub(r"[^\w\s]", "", value.lower()).strip()
+
+    cleaned = clean(text)
+    return not cleaned or cleaned == clean(marker)
 
 
 class RunStats(BaseModel):
@@ -36,6 +44,7 @@ class RunStats(BaseModel):
     steps: int = 0  # model turns (LLM calls) the agent took
     tool_calls: int = 0
     seconds: float = 0.0
+    failure: Optional[str] = None  # set when the run failed instead of answering
 
 
 class Stats(BaseModel):
@@ -113,6 +122,10 @@ class QuizReport(BaseModel):
         return self._count("FN")
 
     @property
+    def wa(self) -> int:
+        return self._count("WA")
+
+    @property
     def fp(self) -> int:
         return self._count("FP")
 
@@ -121,23 +134,28 @@ class QuizReport(BaseModel):
         return self._count("TN")
 
     @property
+    def err(self) -> int:
+        return self._count("ERR")
+
+    @property
     def total(self) -> int:
         return len(self.items)
 
     @property
     def accuracy(self) -> float:
-        """Fraction of questions handled correctly (answered right, or rightly abstained)."""
+        """Fraction of answers handled correctly (answered right, or rightly abstained);
+        failed runs count as not correct."""
         return _ratio(self.tp + self.tn, self.total)
 
     @property
     def precision(self) -> float:
-        """TP / (TP + FP): of the confident hits, how many weren't hallucinated answers."""
-        return _ratio(self.tp, self.tp + self.fp)
+        """TP / (TP + WA + FP): of the answers the agent gave, how many were right."""
+        return _ratio(self.tp, self.tp + self.wa + self.fp)
 
     @property
     def recall(self) -> float:
-        """TP / (TP + FN): of the answerable questions, how many were answered correctly."""
-        return _ratio(self.tp, self.tp + self.fn)
+        """TP / (TP + FN + WA): of the answerable questions, how many were answered correctly."""
+        return _ratio(self.tp, self.tp + self.fn + self.wa)
 
     @property
     def specificity(self) -> float:
@@ -182,8 +200,8 @@ class QuizReport(BaseModel):
         ]
 
     def confusion_matrix(self) -> list[list[int]]:
-        """[[TN, FP], [FN, TP]] (scikit-learn layout)."""
-        return [[self.tn, self.fp], [self.fn, self.tp]]
+        """[[TN, FP], [FN + WA, TP]] (scikit-learn layout)."""
+        return [[self.tn, self.fp], [self.fn + self.wa, self.tp]]
 
     def metrics(self) -> dict[str, float]:
         return {
@@ -209,7 +227,9 @@ class QuizReport(BaseModel):
             "confusion matrix (rows = reference, cols = prediction)",
             "                    pred: abstain/miss   pred: hit",
             f"  ref: unanswerable {self.tn:>14}  {self.fp:>14}",
-            f"  ref: answerable   {self.fn:>14}  {self.tp:>14}",
+            f"  ref: answerable   {self.fn + self.wa:>14}  {self.tp:>14}",
+            f"  (answerable misses: {self.fn} abstained, {self.wa} answered wrongly)",
+            f"  failed runs (not graded): {self.err}",
             "  ".join(f"{k}: {v:.2f}" for k, v in m.items()),
             f"runtime s/answer: {self.runtime}",
             f"steps/answer:     {self.steps}",
@@ -224,7 +244,11 @@ def _ratio(num: float, den: float) -> float:
     return num / den if den else 0.0
 
 
-def classify(answerable: bool, abstained: bool, correct: bool) -> Outcome:
+def classify(answerable: bool, abstained: bool, correct: bool, failed: bool = False) -> Outcome:
+    if failed:
+        return "ERR"
     if answerable:
-        return "TP" if correct and not abstained else "FN"
+        if abstained:
+            return "FN"
+        return "TP" if correct else "WA"
     return "TN" if abstained else "FP"
