@@ -4,9 +4,8 @@ converted to markdown. Unlike markdown, the stored content isn't the original, s
 set `retain_original = True` and the folder walker keeps the raw bytes in the blob store
 (see kb.storage.blobs) when one is configured.
 
-Built-ins: PyMuPDF4LLM for `.pdf` (always installed), and Docling for
-`.pdf .docx .pptx .html .htm` when the optional `langchain-docling` extra is installed
-(it then takes over `.pdf`).
+Built-ins: PyMuPDF4LLM for `.pdf`, Docling for `.docx .pptx .xlsx .csv .html .htm`. No
+fallbacks: both libraries are core dependencies, and images aren't ingested.
 """
 
 from collections.abc import Callable
@@ -18,6 +17,8 @@ from kb.ingest.processors.base import ProcessedDocument
 from kb.ingest.processors.markdown import title_from_markdown
 
 LoaderFactory = Callable[[Path], BaseLoader]
+
+DOCLING_EXTENSIONS = {".docx", ".pptx", ".xlsx", ".csv", ".html", ".htm"}
 
 
 class LoaderProcessor:
@@ -50,28 +51,16 @@ def pymupdf4llm_processor() -> LoaderProcessor:
     )
 
 
-def docling_available() -> bool:
-    try:
-        import langchain_docling  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
 def docling_processor() -> LoaderProcessor:
-    """Requires the `docling` extra; raises ImportError otherwise."""
     from langchain_docling import DoclingLoader
     from langchain_docling.loader import ExportType
 
     return LoaderProcessor(
         "docling",
-        {".pdf", ".docx", ".pptx", ".html", ".htm"},
+        DOCLING_EXTENSIONS,
         lambda path: DoclingLoader(file_path=str(path), export_type=ExportType.MARKDOWN),
     )
 
 
 def builtin_loader_processors() -> list[LoaderProcessor]:
-    """Docling if installed (it covers .pdf too), else PyMuPDF4LLM for .pdf."""
-    if docling_available():
-        return [docling_processor()]
-    return [pymupdf4llm_processor()]
+    return [pymupdf4llm_processor(), docling_processor()]

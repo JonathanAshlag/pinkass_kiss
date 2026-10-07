@@ -398,8 +398,9 @@ upload size limit yet.
 **Non-markdown formats** (`ingest/processors/converters.py`): `LoaderProcessor(name, extensions,
 loader_factory)` runs any LangChain `BaseLoader` as a `Processor` (docs joined, title =
 first H1 else stem, empty text → failed). Built-ins: `PyMuPDF4LLMLoader(mode="single")`
-for `.pdf`; `DoclingLoader(export_type=MARKDOWN)` for `.pdf .docx .pptx .html .htm` when
-the optional `docling` extra is installed (it then takes `.pdf`; it pulls in torch).
+for `.pdf`; `DoclingLoader(export_type=MARKDOWN)` for `.docx .pptx .xlsx .csv .html .htm` (it pulls
+in torch). Both are core dependencies with no fallbacks; images aren't ingested. Text/code
+files use `text.py`; git repos use `ingest/git.py` (`ingest_git_repo`).
 
 **Raw originals** (`src/kb/storage/blobs.py`): processors with `retain_original = True` (the
 loader ones, not markdown) get their source bytes stored via `BlobStore.put_original` and the

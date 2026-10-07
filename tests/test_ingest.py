@@ -222,11 +222,13 @@ def test_blob_store_error_fails_only_that_file(tmp_path):
     assert path.name == "report.pdf" and "bucket unreachable" in err
 
 
-def test_docling_processor_registered_when_installed():
+def test_converter_routing():
     pytest.importorskip("langchain_docling")
     registry = default_registry()
-    for ext in (".pdf", ".docx", ".pptx", ".html", ".htm"):
+    assert registry.for_path(Path("x.pdf")).name == "pymupdf4llm"
+    for ext in (".docx", ".pptx", ".xlsx", ".csv", ".html", ".htm"):
         assert registry.for_path(Path("x" + ext)).name == "docling"
+    assert registry.for_path(Path("x.png")) is None  # images aren't ingested
 
 
 # --------------------------------------------------------------------------
