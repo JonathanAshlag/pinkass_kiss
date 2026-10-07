@@ -1,6 +1,7 @@
 """Folder ingestion (kb.ingest): registry/processor and folder-plan tests (no DB), plus
 DB-backed materialize/walker tests."""
 
+import io
 import uuid
 from pathlib import Path
 
@@ -400,6 +401,10 @@ def test_parent_must_be_an_existing_folder(db_session, tmp_path):
         ["a.md"],  # loose files with no parent folder (the KB root holds folders only)
         ["docs/a.md", "other/b.md"],  # two top-level folders
         ["a.md", "docs/b.md"],  # loose files and a folder mixed
+        ["docs/a.md", "docs/a.md"],  # duplicate
+        ["docs/Notes.md", "docs/notes.md"],  # differ only in case: would overwrite on macOS
+        ["docs/a", "docs/a/b.md"],  # "docs/a" both a file and a directory
+        ["docs/A/b.md", "docs/a"],  # same, across case and order
         [],
     ],
 )
@@ -408,6 +413,13 @@ def test_upload_rejects_bad_paths(paths):
 
     with pytest.raises(UploadError):
         ingest_upload(None, [(p, b"# x") for p in paths])  # rejected before any DB use
+
+
+def test_upload_rejects_loose_case_collision():
+    from kb.ingest import UploadError, ingest_upload
+
+    with pytest.raises(UploadError, match="duplicate"):
+        ingest_upload(None, [("a.md", b"# x"), ("A.md", b"# y")], parent_id=uuid.uuid4())
 
 
 def test_upload_mirrors_tree(db_session):
@@ -454,6 +466,67 @@ def test_upload_loose_files_go_into_parent(db_session):
     assert set(children) == {"Existing", "A"}
     assert children["A"].sources == [{"resource": "upload:a.md"}] and children["A"].tags == ["up"]
     assert service.get_folder(db_session, parent.id).tags == []  # the parent isn't retagged
+
+
+def test_upload_reports_hidden_files_as_skipped(db_session):
+    from kb.ingest import ingest_upload
+
+    report = ingest_upload(
+        db_session,
+        [("docs/a.md", b"# A"), ("docs/.env", b"SECRET=1"), ("docs/.git/notes.md", b"# Hidden")],
+    )
+
+    assert sorted(p.as_posix() for p in report.skipped) == ["docs/.env", "docs/.git/notes.md"]
+    assert len(report.files_created) == 1 and report.folders_created == [report.root_id]
+    assert set(children_by_title(db_session, report.root_id)) == {"A"}
+
+
+def test_upload_streams_file_objects(db_session):
+    from kb.ingest import ingest_upload
+
+    report = ingest_upload(db_session, [("docs/a.md", io.BytesIO(b"# A\n\nbody"))])
+
+    node = children_by_title(db_session, report.root_id)["A"]
+    assert node.content == "# A\n\nbody"
+
+
+@pytest.mark.parametrize(
+    "limits, files",
+    [
+        (dict(max_files=1), [("docs/a.md", b"# A"), ("docs/b.md", b"# B")]),
+        (dict(max_file_bytes=3), [("docs/a.md", b"# AB")]),
+        (dict(max_file_bytes=3), [("docs/a.md", io.BytesIO(b"# AB"))]),
+        (dict(max_total_bytes=5), [("docs/a.md", b"# A"), ("docs/b.md", b"# B")]),
+    ],
+)
+def test_upload_limits(limits, files):
+    from kb.ingest import UploadLimits, UploadTooLarge, ingest_upload
+
+    with pytest.raises(UploadTooLarge):
+        ingest_upload(None, files, limits=UploadLimits(**limits))  # never reaches the DB
+
+
+def test_upload_limits_within_caps(db_session):
+    from kb.ingest import UploadLimits, ingest_upload
+
+    files = [("docs/a.md", b"# A"), ("docs/b.md", b"# B")]
+    report = ingest_upload(db_session, files, limits=UploadLimits(max_files=2, max_file_bytes=3, max_total_bytes=6))
+    assert len(report.files_created) == 2
+
+
+def test_upload_limits_from_env(monkeypatch):
+    from kb.ingest import UploadLimits
+
+    for name in ("MAX_FILES", "MAX_FILE_BYTES", "MAX_TOTAL_BYTES"):
+        monkeypatch.delenv(f"KB_UPLOAD_{name}", raising=False)
+    assert UploadLimits.from_env() == UploadLimits(**UploadLimits.DEFAULTS)
+
+    monkeypatch.setenv("KB_UPLOAD_MAX_FILES", "7")
+    monkeypatch.setenv("KB_UPLOAD_MAX_FILE_BYTES", "0")  # 0 = no cap
+    monkeypatch.setenv("KB_UPLOAD_MAX_TOTAL_BYTES", "")  # empty = default
+    assert UploadLimits.from_env() == UploadLimits(
+        max_files=7, max_file_bytes=None, max_total_bytes=UploadLimits.DEFAULTS["max_total_bytes"]
+    )
 
 
 @pytest.fixture
@@ -631,3 +704,33 @@ def test_ingest_endpoint(client, db_session):
     assert loose.status_code == 201, loose.text
     assert loose.json()["root_id"] == body["root_id"] and loose.json()["folders_created"] == []
     assert client.post("/ingest", files=[("files", ("c.md", b"# C"))], data={"paths": ["c.md"]}).status_code == 422
+
+
+def test_ingest_endpoint_rejects_collisions_and_creates_nothing(client, db_session):
+    for paths in (["n/a.md", "n/a.md"], ["n/a", "n/a/b.md"]):
+        res = client.post(
+            "/ingest",
+            files=[("files", ("a.md", b"# A")), ("files", ("b.md", b"# B"))],
+            data={"paths": paths},
+        )
+        assert res.status_code == 422, res.text
+    assert "n" not in children_by_title(db_session, None)
+
+
+def test_ingest_endpoint_limits(client, db_session, monkeypatch):
+    files = [("files", ("a.md", b"# A")), ("files", ("b.md", b"# B"))]
+    data = {"paths": ["n/a.md", "n/b.md"]}
+
+    monkeypatch.setenv("KB_UPLOAD_MAX_FILES", "1")
+    res = client.post("/ingest", files=files, data=data)
+    assert res.status_code == 413 and "limit" in res.json()["detail"]
+
+    monkeypatch.setenv("KB_UPLOAD_MAX_FILES", "")
+    monkeypatch.setenv("KB_UPLOAD_MAX_FILE_BYTES", "2")
+    assert client.post("/ingest", files=files, data=data).status_code == 413
+    assert "n" not in children_by_title(db_session, None)
+
+    monkeypatch.setenv("KB_UPLOAD_MAX_FILE_BYTES", "")
+    res = client.post("/ingest", files=files + [("files", (".env", b"x"))], data={"paths": [*data["paths"], "n/.env"]})
+    assert res.status_code == 201, res.text
+    assert res.json()["skipped"] == ["n/.env"]

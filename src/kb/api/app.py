@@ -33,7 +33,7 @@ from kb import service
 from kb.storage import blobs
 from kb.storage.db import SessionLocal
 from kb.retrieval.dci import DEFAULT_MAX_CHARS, DEFAULT_READ_LIMIT, MAX_CHARS_LIMIT
-from kb.ingest import UploadError, default_registry, ingest_upload
+from kb.ingest import UploadError, UploadLimits, UploadTooLarge, default_registry, ingest_upload
 from kb.api.schemas import (
     IngestExtensionsRead,
     IngestFailure,
@@ -95,6 +95,12 @@ def _cycle_error_handler(request, exc):
 @app.exception_handler(service.PatternError)
 def _pattern_error_handler(request, exc):
     return _json_error(422, str(exc))
+
+
+@app.exception_handler(UploadTooLarge)
+def _too_large_handler(request, exc):
+    # An UploadError subclass; Starlette picks the most specific handler.
+    return _json_error(413, str(exc))
 
 
 @app.exception_handler(UploadError)
@@ -468,9 +474,11 @@ def ingest(
         raise UploadError(f"got {len(files)} files but {len(paths)} paths")
     report = ingest_upload(
         session,
-        ((path, upload.file.read()) for path, upload in zip(paths, files)),
+        # The spooled files themselves, streamed by ingest_upload -- not .read() whole.
+        [(path, upload.file) for path, upload in zip(paths, files)],
         parent_id=parent_id,
         tags=tags,
+        limits=UploadLimits.from_env(),
     )
     _commit(session, background_tasks)
     return IngestReportRead(

@@ -379,21 +379,34 @@ parsing** (user's choice), title = first `# ` H1 else filename stem.
 
 CLI: `python scripts/ingest_folder.py PATH [--parent-id UUID] [--tag T ...] [--dry-run]`.
 
-**Uploads** (`upload.py`): `ingest_upload(session, [(rel_path, bytes), ...], ...)` writes
-the files into a temp dir mirroring the tree and runs `ingest_folder` over it (so
+**Uploads** (`upload.py`): `ingest_upload(session, [(rel_path, bytes | binary file), ...], ...)`
+streams the files (1 MiB chunks; the API passes the spooled `UploadFile.file`s, never
+`.read()`s them whole) into a temp dir mirroring the tree and runs `ingest_folder` over it (so
 processors stay path-based). Paths must be relative, `/`-separated, with no `..`, and
 either all under one top-level folder (whose name becomes a new root folder's title) or
 all bare file names ("loose files", created straight into `parent_id`, which is then
 required, via `ingest_folder(..., root_is_parent=True)` → `materialize(root_is_parent=True)`;
 `root_id` = `parent_id`). Anything else raises
-`UploadError` (a `ValueError` subclass, mapped to 422 ahead of the generic 404 handler).
-Upload sources are `upload:<rel path>`, not temp-dir file URIs. API:
+`UploadError` (a `ValueError` subclass, mapped to 422 ahead of the generic 404 handler),
+as do duplicate paths (compared **case-insensitively**, on every platform: on macOS
+they'd overwrite each other) and a path that's both a file and a directory (`n/a` +
+`n/a/b.md`). All path checks run before anything is written. Hidden files (a `.` segment
+below the uploaded root) aren't written but are listed in `report.skipped`.
+**Limits**: `UploadLimits(max_files, max_file_bytes, max_total_bytes)` (None = no cap;
+`ingest_upload` defaults to none). The API uses `UploadLimits.from_env()`
+(`KB_UPLOAD_MAX_FILES`/`_MAX_FILE_BYTES`/`_MAX_TOTAL_BYTES`; empty = default 500 files /
+100 MiB / 1 GiB, `0` = no cap). Exceeding one raises `UploadTooLarge(UploadError)` → **413**;
+byte caps are enforced while streaming. Starlette's own form parser caps a request at
+1000 files and 1000 plain fields (each file sends a `paths` field) with a bare 400 before
+our code runs, which is why the file default is 500. Disk: Starlette spools uploads
+>1 MB to TMPDIR and the mirror dir goes there too, so on OpenShift mount an `emptyDir` at
+`/tmp` (`deploy/openshift/upload-scratch.yaml`, with `ephemeral-storage` limits) and cap
+request bodies at the router. Upload sources are `upload:<rel path>`, not temp-dir file URIs. API:
 `GET /ingest/extensions` and `POST /ingest` (multipart: `files[]` + a parallel `paths[]`,
 optional `parent_id`, `tags[]`). Needs `python-multipart`. The dev UI has "⇪ ingest
 folder" (root) and "Ingest here…" (on folders: a folder picker, `<input webkitdirectory>`,
 or a plain multi-file picker for loose files).
-It filters hidden and unsupported files client-side, so those are never uploaded. No
-upload size limit yet.
+It filters hidden and unsupported files client-side, so those are never uploaded.
 
 **Non-markdown formats** (`ingest/processors/converters.py`): `LoaderProcessor(name, extensions,
 loader_factory)` runs any LangChain `BaseLoader` as a `Processor` (docs joined, title =
@@ -508,7 +521,7 @@ head`). There is now a committed pytest suite (`pytest -m "not llm"`, needs
 local `pinkas_test` DB exists for this on the Homebrew Postgres; it is **not** in `.env`,
 so set it explicitly or every DB test silently skips:
 `TEST_DATABASE_URL=postgresql+psycopg://yonatanashlag@localhost:5432/pinkas_test`); it passes in the `kb`
-env (208 passed, Docling test skipped), including `tests/test_policy.py` (pure
+env (223 passed, Docling test skipped), including `tests/test_policy.py` (pure
 permission matrix) and `tests/test_permissions.py` (service + `/nodes` enforcement). The tests use fake embeddings;
 real Ollama embeddings were verified on the dev DB (6 pages → 222 chunks, a second
 `reindex.py --all` skips all of them, and manifest-scoped `semantic_search` returns
@@ -557,4 +570,4 @@ follow this pattern — copy it for any new enum.
   semantic search earns its place; then consider `HybridSearchConfig` (keyword + vector
   fusion in `langchain-postgres`) and an index-status route.
 - Background indexing is in-process (`BackgroundTask`); a real worker would loop
-  `index_files`/`reindex_all`. No upload size limit.
+  `index_files`/`reindex_all`.
