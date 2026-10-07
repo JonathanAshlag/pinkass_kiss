@@ -1,14 +1,13 @@
 """
-Ingests a local directory tree into the knowledge base (see kb.ingest).
+Ingests a git repository (cloned shallowly) into the knowledge base (see kb.ingest.git).
 
-Directories become folder nodes, supported files (markdown, text/code, PDF, docx, pptx, xlsx, csv, html -- see
-kb.ingest.processors) become file nodes, everything else is skipped and listed in the summary. Re-running creates a new
-subtree -- there is no dedupe.
+The repo is cloned at --ref (a branch or tag; default HEAD) and its working tree ingested
+like a folder; each node's source is git+<url>@<commit>#<path>. Re-running creates a new subtree.
 
 Needs DATABASE_URL (see .env.example).
 
 Usage:
-    python scripts/ingest_folder.py PATH [--parent-id UUID] [--tag TAG ...] [--dry-run] [--index]
+    python scripts/ingest_git.py URL_OR_PATH [--ref BRANCH_OR_TAG] [--parent-id UUID] [--tag TAG ...] [--dry-run] [--index]
 
 --index embeds the created nodes into the semantic index (kb_chunks) after the commit;
 it needs the embeddings model (EMBEDDINGS_MODEL, see .env.example) to be reachable.
@@ -27,7 +26,8 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("path", type=Path, help="directory to ingest")
+    p.add_argument("url", help="repository URL or local path")
+    p.add_argument("--ref", default=None, help="branch or tag to clone (default: remote HEAD)")
     p.add_argument("--parent-id", type=uuid.UUID, default=None, help="folder node to ingest under (default: root)")
     p.add_argument("--tag", action="append", default=[], help="tag applied to every created node (repeatable)")
     p.add_argument("--dry-run", action="store_true", help="roll back instead of committing")
@@ -36,11 +36,11 @@ def main() -> None:
 
     from kb import service
     from kb.storage.db import SessionLocal
-    from kb.ingest import ingest_folder
+    from kb.ingest import ingest_git_repo
 
     with SessionLocal() as session:
         try:
-            report = ingest_folder(session, args.path, parent_id=args.parent_id, tags=args.tag)
+            report = ingest_git_repo(session, args.url, ref=args.ref, parent_id=args.parent_id, tags=args.tag)
         except ValueError as exc:
             sys.exit(str(exc))
         if args.dry_run:
