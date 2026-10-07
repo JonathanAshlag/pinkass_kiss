@@ -475,7 +475,7 @@ def get_original(session: Session, node_id: uuid.UUID) -> tuple[bytes, str, str]
     store = blobs.get_blob_store()
     if not node.blob_key or store is None:
         return None
-    data = blobs.get_original(store, node.blob_key)
+    data = store.get_original(node.blob_key)
     if data is None:
         return None
     resource = next((s.get("resource") for s in node.sources if isinstance(s, dict)), None)

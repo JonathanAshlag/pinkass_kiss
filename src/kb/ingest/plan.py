@@ -34,13 +34,20 @@ def materialize(
     *,
     parent_id: uuid.UUID | None = None,
     folder_fields: dict[str, Any] | None = None,
+    root_is_parent: bool = False,
 ) -> dict[str, Node]:
     """
     Creates every planned node, plus any implied ancestor folders (with `folder_fields`),
     under `parent_id`, which must be an existing folder (None = the KB root). The plan
     must contain its root (""), which must be a folder; files need content, folders
     can't have any. Returns {path: node}, in creation order. Never commits.
+
+    `root_is_parent`: the plan's root *is* `parent_id` (which must then be set) rather
+    than a new folder under it, so the plan's top-level nodes land directly in
+    `parent_id`. `{"": <that folder>}` is still in the result.
     """
+    if root_is_parent and parent_id is None:
+        raise ValueError("root_is_parent needs a parent_id")
     if parent_id is not None and service.get_folder(session, parent_id) is None:
         raise ValueError(f"no such folder: {parent_id}")
     planned: dict[str, PlannedNode] = {}
@@ -61,6 +68,9 @@ def materialize(
 
     def ensure(path: str) -> Node:
         if path in created:
+            return created[path]
+        if path == "" and root_is_parent:
+            created[path] = service.get_folder(session, parent_id)
             return created[path]
         node = planned.get(path) or PlannedNode(path, "folder", fields=dict(folder_fields or {}))
         if path == "":

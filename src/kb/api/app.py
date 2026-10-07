@@ -6,7 +6,9 @@ Run locally: `uvicorn kb.api:app --reload` (needs DATABASE_URL in the environmen
 same as Alembic).
 """
 
+import logging
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Iterator
 
@@ -24,9 +26,11 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from kb import service
+from kb.storage import blobs
 from kb.storage.db import SessionLocal
 from kb.retrieval.dci import DEFAULT_MAX_CHARS, DEFAULT_READ_LIMIT, MAX_CHARS_LIMIT
 from kb.ingest import UploadError, default_registry, ingest_upload
@@ -50,7 +54,24 @@ from kb.api.schemas import (
     ToolOutputRead,
 )
 
-app = FastAPI(title="pinkass_kiss KB API")
+log = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Checks the blob store once at startup: with BLOB_REQUIRED=1 a missing or broken
+    store aborts startup; otherwise a broken one is only logged."""
+    try:
+        status = blobs.check_blob_store()
+        log.info("blob store: %s", status)
+    except blobs.BlobStoreError as exc:
+        if blobs.blob_required():
+            raise
+        log.error("blob store check failed (originals may not be kept): %s", exc)
+    yield
+
+
+app = FastAPI(title="pinkass_kiss KB API", lifespan=lifespan)
 
 
 def get_session() -> Iterator[Session]:
@@ -97,8 +118,39 @@ def _value_error_handler(request, exc):
     return _json_error(404, str(exc))
 
 
+@app.exception_handler(blobs.BlobStoreError)
+def _blob_store_error_handler(request, exc):
+    # S3 unreachable / refusing: an upstream failure, not a missing node.
+    log.error("blob store: %s", exc)
+    return _json_error(502, f"blob store unavailable: {exc}")
+
+
 def _json_error(status_code: int, detail: str):
     return JSONResponse(status_code=status_code, content={"detail": detail})
+
+
+# --------------------------------------------------------------------------
+# Health
+# --------------------------------------------------------------------------
+
+
+@app.get("/health")
+def health():
+    """DB and blob-store status; 200 when everything is usable, 503 otherwise. A blob
+    store that isn't configured counts as fine unless BLOB_REQUIRED is set."""
+    checks: dict[str, str] = {}
+    try:
+        with SessionLocal() as s:
+            s.execute(text("SELECT 1"))
+        checks["db"] = "ok"
+    except Exception as exc:  # noqa: BLE001 -- report, don't raise
+        checks["db"] = f"error: {type(exc).__name__}: {exc}"
+    try:
+        checks["blob_store"] = blobs.check_blob_store()
+    except blobs.BlobStoreError as exc:
+        checks["blob_store"] = f"error: {exc}"
+    healthy = all(v in ("ok", "not configured") for v in checks.values())
+    return JSONResponse(status_code=200 if healthy else 503, content=checks)
 
 
 # --------------------------------------------------------------------------

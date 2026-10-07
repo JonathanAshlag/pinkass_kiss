@@ -115,8 +115,8 @@ class File(Base):
     # (see kb.storage.dal.delete_node); all DAL reads exclude these by default.
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
-    # Placeholders for a future object-storage-backed blob layer. Unused
-    # until that layer exists -- content stays text-only for now.
+    # The retained original of a converted file (PDF, ...) in kb.storage.blobs; NULL for
+    # markdown nodes or when no blob store is configured.
     blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     blob_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     blob_mime_type: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -169,16 +169,11 @@ def test_loader_processor_joins_docs_and_titles(tmp_path):
         empty.process(tmp_path / "x.e")
 
 
-def test_pdf_plan_keeps_original_in_blob_store(tmp_path):
-    from langchain_core.stores import InMemoryByteStore
-
-    from kb.storage.blobs import get_original
-
+def test_pdf_plan_keeps_original_in_blob_store(tmp_path, blob_store):
     pdf = make_pdf(tmp_path / "docs" / "report.pdf")
     write(tmp_path / "docs" / "notes.md", "# Notes")
-    store = InMemoryByteStore()
 
-    plan = plan_folder(tmp_path / "docs", blob_store=store)
+    plan = plan_folder(tmp_path / "docs", blob_store=blob_store)
 
     nodes = {n.path: n for n in plan.nodes}
     report = nodes["report.pdf"]
@@ -186,9 +181,9 @@ def test_pdf_plan_keeps_original_in_blob_store(tmp_path):
     assert "widget count rose sharply" in report.content and "Second page text" in report.content
     assert report.fields["blob_mime_type"] == "application/pdf"
     assert report.fields["blob_size_bytes"] == pdf.stat().st_size
-    assert get_original(store, report.fields["blob_key"]) == pdf.read_bytes()
+    assert blob_store.get_original(report.fields["blob_key"]) == pdf.read_bytes()
     assert not any(k.startswith("blob_") for k in nodes["notes.md"].fields)  # markdown: content is the original
-    assert len(list(store.yield_keys())) == 1
+    assert blob_store.client.list_objects_v2(Bucket="bkt")["KeyCount"] == 1
 
 
 def test_plan_without_blob_store_keeps_nothing(tmp_path):
@@ -208,10 +203,13 @@ def test_corrupt_pdf_is_reported_failed(tmp_path):
 
 
 def test_blob_store_error_fails_only_that_file(tmp_path):
-    from langchain_core.stores import InMemoryByteStore
+    from kb.storage.blobs import BlobStore
 
-    class BrokenStore(InMemoryByteStore):
-        def mset(self, key_value_pairs):
+    class BrokenStore(BlobStore):
+        def __init__(self):
+            pass
+
+        def put_original(self, data, mime):
             raise ConnectionError("bucket unreachable")
 
     make_pdf(tmp_path / "report.pdf")
@@ -342,8 +340,9 @@ def test_parent_must_be_an_existing_folder(db_session, tmp_path):
         ["/abs/a.md"],
         ["docs/../../x.md"],
         ["docs\\a.md"],
-        ["a.md"],  # not inside a folder
+        ["a.md"],  # loose files with no parent folder (the KB root holds folders only)
         ["docs/a.md", "other/b.md"],  # two top-level folders
+        ["a.md", "docs/b.md"],  # loose files and a folder mixed
         [],
     ],
 )
@@ -377,6 +376,29 @@ def test_upload_mirrors_tree(db_session):
     assert guide["Setup"].tags == ["up"]
 
 
+def test_upload_loose_files_go_into_parent(db_session):
+    from kb import service
+    from kb.ingest import ingest_upload
+
+    parent = service.create_folder(db_session, parent_id=None, title="inbox")
+    service.create_file(db_session, parent_id=parent.id, title="Existing", content="x")
+
+    report = ingest_upload(
+        db_session,
+        [("a.md", b"# A"), ("logo.png", b"\x89PNG")],
+        parent_id=parent.id,
+        tags=["up"],
+    )
+
+    assert report.root_id == parent.id
+    assert report.folders_created == [] and len(report.files_created) == 1
+    assert [p.as_posix() for p in report.skipped] == ["logo.png"]
+    children = children_by_title(db_session, parent.id)
+    assert set(children) == {"Existing", "A"}
+    assert children["A"].sources == [{"resource": "upload:a.md"}] and children["A"].tags == ["up"]
+    assert service.get_folder(db_session, parent.id).tags == []  # the parent isn't retagged
+
+
 @pytest.fixture
 def client(db_session, monkeypatch):
     from fastapi.testclient import TestClient
@@ -397,16 +419,12 @@ def client(db_session, monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_ingest_pdf_sets_blob_columns(db_session, tmp_path):
-    from langchain_core.stores import InMemoryByteStore
-
+def test_ingest_pdf_sets_blob_columns(db_session, tmp_path, blob_store):
     from kb import service
-    from kb.storage.blobs import get_original
 
     pdf = make_pdf(tmp_path / "papers" / "report.pdf")
-    store = InMemoryByteStore()
 
-    report = ingest_folder(db_session, tmp_path / "papers", blob_store=store)
+    report = ingest_folder(db_session, tmp_path / "papers", blob_store=blob_store)
 
     assert report.failed == [] and len(report.files_created) == 1
     node = service.get_node(db_session, report.files_created[0])
@@ -414,7 +432,7 @@ def test_ingest_pdf_sets_blob_columns(db_session, tmp_path):
     assert node.sources == [{"resource": pdf.resolve().as_uri()}]
     assert (node.blob_mime_type, node.blob_size_bytes) == ("application/pdf", pdf.stat().st_size)
     assert node.blob_key.startswith("sha256/") and node.blob_checksum.startswith("sha256:")
-    assert get_original(store, node.blob_key) == pdf.read_bytes()
+    assert blob_store.get_original(node.blob_key) == pdf.read_bytes()
 
 
 def test_ingest_pdf_without_blob_store_leaves_blob_null(db_session, tmp_path):
@@ -429,55 +447,45 @@ def test_ingest_pdf_without_blob_store_leaves_blob_null(db_session, tmp_path):
     assert (node.blob_key, node.blob_size_bytes, node.blob_mime_type, node.blob_checksum) == (None,) * 4
 
 
-def test_ingest_uses_configured_blob_store_by_default(db_session, tmp_path):
-    from langchain_core.stores import InMemoryByteStore
-
+def test_ingest_uses_configured_blob_store_by_default(db_session, tmp_path, blob_store):
     from kb import service
-
     from kb.storage import blobs
 
-    store = InMemoryByteStore()
-    blobs.set_blob_store(store)
+    blobs.set_blob_store(blob_store)
     try:
         make_pdf(tmp_path / "papers" / "report.pdf")
         report = ingest_folder(db_session, tmp_path / "papers")
     finally:
         blobs.reset_blob_store()
     node = service.get_node(db_session, report.files_created[0])
-    assert blobs.get_original(store, node.blob_key) is not None
+    assert blob_store.get_original(node.blob_key) is not None
 
 
-def test_upload_pdf_keeps_original(db_session, tmp_path):
-    from langchain_core.stores import InMemoryByteStore
-
+def test_upload_pdf_keeps_original(db_session, tmp_path, blob_store):
     from kb import service
     from kb.ingest import ingest_upload
 
     data = make_pdf(tmp_path / "report.pdf").read_bytes()
-    store = InMemoryByteStore()
 
     report = ingest_upload(
         db_session,
         [("docs/report.pdf", data), ("docs/broken.pdf", b"nope")],
-        blob_store=store,
+        blob_store=blob_store,
     )
 
     assert [p.as_posix() for p, _ in report.failed] == ["docs/broken.pdf"]
     node = service.get_node(db_session, report.files_created[0])
     assert node.sources == [{"resource": "upload:docs/report.pdf"}]
     assert node.blob_mime_type == "application/pdf"
-    assert store.mget([node.blob_key]) == [data]
+    assert blob_store.get_original(node.blob_key) == data
 
 
-def test_raw_original_endpoint(client, db_session, tmp_path):
-    from langchain_core.stores import InMemoryByteStore
-
+def test_raw_original_endpoint(client, db_session, tmp_path, blob_store):
     from kb.storage import blobs
 
     pdf = make_pdf(tmp_path / "papers" / "report.pdf")
     (tmp_path / "papers" / "notes.md").write_text("# Notes\n")
-    store = InMemoryByteStore()
-    blobs.set_blob_store(store)
+    blobs.set_blob_store(blob_store)
     try:
         report = ingest_folder(db_session, tmp_path / "papers")
         by_title = children_by_title(db_session, report.root_id)
@@ -491,6 +499,50 @@ def test_raw_original_endpoint(client, db_session, tmp_path):
 
         assert client.get(f"/nodes/{md_id}/raw").status_code == 404  # markdown keeps no original
         assert client.get(f"/nodes/{uuid.uuid4()}/raw").status_code == 404
+
+        # An unreachable/refusing store is an upstream failure (502), not "no original" (404).
+        blobs.set_blob_store(blobs.BlobStore("no-such-bucket", client=blob_store.client))
+        res = client.get(f"/nodes/{pdf_id}/raw")
+        assert res.status_code == 502 and "blob store unavailable" in res.json()["detail"]
+    finally:
+        blobs.reset_blob_store()
+
+
+def test_health(client, blob_store, monkeypatch):
+    from kb.storage import blobs
+
+    monkeypatch.delenv("BLOB_REQUIRED", raising=False)
+    try:
+        blobs.set_blob_store(blob_store)
+        res = client.get("/health")
+        assert res.status_code == 200 and res.json() == {"db": "ok", "blob_store": "ok"}
+
+        blobs.set_blob_store(None)
+        assert client.get("/health").json()["blob_store"] == "not configured"
+
+        blobs.set_blob_store(blobs.BlobStore("no-such-bucket", client=blob_store.client))
+        res = client.get("/health")
+        assert res.status_code == 503 and "no such bucket" in res.json()["blob_store"]
+    finally:
+        blobs.reset_blob_store()
+
+
+def test_startup_fails_when_required_store_is_broken(blob_store, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from kb.api import app
+    from kb.storage import blobs
+
+    try:
+        blobs.set_blob_store(blobs.BlobStore("no-such-bucket", client=blob_store.client))
+        monkeypatch.setenv("BLOB_REQUIRED", "1")
+        with pytest.raises(blobs.BlobStoreError):
+            with TestClient(app):  # entering runs the lifespan startup check
+                pass
+
+        monkeypatch.delenv("BLOB_REQUIRED")
+        with TestClient(app) as c:  # not required: logged, startup continues
+            assert c.get("/ingest/extensions").status_code == 200
     finally:
         blobs.reset_blob_store()
 
@@ -515,3 +567,10 @@ def test_ingest_endpoint(client, db_session):
     assert bad.status_code == 422
     mismatch = client.post("/ingest", files=[("files", ("a.md", b"x"))], data={"paths": ["n/a.md", "n/b.md"]})
     assert mismatch.status_code == 422
+
+    loose = client.post(
+        "/ingest", files=[("files", ("c.md", b"# C"))], data={"paths": ["c.md"], "parent_id": body["root_id"]}
+    )
+    assert loose.status_code == 201, loose.text
+    assert loose.json()["root_id"] == body["root_id"] and loose.json()["folders_created"] == []
+    assert client.post("/ingest", files=[("files", ("c.md", b"# C"))], data={"paths": ["c.md"]}).status_code == 422
