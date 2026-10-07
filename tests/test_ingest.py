@@ -228,7 +228,62 @@ def test_converter_routing():
     assert registry.for_path(Path("x.pdf")).name == "pymupdf4llm"
     for ext in (".docx", ".pptx", ".xlsx", ".csv", ".html", ".htm"):
         assert registry.for_path(Path("x" + ext)).name == "docling"
-    assert registry.for_path(Path("x.png")) is None  # images aren't ingested
+    for ext in (".png", ".jpg", ".tsv", ".xlsm", ".xls", ".doc"):  # deliberately unsupported
+        assert registry.for_path(Path("x" + ext)) is None
+
+
+def docling_plan(tmp_path: Path, name: str):
+    pytest.importorskip("langchain_docling")
+    plan = plan_folder(tmp_path, blob_store=None)
+    assert not plan.failed, plan.failed
+    return {n.path: n for n in plan.nodes}[name]
+
+
+def test_docling_converts_html(tmp_path):
+    write(tmp_path / "page.html", "<html><body><h1>Release Notes</h1><p>Widgets got faster.</p></body></html>")
+    node = docling_plan(tmp_path, "page.html")
+    assert node.title == "Release Notes"
+    assert "Widgets got faster." in node.content
+
+
+def test_docling_converts_csv_to_table(tmp_path):
+    write(tmp_path / "sales.csv", "region,units\nnorth,10\nsouth,20\n")
+    node = docling_plan(tmp_path, "sales.csv")
+    assert "north" in node.content and "20" in node.content
+    assert "|" in node.content  # rendered as a markdown table
+
+
+def test_docling_converts_docx(tmp_path):
+    docx = pytest.importorskip("docx")
+    doc = docx.Document()
+    doc.add_heading("Design Memo", level=1)
+    doc.add_paragraph("The gadget ships in March.")
+    doc.save(str(tmp_path / "memo.docx"))
+    node = docling_plan(tmp_path, "memo.docx")
+    assert node.title == "Design Memo"
+    assert "The gadget ships in March." in node.content
+
+
+def test_docling_converts_xlsx(tmp_path):
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.Workbook()
+    wb.active.append(["fruit", "count"])
+    wb.active.append(["apple", 3])
+    wb.save(str(tmp_path / "stock.xlsx"))
+    node = docling_plan(tmp_path, "stock.xlsx")
+    assert "apple" in node.content and "fruit" in node.content
+
+
+def test_docling_keeps_original_in_blob_store(tmp_path, blob_store):
+    pytest.importorskip("langchain_docling")
+    html = write(tmp_path / "page.html", "<html><body><h1>T</h1><p>body</p></body></html>")
+
+    plan = plan_folder(tmp_path, blob_store=blob_store)
+
+    assert not plan.failed, plan.failed
+    node = {n.path: n for n in plan.nodes}["page.html"]
+    assert blob_store.get_original(node.fields["blob_key"]) == html.read_bytes()
+    assert node.fields["blob_mime_type"] == "text/html"
 
 
 # --------------------------------------------------------------------------

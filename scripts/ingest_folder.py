@@ -1,8 +1,8 @@
 """
 Ingests a local directory tree into the knowledge base (see kb.ingest).
 
-Directories become folder nodes, supported files (currently Markdown only) become file
-nodes, everything else is skipped and listed in the summary. Re-running creates a new
+Directories become folder nodes, supported files (markdown, text/code, PDF, docx, pptx, xlsx, csv, html -- see
+kb.ingest.processors) become file nodes, everything else is skipped and listed in the summary. Re-running creates a new
 subtree -- there is no dedupe.
 
 Needs DATABASE_URL (see .env.example).

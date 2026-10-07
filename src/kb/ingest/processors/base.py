@@ -3,10 +3,12 @@ The ingestion extension point: a `Processor` turns one file on disk into a
 `ProcessedDocument` (title + markdown content + optional extra `files` columns), and a
 `ProcessorRegistry` maps file extensions to processors.
 
-Adding a format (PDF, docx, ...) means writing one class that satisfies `Processor` and
+Adding a format means writing one class that satisfies `Processor` and
 registering it in `default_registry()` -- the folder walker (`kb.ingest.folder`) never
 needs to change. Formats a LangChain loader already handles need no class at all: wrap
-the loader in `kb.ingest.processors.converters.LoaderProcessor`.
+the loader in `kb.ingest.processors.converters.LoaderProcessor`. Built-in routing: PDF ->
+PyMuPDF4LLM, docx/pptx/xlsx/csv/html -> Docling, markdown/text/code -> verbatim processors;
+images, `.tsv` and `.xlsm` have no processor and are skipped.
 
 A processor may also set `retain_original = True` (optional, default False) when its
 `content` is a conversion rather than the file itself; the walker then keeps the raw
