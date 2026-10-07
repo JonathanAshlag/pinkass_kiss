@@ -121,3 +121,21 @@ def session(ids):
 
     with SessionLocal() as s:
         yield s
+
+
+@pytest.fixture
+def blob_store(monkeypatch):
+    """A `BlobStore` over an in-process fake S3 (moto), bucket "bkt", prefix "kb/".
+    Fake credentials, so the real AWS_* from .env are never used."""
+    import boto3
+    from moto import mock_aws
+
+    from kb.storage.blobs import BlobStore
+
+    for var, value in (("AWS_ACCESS_KEY_ID", "x"), ("AWS_SECRET_ACCESS_KEY", "x"), ("AWS_DEFAULT_REGION", "us-east-1")):
+        monkeypatch.setenv(var, value)
+    monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
+    with mock_aws():
+        client = boto3.client("s3")
+        client.create_bucket(Bucket="bkt")
+        yield BlobStore("bkt", prefix="kb/", client=client)

@@ -21,10 +21,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from langchain_core.stores import ByteStore
 from sqlalchemy.orm import Session
 
-from kb.storage.blobs import get_blob_store, guess_mime, put_original
+from kb.storage.blobs import BlobStore, get_blob_store, guess_mime
 from kb.ingest.processors.base import ProcessorRegistry, default_registry
 from kb.ingest.plan import PlannedNode, materialize
 from kb.storage.models import Folder
@@ -58,7 +57,7 @@ def plan_folder(
     tags: list[str] | None = None,
     root_title: str | None = None,
     resource_for: Callable[[Path], str] | None = None,
-    blob_store: ByteStore | None = None,
+    blob_store: BlobStore | None = None,
 ) -> FolderPlan:
     """
     The plan for ingesting `root`; reads files but never touches the DB. Directories
@@ -102,7 +101,7 @@ def plan_folder(
             blob_fields: dict[str, Any] = {}
             if blob_store is not None and getattr(processor, "retain_original", False):
                 try:
-                    blob_fields = put_original(blob_store, entry.read_bytes(), guess_mime(entry.name))
+                    blob_fields = blob_store.put_original(entry.read_bytes(), guess_mime(entry.name))
                 except Exception as exc:  # noqa: BLE001 -- a storage error is per-file too
                     plan.failed.append((entry, f"blob store: {type(exc).__name__}: {exc}"))
                     continue
@@ -134,11 +133,14 @@ def ingest_folder(
     tags: list[str] | None = None,
     root_title: str | None = None,
     resource_for: Callable[[Path], str] | None = None,
-    blob_store: ByteStore | None = DEFAULT_BLOB_STORE,
+    blob_store: BlobStore | None = DEFAULT_BLOB_STORE,
+    root_is_parent: bool = False,
 ) -> IngestReport:
     """`plan_folder` + `materialize` under `parent_id` (an existing folder, or None for
     the KB root). `blob_store` defaults to `kb.storage.blobs.get_blob_store()`; pass None to keep
-    no originals. See `plan_folder` for the other arguments."""
+    no originals. `root_is_parent`: put `root`'s contents straight into `parent_id`
+    instead of a new folder for `root` (then `root_id` is `parent_id`). See `plan_folder`
+    for the other arguments."""
     if blob_store is DEFAULT_BLOB_STORE:
         blob_store = get_blob_store()
     plan = plan_folder(
@@ -149,11 +151,18 @@ def ingest_folder(
         resource_for=resource_for,
         blob_store=blob_store,
     )
-    created = materialize(session, plan.nodes, parent_id=parent_id, folder_fields=plan.folder_fields)
+    created = materialize(
+        session,
+        plan.nodes,
+        parent_id=parent_id,
+        folder_fields=plan.folder_fields,
+        root_is_parent=root_is_parent,
+    )
+    new = [n for path, n in created.items() if not (root_is_parent and path == "")]
     return IngestReport(
         root_id=created[""].id,
-        files_created=[n.id for n in created.values() if not isinstance(n, Folder)],
-        folders_created=[n.id for n in created.values() if isinstance(n, Folder)],
+        files_created=[n.id for n in new if not isinstance(n, Folder)],
+        folders_created=[n.id for n in new if isinstance(n, Folder)],
         skipped=plan.skipped,
         failed=plan.failed,
     )

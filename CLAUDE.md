@@ -58,7 +58,7 @@ src/kb/
     db.py             Base, engine, SessionLocal (reads DATABASE_URL from env)
     models.py         SQLAlchemy models: Folder, File (Node = File | Folder), Manifest, ManifestMember
     dal.py            the DAL primitives (see below); does not import kb.okf
-    blobs.py          raw-original storage (S3 / local ByteStore), see "Folder ingestion"
+    blobs.py          raw-original storage (S3 via boto3), see "Folder ingestion"
   ingest/             data coming in; imports kb.service only (+ storage.blobs)
     folder.py         plan_folder / ingest_folder
     upload.py         ingest_upload (multipart uploads -> temp dir -> ingest_folder)
@@ -317,7 +317,8 @@ explicit-`Session`-argument style, same exceptions (`TreeCycleError`,
 
 `api/app.py` is a thin FastAPI wrapper: no business logic, just request/response shaping
 via `schemas.py` and HTTP-status mapping (`TreeCycleError`/`ManifestCycleError` → 409,
-`PermissionDenied` → 403, `FieldError`/`UploadError` → 422, `ValueError` → 404). One
+`PermissionDenied` → 403, `FieldError`/`UploadError` → 422, `ValueError` → 404,
+`BlobStoreError` → 502), plus `GET /health`. One
 unified **`/nodes`** surface for files and folders: `POST /nodes` (body `type:
 "file"|"folder"`; a file needs `parent_id` + `content`, a folder takes no file-only
 field — both 422 at the Pydantic layer), `GET/PATCH/DELETE /nodes/{id}`,
@@ -381,12 +382,16 @@ CLI: `python scripts/ingest_folder.py PATH [--parent-id UUID] [--tag T ...] [--d
 **Uploads** (`upload.py`): `ingest_upload(session, [(rel_path, bytes), ...], ...)` writes
 the files into a temp dir mirroring the tree and runs `ingest_folder` over it (so
 processors stay path-based). Paths must be relative, `/`-separated, with no `..`, and
-all under one top-level folder, whose name becomes the root title. Anything else raises
+either all under one top-level folder (whose name becomes a new root folder's title) or
+all bare file names ("loose files", created straight into `parent_id`, which is then
+required, via `ingest_folder(..., root_is_parent=True)` → `materialize(root_is_parent=True)`;
+`root_id` = `parent_id`). Anything else raises
 `UploadError` (a `ValueError` subclass, mapped to 422 ahead of the generic 404 handler).
 Upload sources are `upload:<rel path>`, not temp-dir file URIs. API:
 `GET /ingest/extensions` and `POST /ingest` (multipart: `files[]` + a parallel `paths[]`,
 optional `parent_id`, `tags[]`). Needs `python-multipart`. The dev UI has "⇪ ingest
-folder" (root) and "Ingest folder here…" (on folders), using `<input webkitdirectory>`.
+folder" (root) and "Ingest here…" (on folders: a folder picker, `<input webkitdirectory>`,
+or a plain multi-file picker for loose files).
 It filters hidden and unsupported files client-side, so those are never uploaded. No
 upload size limit yet.
 
@@ -397,14 +402,28 @@ for `.pdf`; `DoclingLoader(export_type=MARKDOWN)` for `.pdf .docx .pptx .html .h
 the optional `docling` extra is installed (it then takes `.pdf`; it pulls in torch).
 
 **Raw originals** (`src/kb/storage/blobs.py`): processors with `retain_original = True` (the
-loader ones, not markdown) get their source bytes stored via `put_original` and the
-`blob_*` columns set. Store from env: `BLOB_BUCKET` (+`BLOB_ENDPOINT_URL`,
-`BLOB_PREFIX`) → `S3ByteStore` (boto3; LangChain has no S3 write store); else
-`BLOB_LOCAL_DIR` → `LocalFileStore`; else none (originals not kept). `set_blob_store`
-for tests. `plan_folder(..., blob_store=None)` stays I/O-free without a store;
+loader ones, not markdown) get their source bytes stored via `BlobStore.put_original` and the
+`blob_*` columns set. `BlobStore` is a thin boto3 wrapper (S3 only, by choice — no
+LangChain `ByteStore`, no local-dir backend; for offline dev point `BLOB_ENDPOINT_URL`
+at MinIO). Store from env: `BLOB_BUCKET` (+`BLOB_ENDPOINT_URL`, `BLOB_PREFIX`); unset →
+none (originals not kept). Tests use the moto-backed `blob_store` fixture
+(`tests/conftest.py`) and `set_blob_store`. `plan_folder(..., blob_store=None)` stays I/O-free without a store;
 `ingest_folder`/`ingest_upload` default to the env store. A blob error fails only that
 file. Blobs are written before the DB commit, so a rolled-back ingest can leave
-(harmless, deduped) orphans. `GET /files/{id}/raw` downloads it (404 if none).
+(harmless, deduped) orphans. `GET /nodes/{id}/raw` downloads it (404 if none).
+
+Production hardening: the boto3 client gets 5 s connect / 30 s read timeouts and
+standard retries, 3 attempts total (`BLOB_CONNECT_TIMEOUT`/`BLOB_READ_TIMEOUT`/
+`BLOB_MAX_ATTEMPTS`; an injected client is used as-is). Every S3 failure except
+`NoSuchKey` becomes `BlobStoreError` (plain `Exception`, **not** `ValueError`) → API
+**502**. `AccessDenied` on a read is deliberately *not* treated as "missing": without
+`s3:ListBucket` S3 answers a missing key that way, so the IAM policy must grant
+`ListBucket` (plus `GetObject`/`PutObject` on the prefix; see `.env.example`).
+`BlobStore.check()` = `head_bucket` with readable hints; `check_blob_store()` runs it
+from the API `lifespan` at startup and from `GET /health` (`{db, blob_store}`, 200/503;
+"not configured" counts as healthy). `BLOB_REQUIRED=1` (prod) makes a missing
+`BLOB_BUCKET` or a failed check abort startup; unset, a failed check is only logged.
+Lifespan only runs when `TestClient` is used as a context manager.
 
 Tests: `tests/test_ingest.py` (plan tests need no DB; materialize/walker/upload tests
 do), `tests/test_blobs.py`.
@@ -488,7 +507,7 @@ head`). There is now a committed pytest suite (`pytest -m "not llm"`, needs
 local `pinkas_test` DB exists for this on the Homebrew Postgres; it is **not** in `.env`,
 so set it explicitly or every DB test silently skips:
 `TEST_DATABASE_URL=postgresql+psycopg://yonatanashlag@localhost:5432/pinkas_test`); it passes in the `kb`
-env (130 passed, Docling test skipped), including `tests/test_policy.py` (pure
+env (208 passed, Docling test skipped), including `tests/test_policy.py` (pure
 permission matrix) and `tests/test_permissions.py` (service + `/nodes` enforcement). The tests use fake embeddings;
 real Ollama embeddings were verified on the dev DB (6 pages → 222 chunks, a second
 `reindex.py --all` skips all of them, and manifest-scoped `semantic_search` returns

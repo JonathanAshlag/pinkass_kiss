@@ -238,7 +238,7 @@ function renderEdit(n, id) {
     ${jsonField('e-sources', 'sources', n.sources)}${jsonField('e-verified', 'verified', n.verified)}${jsonField('e-generated', 'generated', n.generated)}` : ''}
     <div class="row">
       <button class="primary" id="b-save">Save</button>
-      ${isFile ? '' : '<button id="b-child">New child…</button> <button id="b-ingest">Ingest folder here…</button>'}
+      ${isFile ? '' : '<button id="b-child">New child…</button> <button id="b-ingest">Ingest here…</button>'}
       ${n.deleted_at ? '<button id="b-restore">Restore</button>' : `<button class="danger" id="b-del">Delete</button>${isFile ? '' : ' <label style="margin:0"><input type="checkbox" id="b-cascade" checked> cascade</label>'}`}
     </div>
     <div class="row"><span>Move to folder:</span><input type="text" id="m-target" placeholder="folder id${isFile ? '' : ' (blank = root)'}" style="width:300px">
@@ -307,17 +307,19 @@ function newForm(parentId) {
 async function ingestForm(parentId) {
   const { extensions } = await api('GET', '/ingest/extensions');
   $('#right').innerHTML = `
-    <h3>Ingest a folder ${parentId ? `under <code>${parentId}</code>` : 'at root'}</h3>
+    <h3>Ingest ${parentId ? `into <code>${parentId}</code>` : 'a folder at root'}</h3>
     <p class="meta">Supported: ${extensions.map(esc).join(', ')}. Other files are skipped (not uploaded); hidden files/folders are ignored.</p>
-    <label>folder</label><input type="file" id="i-dir" webkitdirectory multiple>
+    <label>folder (becomes a new sub-folder)</label><input type="file" id="i-dir" webkitdirectory multiple>
+    ${parentId ? '<label>or files (go straight into this folder)</label><input type="file" id="i-files" multiple>' : ''}
     <label>tags applied to every created node (comma)</label><input type="text" id="i-tags">
     <div class="meta" id="i-summary"></div>
     <div class="row"><button class="primary" id="i-go" disabled>Upload</button></div>
     <div id="i-report"></div>`;
   let picked = { upload: [], skipped: [] };
-  $('#i-dir').onchange = () => {
+  const pick = (input, other) => {
+    if (other) other.value = '';  // one upload is either a folder or loose files
     picked = { upload: [], skipped: [] };
-    for (const f of $('#i-dir').files) {
+    for (const f of input.files) {
       const rel = f.webkitRelativePath || f.name;
       if (rel.split('/').some(p => p.startsWith('.'))) continue;
       const dot = f.name.lastIndexOf('.'), ext = dot > 0 ? f.name.slice(dot).toLowerCase() : '';
@@ -326,6 +328,8 @@ async function ingestForm(parentId) {
     $('#i-summary').textContent = `${picked.upload.length} file(s) to upload, ${picked.skipped.length} unsupported skipped`;
     $('#i-go').disabled = !picked.upload.length;
   };
+  $('#i-dir').onchange = () => pick($('#i-dir'), $('#i-files'));
+  if ($('#i-files')) $('#i-files').onchange = () => pick($('#i-files'), $('#i-dir'));
   $('#i-go').onclick = async () => {
     const fd = new FormData();
     picked.upload.forEach(({ f, rel }) => { fd.append('files', f); fd.append('paths', rel); });
