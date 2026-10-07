@@ -63,8 +63,18 @@ def default_registry() -> ProcessorRegistry:
     from kb.ingest.processors.converters import builtin_loader_processors
     from kb.ingest.processors.markdown import MarkdownProcessor
 
+    from kb.ingest.processors.spreadsheet import SpreadsheetProcessor
+    from kb.ingest.processors.text import CodeProcessor, PlainTextProcessor
+    from kb.ingest.processors.word import WordProcessor
+
     registry = ProcessorRegistry()
     registry.register(MarkdownProcessor())
     for processor in builtin_loader_processors():
         registry.register(processor)
+    registry.register(PlainTextProcessor())
+    registry.register(CodeProcessor())
+    registry.register(SpreadsheetProcessor())
+    # Docling (if installed) already takes .docx; the python-docx one is the fallback.
+    if ".docx" not in registry.supported_extensions:
+        registry.register(WordProcessor())
     return registry
