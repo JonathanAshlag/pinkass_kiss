@@ -9,7 +9,7 @@ and its line coordinates, which DCI reads too) -- so an agent can go straight fr
 `read_lines(path, offset=start_line)`.
 
 Scope = the files the manifest resolves to (`kb.storage.dal.resolve_manifest`),
-optionally intersected with a tags/status `query_metadata` filter. Soft-deleted nodes
+optionally intersected with a tags/status filter. Soft-deleted nodes
 -- and files that never committed -- drop out of the scope even if they have chunks.
 
 Filtered HNSW: the scope becomes a `file_id IN (...)` filter on the vector query. Plain
@@ -31,10 +31,10 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from kb import okf
-from kb.storage import dal
 from kb.storage.models import File
 from kb.retrieval.dci import _Scope
 
@@ -77,7 +77,12 @@ def semantic_search(
     scope = _Scope(session, manifest_id)  # ValueError on unknown manifest
     in_scope = {node_id: node for node_id, node in scope.nodes.items() if isinstance(node, File)}
     if tags or status is not None:
-        allowed = {n.id for n in dal.query_metadata(session, tags=tags, status=status)}
+        stmt = select(File.id).where(File.id.in_(list(in_scope)))  # ids only, scope only
+        if tags:
+            stmt = stmt.where(File.tags.contains(tags))
+        if status is not None:
+            stmt = stmt.where(File.status == status)
+        allowed = set(session.scalars(stmt))
         in_scope = {node_id: node for node_id, node in in_scope.items() if node_id in allowed}
     if not in_scope or not query.strip():
         return []

@@ -30,7 +30,8 @@ import re
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.orm import Session, undefer
 
 from kb.okf import render_virtual_file
 from kb.storage import dal
@@ -39,6 +40,7 @@ from kb.storage.models import File, Folder, Node
 DEFAULT_MAX_CHARS = 20_000
 MAX_CHARS_LIMIT = 50_000
 DEFAULT_READ_LIMIT = 200
+_CONTENT_BATCH = 500  # files whose text search_lines holds at once
 
 
 class PatternError(Exception):
@@ -128,6 +130,13 @@ class _Scope:
 
 def _title_segment(title: str) -> str:
     return title.replace("/", "-").strip() or "untitled"
+
+
+def _load_content(session: Session, nodes: list[Node]) -> None:
+    """One query filling in the (deferred) `content` of the files among `nodes`."""
+    ids = [n.id for n in nodes if isinstance(n, File)]
+    if ids:
+        session.scalars(select(File).where(File.id.in_(ids)).options(undefer(File.content))).all()
 
 
 def _bounded(lines: list[str], max_chars: int, hint: str) -> ToolOutput:
@@ -255,12 +264,17 @@ def search_lines(
 
     out: list[str] = []
     seen: set[uuid.UUID] = set()
-    for node in sorted(targets, key=scope.path):
+    ordered = sorted(targets, key=scope.path)
+    for i, node in enumerate(ordered):
+        if i % _CONTENT_BATCH == 0:
+            _load_content(session, ordered[i : i + _CONTENT_BATCH])
         if node.id in seen:
             continue
         seen.add(node.id)
 
         lines = render_virtual_file(node).split("\n")
+        if isinstance(node, File):
+            session.expire(node, ["content"])  # keep peak memory at one batch, not the manifest
         hits = [i for i, line in enumerate(lines) if all(rx.search(line) for rx in compiled)]
         if not hits:
             continue

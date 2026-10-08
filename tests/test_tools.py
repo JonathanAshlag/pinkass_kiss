@@ -331,6 +331,49 @@ def test_max_chars_out_of_range(session, corpus):
 
 
 # --------------------------------------------------------------------------
+# what gets loaded (#20: file text only where a tool needs it)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def content_selects(session):
+    """The SELECTs on this session's connection that fetch `files.content`."""
+    from sqlalchemy import event
+
+    seen: list[str] = []
+
+    def record(conn, cursor, statement, *args):
+        if statement.lstrip().upper().startswith("SELECT") and "files.content" in statement:
+            seen.append(statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", record)
+    yield seen
+    event.remove(engine, "before_cursor_execute", record)
+
+
+def test_list_paths_loads_no_file_text(session, corpus, content_selects):
+    from kb import service
+
+    service.list_paths(session, corpus.all, recursive=True)
+    assert content_selects == []
+
+
+def test_search_loads_file_text_in_batches(session, corpus, content_selects, monkeypatch):
+    from kb import service
+    from kb.retrieval import dci
+
+    expected = service.search_lines(session, corpus.all, "needle", ignore_case=True).text
+    assert len(content_selects) == 1  # 5 files, one batch
+
+    session.expire_all()
+    content_selects.clear()
+    monkeypatch.setattr(dci, "_CONTENT_BATCH", 2)
+    assert service.search_lines(session, corpus.all, "needle", ignore_case=True).text == expected
+    assert len(content_selects) > 1  # several small batches, same output
+
+
+# --------------------------------------------------------------------------
 # agent-facing adapter (kb.retrieval.agent_tools)
 # --------------------------------------------------------------------------
 

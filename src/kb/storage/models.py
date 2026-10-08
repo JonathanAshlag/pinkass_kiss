@@ -101,7 +101,8 @@ class File(Base):
     )
     status: Mapped[str] = mapped_column(FileStatus, nullable=False, server_default="draft")
 
-    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # deferred: listings/scopes load many rows and rarely need the text; bulk readers undefer it
+    content: Mapped[str] = mapped_column(Text, nullable=False, deferred=True)
 
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()

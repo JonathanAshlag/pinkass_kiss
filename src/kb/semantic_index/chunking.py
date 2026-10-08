@@ -47,6 +47,7 @@ from langchain_core.document_loaders import BaseLoader
 from langchain_core.documents import Document
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 from sqlalchemy import select
+from sqlalchemy.orm import undefer
 
 from kb.okf import body_line_offset
 from kb.storage.db import SessionLocal
@@ -76,7 +77,7 @@ class FileNodeLoader(BaseLoader):
         self.session_factory = session_factory
 
     def lazy_load(self) -> Iterator[Document]:
-        stmt = select(File).where(File.deleted_at.is_(None))
+        stmt = select(File).where(File.deleted_at.is_(None)).options(undefer(File.content))
         if self.file_ids is not None:
             if not self.file_ids:
                 return
