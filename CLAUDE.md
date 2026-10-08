@@ -415,8 +415,10 @@ It filters hidden and unsupported files client-side, so those are never uploaded
 loader_factory)` runs any LangChain `BaseLoader` as a `Processor` (docs joined, title =
 stem, empty text → failed). Built-ins: `PyMuPDF4LLMLoader(mode="single")`
 for `.pdf`; `DoclingLoader(export_type=MARKDOWN)` for `.docx .pptx .xlsx .csv .html .htm` (it pulls
-in torch). Both are core dependencies with no fallbacks; images aren't ingested. Text/code
-files use `text.py`; git repos use `ingest/git.py` (`ingest_git_repo`).
+in torch). Both are core dependencies with no fallbacks; images aren't ingested. Plain text
+(`.txt .text .rst .log`) uses `text.py`. **Code/config files (`.py`, `.json`, ...) are not
+ingested** (user's choice: out of scope, invites misuse); don't re-add without asking. Git
+repos use `ingest/git.py` (`ingest_git_repo`).
 
 **Raw originals** (`src/kb/storage/blobs.py`): processors with `retain_original = True` (the
 loader ones, not markdown) get their source bytes stored via `BlobStore.put_original` and the

@@ -54,6 +54,12 @@ def test_default_registry_handles_pdf():
     assert not getattr(registry.for_path(Path("a.md")), "retain_original", False)
 
 
+def test_code_files_are_not_supported():
+    registry = default_registry()
+    assert {".txt", ".md"} <= registry.supported_extensions
+    assert not {".py", ".js", ".json", ".yaml", ".sh", ".sql"} & registry.supported_extensions
+
+
 def test_markdown_title_is_file_stem(tmp_path):
     proc = MarkdownProcessor()
     with_h1 = write(tmp_path / "my-notes.md", "intro\n\n# Real Title #\n\nbody\n## Sub\n")
