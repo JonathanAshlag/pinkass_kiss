@@ -24,6 +24,9 @@ TEST_URL = os.environ.get("TEST_DATABASE_URL")
 # kb.storage.db builds its engine at import time; create_engine doesn't connect, so a
 # placeholder is fine when the tests are going to be skipped anyway.
 os.environ["DATABASE_URL"] = TEST_URL or "postgresql+psycopg://skipped/skipped_test"
+# Every commit embeds the files it wrote (kb.service), so tests need an embeddings model
+# that is always there: the deterministic fake, unless a test injects its own store.
+os.environ["EMBEDDINGS_MODEL"] = "fake"
 
 
 @pytest.fixture(scope="session")

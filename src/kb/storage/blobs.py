@@ -2,8 +2,12 @@
 Object storage for original uploaded bytes (the PDF/DOCX/... a node's markdown was
 converted from), recorded on the node in the `files.blob_*` columns.
 
-An S3 bucket (or an S3-compatible endpoint such as MinIO), via boto3. Originals are
-stored content-addressed (`sha256/<hex>`), so identical uploads share one object.
+An S3 bucket (or an S3-compatible endpoint such as MinIO), via boto3. Each original is
+stored under its own file's key, `originals/<file_id>` (`original_key`): exactly one row
+ever refers to an object, so undoing a failed write can delete what it uploaded without
+asking who else uses it (identical uploads aren't deduplicated, by choice). Objects are
+written *before* the DB commit that references them: until it, nothing can reach them;
+a failed write deletes them (kb.service), and `scripts/gc.py` sweeps what a crash left.
 
 Independent of the DB layers: never imports kb.service / kb.storage.dal.
 
@@ -14,11 +18,15 @@ Production notes: the client gets short timeouts and standard retries (env-tunab
 Every S3 failure other than a missing key surfaces as `BlobStoreError`.
 """
 
+import base64
 import hashlib
 import logging
 import mimetypes
 import os
-from pathlib import PurePath
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path, PurePath
 from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -50,6 +58,43 @@ def guess_mime(name: str | PurePath) -> str:
     name = str(name)
     mime, _ = mimetypes.guess_type(name)
     return mime or _MIME_FALLBACK.get(PurePath(name).suffix.lower(), DEFAULT_MIME)
+
+
+ORIGINALS_PREFIX = "originals/"
+
+
+def original_key(file_id: uuid.UUID) -> str:
+    """The object key of a file's original: `originals/<file_id>`."""
+    return f"{ORIGINALS_PREFIX}{file_id}"
+
+
+@dataclass(frozen=True)
+class Original:
+    """A local file to keep as a node's original, described up front (hashed while
+    planning), so the `files.blob_*` columns are known before anything is uploaded."""
+
+    path: Path
+    mime: str
+    size: int
+    sha256: str  # hex
+
+    @classmethod
+    def of(cls, path: Path, mime: str | None = None) -> "Original":
+        digest, size = hashlib.sha256(), 0
+        with Path(path).open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        return cls(Path(path), mime or guess_mime(Path(path).name), size, digest.hexdigest())
+
+    def columns(self, key: str) -> dict[str, Any]:
+        """The `files.blob_*` columns for this original stored under `key`."""
+        return {
+            "blob_key": key,
+            "blob_size_bytes": self.size,
+            "blob_mime_type": self.mime,
+            "blob_checksum": f"sha256:{self.sha256}",
+        }
 
 
 class BlobStoreError(Exception):
@@ -88,21 +133,44 @@ class BlobStore:
         self.bucket = bucket
         self.prefix = prefix
 
-    def put_original(self, data: bytes, mime: str | None) -> dict[str, Any]:
-        """Stores `data` under `sha256/<hex>` and returns the `files.blob_*` columns for it."""
-        digest = hashlib.sha256(data).hexdigest()
-        key = f"sha256/{digest}"
-        mime = mime or DEFAULT_MIME
-        try:  # same bytes -> same key: re-uploads dedupe
-            self.client.put_object(Bucket=self.bucket, Key=self.prefix + key, Body=data, ContentType=mime)
-        except (ClientError, BotoCoreError) as exc:
+    def put_original(self, key: str, original: Original) -> None:
+        """Uploads the file at `original.path` under `key`, streamed (never read whole),
+        with its SHA-256, so S3 rejects bytes that don't match what was planned."""
+        try:
+            with original.path.open("rb") as body:
+                self.client.put_object(
+                    Bucket=self.bucket,
+                    Key=self.prefix + key,
+                    Body=body,
+                    ContentType=original.mime,
+                    ChecksumSHA256=base64.b64encode(bytes.fromhex(original.sha256)).decode(),
+                )
+        except (ClientError, BotoCoreError, OSError) as exc:
             raise BlobStoreError(f"storing {key} in s3://{self.bucket}: {_describe(exc)}") from exc
-        return {
-            "blob_key": key,
-            "blob_size_bytes": len(data),
-            "blob_mime_type": mime,
-            "blob_checksum": f"sha256:{digest}",
-        }
+
+    def delete_originals(self, keys: list[str]) -> None:
+        """Deletes these keys (missing ones are fine), 1000 per request."""
+        for i in range(0, len(keys), 1000):
+            batch = [{"Key": self.prefix + k} for k in keys[i : i + 1000]]
+            try:
+                resp = self.client.delete_objects(Bucket=self.bucket, Delete={"Objects": batch, "Quiet": True})
+            except (ClientError, BotoCoreError) as exc:
+                raise BlobStoreError(f"deleting from s3://{self.bucket}: {_describe(exc)}") from exc
+            if resp.get("Errors"):
+                first = resp["Errors"][0]
+                raise BlobStoreError(f"deleting {first.get('Key')} from s3://{self.bucket}: {first.get('Code')}")
+
+    def list_originals(self) -> list[tuple[str, datetime]]:
+        """(key, last modified) of every object under `originals/` (for scripts/gc.py)."""
+        out: list[tuple[str, datetime]] = []
+        try:
+            for page in self.client.get_paginator("list_objects_v2").paginate(
+                Bucket=self.bucket, Prefix=self.prefix + ORIGINALS_PREFIX
+            ):
+                out.extend((o["Key"][len(self.prefix) :], o["LastModified"]) for o in page.get("Contents", []))
+        except (ClientError, BotoCoreError) as exc:
+            raise BlobStoreError(f"listing s3://{self.bucket}: {_describe(exc)}") from exc
+        return out
 
     def get_original(self, key: str) -> bytes | None:
         """The stored bytes for `key`, or None if missing. Without `s3:ListBucket`, S3

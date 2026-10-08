@@ -1,5 +1,13 @@
 """Keeps the semantic index (`kb_chunks`) in step with the canonical `files` table.
 
+- `stage_documents(docs)` -- add-only indexing of documents built from (possibly
+                          uncommitted) nodes: embeds and inserts new chunks, deletes
+                          nothing, and *raises* on failure. kb.service runs it before
+                          every commit, so a write is indexed before it's visible.
+- `reconcile(ids)`     -- make the index hold exactly the committed state of those
+                          nodes: `index_files` plus removal of chunk rows the record
+                          manager doesn't know about. kb.service's undo after a failed
+                          write and its cleanup after a successful one.
 - `index_files(ids)`   -- for any ids a write touched: active files are
                           (re)indexed incrementally; deleted / missing ones and folders
                           are unindexed. Never raises for a per-file problem.
@@ -7,10 +15,10 @@
 - `reindex_all()`      -- rebuild from every active file, then remove
                           every chunk not (re)confirmed by this run ("full" cleanup).
 
-All three read the DB through their own sessions (`session_factory`, default
-`SessionLocal`), so call them *after* the write that touched the nodes has committed.
-They call the PGVectorStore's sync methods -- don't call them from inside a running
-event loop (use a threadpool / sync route).
+All but `stage_documents` read the DB through their own sessions (`session_factory`,
+default `SessionLocal`), so they see committed state only. They call the
+PGVectorStore's sync methods -- don't call them from inside a running event loop (use
+a threadpool / sync route).
 """
 
 from __future__ import annotations
@@ -21,11 +29,17 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from langchain_core.indexing import index
+from sqlalchemy import text
 
 from kb.semantic_index.chunking import FileNodeLoader, split_documents
 from kb.semantic_index.vectorstore import IndexStore, chunk_key_encoder, get_index_store
 
 log = logging.getLogger(__name__)
+
+# Chunks per embedding call when staging. Without cleanup, index() needs no
+# one-batch-per-file rule (that's only for incremental cleanup, see _index_one), so a
+# whole upload is embedded in batches of this size across files.
+STAGE_BATCH_SIZE = 128
 
 
 @dataclass
@@ -47,6 +61,31 @@ def _loader(file_ids, session_factory) -> FileNodeLoader:
     if session_factory is None:
         return FileNodeLoader(file_ids)
     return FileNodeLoader(file_ids, session_factory=session_factory)
+
+
+def stage_documents(docs, *, store: IndexStore | None = None) -> IndexResult:
+    """Add-only indexing of loader-shaped documents (`chunking.node_document`): embeds
+    and inserts every chunk the record manager doesn't have yet, deletes nothing.
+    Chunks that already exist (unchanged content, or staged earlier in the same write)
+    are skipped, never re-embedded. Raises on any failure: the caller aborts the write
+    and `reconcile`s."""
+    result = IndexResult()
+    chunks = split_documents(docs)
+    if not chunks:
+        return result
+    store = store or get_index_store()
+    result._add(
+        index(
+            chunks,
+            store.record_manager,
+            store.vector_store,
+            cleanup=None,
+            source_id_key="file_id",  # still recorded as the group_id, for reconcile/unindex
+            key_encoder=chunk_key_encoder,
+            batch_size=STAGE_BATCH_SIZE,
+        )
+    )
+    return result
 
 
 def _index_one(store: IndexStore, file_id: uuid.UUID, docs, result: IndexResult) -> None:
@@ -84,6 +123,31 @@ def _unindex(store: IndexStore, file_ids: list[uuid.UUID]) -> int:
         store.vector_store.delete(keys)
         rm.delete_keys(keys)
     return len(keys)
+
+
+def delete_untracked_chunks(
+    file_ids: Iterable[uuid.UUID] | None, *, store: IndexStore | None = None
+) -> int:
+    """Delete `kb_chunks` rows the record manager has no record of, for these files
+    (None: all of them). index() writes the vectors first and the records second, so a
+    failure in between leaves rows that record-based cleanup can't see."""
+    store = store or get_index_store()
+    rm = store.record_manager
+    params: dict = {"ns": rm.namespace}
+    where = ""
+    if file_ids is not None:
+        params["ids"] = list(dict.fromkeys(uuid.UUID(str(i)) for i in file_ids))
+        if not params["ids"]:
+            return 0
+        where = "c.file_id = ANY(:ids) AND "
+    with rm.engine.begin() as conn:
+        return conn.execute(
+            text(
+                f"DELETE FROM kb_chunks c WHERE {where}NOT EXISTS (SELECT 1 FROM upsertion_record r"
+                " WHERE r.namespace = :ns AND r.key = c.langchain_id::text)"
+            ),
+            params,
+        ).rowcount
 
 
 def index_files(
@@ -125,6 +189,25 @@ def index_files(
     return result
 
 
+def reconcile(
+    file_ids: Iterable[uuid.UUID], *, store: IndexStore | None = None, session_factory=None
+) -> IndexResult:
+    """Make the index hold exactly the committed state of these nodes: `index_files`
+    (unindexes missing/deleted ones, drops stale chunks of the rest, embeds only what's
+    missing) plus `delete_untracked_chunks`. State-based, so it's the right undo after a
+    rollback *and* the right cleanup after a commit -- even when it's unknown which of
+    the two happened (a connection lost during COMMIT). Never raises per file."""
+    ids = list(dict.fromkeys(uuid.UUID(str(i)) for i in file_ids))
+    store = store or get_index_store()
+    result = index_files(ids, store=store, session_factory=session_factory)
+    try:
+        result.num_deleted += delete_untracked_chunks(ids, store=store)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("deleting untracked chunks failed")
+        result.failed.extend((fid, f"{type(exc).__name__}: {exc}") for fid in ids)
+    return result
+
+
 def unindex_files(file_ids: Iterable[uuid.UUID], *, store: IndexStore | None = None) -> int:
     """Remove every chunk of the given files. Returns the number of chunks removed."""
     ids = list(dict.fromkeys(uuid.UUID(str(i)) for i in file_ids))
@@ -141,7 +224,8 @@ def reindex_all(*, store: IndexStore | None = None, session_factory=None) -> Ind
     Semantically `index(all_chunks, cleanup="full")`, but run file by file so one
     failing file doesn't abort the rebuild: each file is indexed incrementally, then
     every record not touched since the run started is deleted -- except records of
-    files that failed, whose previous chunks are kept rather than lost.
+    files that failed, whose previous chunks are kept rather than lost -- and so is every
+    chunk row without a record (`delete_untracked_chunks`).
     """
     store = store or get_index_store()
     rm = store.record_manager
@@ -161,4 +245,5 @@ def reindex_all(*, store: IndexStore | None = None, session_factory=None) -> Ind
         store.vector_store.delete(batch)
         rm.delete_keys(batch)
     result.num_deleted += len(stale)
+    result.num_deleted += delete_untracked_chunks(None, store=store)
     return result

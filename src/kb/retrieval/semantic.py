@@ -10,7 +10,7 @@ and its line coordinates, which DCI reads too) -- so an agent can go straight fr
 
 Scope = the files the manifest resolves to (`kb.storage.dal.resolve_manifest`),
 optionally intersected with a tags/status `query_metadata` filter. Soft-deleted nodes
-drop out of the scope even if their chunks haven't been unindexed yet.
+-- and files that never committed -- drop out of the scope even if they have chunks.
 
 Filtered HNSW: the scope becomes a `file_id IN (...)` filter on the vector query. Plain
 HNSW visits only `ef_search` candidates and filters afterwards, so a narrow manifest in
@@ -18,6 +18,12 @@ a large index could get fewer than `k` hits (or none). The vector store is built
 pgvector's iterative scan (`hnsw.iterative_scan = relaxed_order`, see
 `kb.semantic_index.vectorstore`), which keeps scanning until `k` rows pass the filter; relaxed order
 means rows may come back slightly unsorted, so hits are re-sorted here.
+
+Read-time validation: a hit is returned only if its chunk text is still at its lines of
+the file's current virtual file. Writes stage new chunks *before* they commit (see
+kb.service) and drop stale ones *after*, so for a moment an edited file can have chunks
+of uncommitted or replaced content; those never reach the caller. To keep `k` hits
+when some are dropped, `OVERFETCH` x `k` rows are fetched.
 """
 
 from __future__ import annotations
@@ -27,11 +33,13 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from kb import okf
 from kb.storage import dal
 from kb.storage.models import File
 from kb.retrieval.dci import _Scope
 
 SNIPPET_CHARS = 240
+OVERFETCH = 2
 
 
 @dataclass
@@ -81,8 +89,16 @@ def semantic_search(
 
         store = get_index_store()
     results = store.vector_store.similarity_search_with_score(
-        query, k=k, filter={"file_id": {"$in": [str(i) for i in in_scope]}}
+        query, k=k * OVERFETCH, filter={"file_id": {"$in": [str(i) for i in in_scope]}}
     )
+
+    lines: dict[uuid.UUID, list[str]] = {}  # rendered once per hit file
+
+    def current(node: File, doc) -> bool:
+        if node.id not in lines:
+            lines[node.id] = okf.render_virtual_file(node).split("\n")
+        start, end = int(doc.metadata["start_line"]), int(doc.metadata["end_line"])
+        return chunk_text(doc) in "\n".join(lines[node.id][start - 1 : end])
 
     hits: list[SearchHit] = []
     for doc, distance in results:
@@ -91,7 +107,7 @@ def semantic_search(
         if not isinstance(file_id, uuid.UUID):
             file_id = uuid.UUID(str(file_id))
         node = in_scope.get(file_id)
-        if node is None:  # defensive: the filter should already guarantee this
+        if node is None or not current(node, doc):  # out of scope / stale or uncommitted
             continue
         hits.append(
             SearchHit(
@@ -106,4 +122,4 @@ def semantic_search(
             )
         )
     hits.sort(key=lambda h: h.score, reverse=True)  # iterative scan is relaxed_order
-    return hits
+    return hits[:k]

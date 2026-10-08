@@ -8,7 +8,9 @@ Env vars:
 - `DATABASE_URL`      -- same `postgresql+psycopg://...` URL as the rest of the app. The
                          vector store uses it through an *async* SQLAlchemy engine
                          (psycopg3 async); the record manager through a sync one.
-- `EMBEDDINGS_MODEL`  -- `init_embeddings` spec, default `ollama:nomic-embed-text`.
+- `EMBEDDINGS_MODEL`  -- `init_embeddings` spec, default `ollama:nomic-embed-text`;
+                         `fake` = DeterministicFakeEmbedding (offline dev, tests). Every
+                         write embeds before it commits, so some model must be reachable.
 - `EMBEDDING_DIM`     -- vector size, default 768. Must match `kb_chunks.embedding`
                          (the migration reads the same var when it creates the table).
 
@@ -37,8 +39,9 @@ Verified facts (langchain-postgres 0.0.18, langchain-classic 1.0.8, langchain-co
 - Metadata keys in `METADATA_COLUMNS` go to their own columns; anything else lands in
   the `langchain_metadata` JSON column. Search results return both merged into
   `Document.metadata`, with `file_id` read back as a `uuid.UUID` from the column.
-- Deleting a `files` row cascades its chunks at the DB level (FK ON DELETE CASCADE),
-  but NOT its `upsertion_record` rows; soft delete touches neither. `index([], ...,
+- `kb_chunks.file_id` has no FK (migration 0003): chunks are staged before their file
+  row commits, from these classes' own connections. Soft delete touches neither chunks
+  nor `upsertion_record` rows. `index([], ...,
   cleanup="incremental")` can't remove a file whose docs are all gone (incremental only
   cleans groups present in the batch) -- instead do
   `keys = record_manager.list_keys(group_ids=[str(file_id)])`,
@@ -90,6 +93,16 @@ def _embeddings_model() -> str:
     return os.environ.get("EMBEDDINGS_MODEL") or DEFAULT_EMBEDDINGS_MODEL
 
 
+def _init_embeddings(model: str) -> Embeddings:
+    if model == "fake":
+        from langchain_core.embeddings import DeterministicFakeEmbedding
+
+        return DeterministicFakeEmbedding(size=EMBEDDING_DIM)
+    from langchain.embeddings import init_embeddings
+
+    return init_embeddings(model)
+
+
 def _iterative_hnsw_options():
     """Query options PGVectorStore applies (`SET LOCAL`, per search) before each
     similarity search: pgvector >= 0.8 iterative HNSW scan, so a filtered search (e.g.
@@ -123,9 +136,7 @@ def build_index_store(
         database_url = get_database_url()
     model = _embeddings_model()
     if embeddings is None:
-        from langchain.embeddings import init_embeddings
-
-        embeddings = init_embeddings(model)
+        embeddings = _init_embeddings(model)
     if namespace is None:
         namespace = f"{CHUNKS_TABLE}/{model}"
 

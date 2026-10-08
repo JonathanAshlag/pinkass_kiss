@@ -1,0 +1,12 @@
+# Router timeout for the API's Route (apply as a patch:
+# oc patch route/kb-api --type=merge --patch-file deploy/openshift/route-timeout.yaml).
+#
+# Writes are all or nothing (kb.service): POST /ingest embeds every file and uploads its
+# original *before* it commits and answers, so a large upload's request lasts as long as
+# converting + embedding it. The OpenShift router's default of 30 s cuts such requests
+# off (the client sees a 504 while the server finishes the write, or rolls it back if
+# the connection drop reaches it first). Raise it to cover the biggest upload you allow
+# (KB_UPLOAD_* limits, see upload-scratch.yaml) at your embeddings server's throughput.
+metadata:
+  annotations:
+    haproxy.router.openshift.io/timeout: 10m

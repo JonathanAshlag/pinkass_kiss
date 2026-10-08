@@ -54,6 +54,7 @@ src/kb/
   okf.py              layer 2: advisory OKF checks + the virtual file (render_virtual_file,
                       body_line_offset); imports only storage.models, never dal
   policy.py           who may do what: folder/file kinds + agent lock; pure, imports only storage.models
+  maintenance.py      GC of what a crashed write leaves (orphan originals / chunks), see "All-or-nothing writes"
   storage/            layer 1: canonical data
     db.py             Base, engine, SessionLocal (reads DATABASE_URL from env)
     models.py         SQLAlchemy models: Folder, File (Node = File | Folder), Manifest, ManifestMember
@@ -63,6 +64,7 @@ src/kb/
     folder.py         plan_folder / ingest_folder
     upload.py         ingest_upload (multipart uploads -> temp dir -> ingest_folder)
     plan.py           PlannedNode + materialize (the one place a plan becomes nodes)
+    convert.py        convert_all: runs processors, cpu_bound ones in a shared process pool
     processors/
       base.py         Processor protocol, ProcessedDocument, registry
       markdown.py     MarkdownProcessor
@@ -70,7 +72,7 @@ src/kb/
   semantic_index/     layer 4, build side: derived pgvector index; never imports kb.service
     vectorstore.py    LangChain wiring: PGVectorStore, record manager, embeddings
     chunking.py       files -> chunks (FileNodeLoader, splitter, line/heading annotator)
-    indexer.py        index_files / unindex_files / reindex_all
+    indexer.py        stage_documents / reconcile / index_files / unindex_files / reindex_all
   retrieval/          data going out to agents
     dci.py            direct corpus interaction: list_paths / search_lines / read_lines
                       (see reference/paper.md)
@@ -80,13 +82,14 @@ src/kb/
     app.py            the FastAPI app (see below)
     schemas.py        Pydantic v2 request/response models
     static/           dev UI mounted at /ui
-scripts/              ingest_folder.py, reindex.py, seed_db.py; eval/load_qasper.py
+scripts/              ingest_folder.py, ingest_git.py, reindex.py, gc.py, seed_db.py; eval/load_qasper.py
 tests/                unit/integration suites; eval/ = QASPER suites + fixtures
 ```
 
 - `migrations/` — Alembic: `0001_create_schema.py` (compacted from what was originally
   six incremental migrations, while there was still no real data to preserve) and
-  `0002_semantic_index.py` (`vector` extension, `kb_chunks`, `upsertion_record`).
+  `0002_semantic_index.py` (`vector` extension, `kb_chunks`, `upsertion_record`),
+  `0003_chunks_without_fk.py` (drops `kb_chunks.file_id`'s FK, see "All-or-nothing writes").
   **The DB needs the pgvector extension** — installed on the local Homebrew Postgres 17
   (pgvector 0.8.7); the test stack uses the `pgvector/pgvector:pg16` image.
 - `.env` (gitignored) — `DATABASE_URL`, plus `BLOB_BUCKET`/`BLOB_PREFIX`/`AWS_*` for the
@@ -96,11 +99,12 @@ tests/                unit/integration suites; eval/ = QASPER suites + fixtures
 `pip install -e ".[test]"` (pyproject.toml is the only dependency list; there is no
 requirements.txt). Run tools with `conda run -n kb ...` or after `conda activate kb`.
 Embeddings come from Ollama (`brew services start ollama`, model `nomic-embed-text`,
-768d), which the semantic index needs for indexing and search.
+768d), which every write needs (it embeds before it commits) as does search;
+`EMBEDDINGS_MODEL=fake` runs without it (deterministic fake vectors; what the tests use).
 
 To run migrations locally: `set -a && source .env && set +a && alembic upgrade head`
 (a local Postgres with a `pinkas` database, trust auth, is what's been used for
-verification so far — adjust `.env` if that changes). It is at `0002` (head) with the
+verification so far — adjust `.env` if that changes). It is at `0003` (head) with the
 files/folders schema, holds only `scripts/seed_db.py` data, and that has been indexed
 (`scripts/reindex.py --all`). It was wiped for the split: the rewritten 0001 can't
 downgrade a pre-split DB, so the old objects were dropped by hand first.
@@ -142,7 +146,7 @@ attribute (`"file"` / `"folder"`), which the API exposes as `type`.
 | `status` (enum `draft`\|`stable`\|`deprecated`) | lifecycle field |
 | `content` | markdown body, NOT NULL |
 | `deleted_at` | soft delete, NULL = active |
-| `blob_key`, `blob_size_bytes`, `blob_mime_type`, `blob_checksum` | the retained original of a converted file (PDF, ...): content-addressed key `sha256/<hex>` in the `kb.storage.blobs` store, checksum `sha256:<hex>`. NULL for markdown nodes or when no blob store is configured |
+| `blob_key`, `blob_size_bytes`, `blob_mime_type`, `blob_checksum` | the retained original of a converted file (PDF, ...): per-file key `originals/<file id>` in the `kb.storage.blobs` store (no dedupe, by choice: undo can delete it without asking who else uses it), checksum `sha256:<hex>`. NULL for markdown nodes or when no blob store is configured |
 | `created_at`, `updated_at` | `updated_at` kept current by a DB trigger (`trg_files_set_updated_at` → `set_updated_at()`), not the ORM |
 
 ### Permissions (`src/kb/policy.py`)
@@ -318,7 +322,9 @@ explicit-`Session`-argument style, same exceptions (`TreeCycleError`,
 `api/app.py` is a thin FastAPI wrapper: no business logic, just request/response shaping
 via `schemas.py` and HTTP-status mapping (`TreeCycleError`/`ManifestCycleError` → 409,
 `PermissionDenied` → 403, `FieldError`/`UploadError` → 422, `ValueError` → 404,
-`BlobStoreError` → 502), plus `GET /health`. One
+`BlobStoreError` → 502, `IngestFailed` → 422 with a `failed: [{path, error}]` list,
+`service.IndexingError` → 503: nothing was written), plus `GET /health`. Writing routes call
+`service.commit` before answering, so a response always reflects committed, indexed state. One
 unified **`/nodes`** surface for files and folders: `POST /nodes` (body `type:
 "file"|"folder"`; a file needs `parent_id` + `content`, a folder takes no file-only
 field — both 422 at the Pydantic layer), `GET/PATCH/DELETE /nodes/{id}`,
@@ -349,16 +355,23 @@ means "no such id").
 `ingest_folder(session, root, *, parent_id=None, registry=None, tags=None) ->
 IngestReport` mirrors a local directory into the tree: dirs → folder nodes (title = dir
 name), supported files → file nodes, each with `sources=[{"resource": "file:///..."}]`
-and the given `tags`. Unsupported files go in `report.skipped`, processor errors in
-`report.failed` (per-file, never fatal). Hidden entries and symlinks are ignored. A dir
-with no supported files (e.g. images only) gets no node. The root always does. Never
-commits; the caller owns the transaction. Re-ingest always creates a new subtree (no
+and the given `tags`. Unsupported files go in `report.skipped`. **All or nothing**
+(user's choice, for v1 trust): if any file fails to convert, `IngestFailed` (a
+`ValueError`, `.failures` = *every* `(path, error)`) is raised before anything is
+embedded, uploaded or written — there is no partial-success report. Hidden entries and
+symlinks are ignored. A dir with no supported files (e.g. images only) gets no node. The
+root always does. Never commits; the caller owns the transaction (see "All-or-nothing
+writes" for how the index and S3 follow it). Re-ingest always creates a new subtree (no
 dedupe/upsert, deliberate).
 
 It's two steps. **`plan_folder(root, ...) -> FolderPlan`** walks the dir and runs the
-processors without touching the DB. It returns `PlannedNode(path, type, title, content,
-fields)`s (the root plus one per
-file, addressed by `/`-joined path) and the skipped/failed lists. Then
+processors without touching the DB or the network. It returns `PlannedNode(path, type, title, content,
+fields, id, original)`s (the root plus one per
+file, addressed by `/`-joined path; every file gets its `id` up front and, for
+`retain_original` processors, an `Original(path, mime, size, sha256)`) and the
+skipped/failed lists. `ingest_folder` then sets the `blob_*` columns, calls
+`service.stage(files=transient_files(plan), originals=...)` (embed + upload, before the
+transaction creates any row) and `materialize`s. Then
 **`materialize(session, plan, *, parent_id, folder_fields)`** (`ingest/plan.py`) is the one place
 a plan becomes nodes. Ancestors the plan doesn't list are *implied* and created as plain
 folders (title = path segment, `folder_fields`) only when something below them is
@@ -411,6 +424,18 @@ folder" (root) and "Ingest here…" (on folders: a folder picker, `<input webkit
 or a plain multi-file picker for loose files).
 It filters hidden and unsupported files client-side, so those are never uploaded.
 
+**Parallel conversion** (`ingest/convert.py`): `plan_folder` walks first, then
+`convert_all` runs the processors. Ones with `cpu_bound = True` (`LoaderProcessor`) go to a
+process pool (spawn context, created on first use, kept for the process's life and shared by
+requests) when there are 2+ such files; markdown/text and unpicklable processors (lambda
+factories, local classes) run in-process. Built-in loader factories are module-level
+functions for that reason. A dead worker (segfault/OOM) fails every file still pending on
+the pool ("converter process crashed") and the pool is recreated next call. Size:
+`KB_INGEST_WORKERS` (default min(4, CPUs), `1` = no pool; set it to the pod's CPU limit).
+Measured on an M2 Pro (8 × 20-page PDFs): 1 worker 3.4 pages/s, 2 → 5.6, 4 → 7.7, 8 → 5.5;
+one PyMuPDF4LLM conversion already uses ~1.6 cores, so expect roughly
+`cores / 1.6` times the single-file speed, not `workers` times.
+
 **Non-markdown formats** (`ingest/processors/converters.py`): `LoaderProcessor(name, extensions,
 loader_factory)` runs any LangChain `BaseLoader` as a `Processor` (docs joined, title =
 stem, empty text → failed). Built-ins: `PyMuPDF4LLMLoader(mode="single")`
@@ -421,15 +446,18 @@ ingested** (user's choice: out of scope, invites misuse); don't re-add without a
 repos use `ingest/git.py` (`ingest_git_repo`).
 
 **Raw originals** (`src/kb/storage/blobs.py`): processors with `retain_original = True` (the
-loader ones, not markdown) get their source bytes stored via `BlobStore.put_original` and the
-`blob_*` columns set. `BlobStore` is a thin boto3 wrapper (S3 only, by choice — no
+loader ones, not markdown) get their source file uploaded via `BlobStore.put_original(key,
+original)` (streamed from the path, with `ChecksumSHA256` so S3 verifies the bytes) under
+`originals/<file id>` (`original_key`), and the `blob_*` columns set. `delete_originals(keys)`
+(batched) is the undo, `list_originals()` feeds GC. `BlobStore` is a thin boto3 wrapper (S3 only, by choice — no
 LangChain `ByteStore`, no local-dir backend; for offline dev point `BLOB_ENDPOINT_URL`
 at MinIO). Store from env: `BLOB_BUCKET` (+`BLOB_ENDPOINT_URL`, `BLOB_PREFIX`); unset →
 none (originals not kept). Tests use the moto-backed `blob_store` fixture
-(`tests/conftest.py`) and `set_blob_store`. `plan_folder(..., blob_store=None)` stays I/O-free without a store;
-`ingest_folder`/`ingest_upload` default to the env store. A blob error fails only that
-file. Blobs are written before the DB commit, so a rolled-back ingest can leave
-(harmless, deduped) orphans. `GET /nodes/{id}/raw` downloads it (404 if none).
+(`tests/conftest.py`) and `set_blob_store`. `ingest_folder`/`ingest_upload` default to
+the env store (`blob_store=None` keeps none). Uploads happen in `service.stage`, before
+the transaction (so `ingest_upload`'s temp dir can be gone by commit time); a blob error
+fails the whole write and deletes what was uploaded. `GET /nodes/{id}/raw` downloads it
+(404 if none).
 
 Production hardening: the boto3 client gets 5 s connect / 30 s read timeouts and
 standard retries, 3 attempts total (`BLOB_CONNECT_TIMEOUT`/`BLOB_READ_TIMEOUT`/
@@ -437,7 +465,7 @@ standard retries, 3 attempts total (`BLOB_CONNECT_TIMEOUT`/`BLOB_READ_TIMEOUT`/
 `NoSuchKey` becomes `BlobStoreError` (plain `Exception`, **not** `ValueError`) → API
 **502**. `AccessDenied` on a read is deliberately *not* treated as "missing": without
 `s3:ListBucket` S3 answers a missing key that way, so the IAM policy must grant
-`ListBucket` (plus `GetObject`/`PutObject` on the prefix; see `.env.example`).
+`ListBucket` (plus `GetObject`/`PutObject`/`DeleteObject` on the prefix; see `.env.example`).
 `BlobStore.check()` = `head_bucket` with readable hints; `check_blob_store()` runs it
 from the API `lifespan` at startup and from `GET /health` (`{db, blob_store}`, 200/503;
 "not configured" counts as healthy). `BLOB_REQUIRED=1` (prod) makes a missing
@@ -452,15 +480,17 @@ do), `tests/test_blobs.py`.
 Built from LangChain parts; only KB-specific glue is hand-written.
 
 - **Store** (`semantic_index/vectorstore.py`): `langchain-postgres` `PGVectorStore` bound to `kb_chunks`
-  (columns `langchain_id`, `content`, `embedding vector(EMBEDDING_DIM)`, `file_id` FK
-  `ON DELETE CASCADE`, `heading`, `start_line`, `end_line`, `langchain_metadata`; HNSW
+  (columns `langchain_id`, `content`, `embedding vector(EMBEDDING_DIM)`, `file_id` (no FK
+  since 0003: chunks are staged before their row commits), `heading`, `start_line`,
+  `end_line`, `langchain_metadata`; HNSW
   cosine) + `SQLRecordManager` (table `upsertion_record`, namespace
   `kb_chunks/<model>`) + `init_embeddings(EMBEDDINGS_MODEL)` (default
-  `ollama:nomic-embed-text`, 768d). `get_index_store()`/`set_index_store()`; tests use
+  `ollama:nomic-embed-text`, 768d; `fake` = `DeterministicFakeEmbedding`). `get_index_store()`/`set_index_store()`; tests use
   `DeterministicFakeEmbedding`. Searches run with `hnsw.iterative_scan=relaxed_order`
   so narrow `$in` filters still return k hits. `chunk_key_encoder` makes uuid chunk ids
   (the default sha1 one warns; sha256 hex doesn't fit the uuid column).
 - **Chunking** (`semantic_index/chunking.py`): `FileNodeLoader` yields one Document per active **file**
+  (built by `node_document(file)`, which also works on uncommitted/transient `File`s)
   (folders have no content and are never indexed; `kb_chunks.file_id` → `files`). Only the markdown **body** is embedded, not frontmatter
   (so retags re-embed nothing), but `start_line`/`end_line` are lines of the
   virtual file (`kb.okf.body_line_offset`), so `read_lines(path, offset=start_line)` returns the
@@ -477,26 +507,66 @@ Built from LangChain parts; only KB-specific glue is hand-written.
   page; regression test `test_reindex_unchanged_large_file_is_all_skipped`).
   A folder id is treated like a missing one (unindexed, a no-op). `unindex_files(ids)` goes through record-manager keys (incremental cleanup can't drop
   a file absent from the batch). `reindex_all()` = full cleanup, file by file. All open
-  their own session: call them **after commit**, and not inside a running event loop.
-- **Index after writes** (`service.commit`): service mutations (create/update/restore,
-  delete + the descendants its cascade soft-deletes; ingest via `materialize`) record
-  touched ids in `session.info`; `service.touched_ids(session)` reads them. Ending the
-  outermost transaction (commit or rollback) clears them, so a rolled-back write is never
-  indexed. `service.commit(session, *, index=None, schedule=None) -> CommitResult(touched,
-  indexed)` commits, then indexes those ids — synchronously, or via `schedule(fn, ids)`
-  (the API passes `BackgroundTasks.add_task`). `index=None` follows `KB_AUTO_INDEX`
-  (default on; `0` for dev without an embeddings server). Failures are logged, never
-  raised. A plain `session.commit()` indexes nothing. Move/manifest ops record nothing
-  (chunks store no paths or membership). Repair: `POST /index/reindex` or
-  `scripts/reindex.py --all`. `scripts/ingest_folder.py --index` and
-  `scripts/eval/load_qasper.py --index` force sync indexing. Tests: `tests/test_write_sync.py`.
+  their own session (they see committed state only), and not inside a running event loop.
+  `stage_documents(docs)` = add-only `index(cleanup=None, batch_size=128)` across files
+  (no cleanup, so no one-batch rule), **raises** on failure. `reconcile(ids)` =
+  `index_files(ids)` + `delete_untracked_chunks(ids)` (rows with no record: `index()`
+  writes vectors before records): the index then holds exactly the committed state of
+  those ids. `reindex_all` also deletes untracked rows.
+- **Index on write**: every commit indexes what it wrote, before it happens — see
+  "All-or-nothing writes" below. Repair: `POST /index/reindex` or `scripts/reindex.py
+  --all` (should find nothing to do). Tests: `tests/test_write_sync.py`.
 - **Search** (`retrieval/semantic.py`): `service.semantic_search(session, manifest_id, query, *, k,
   tags, status)` → `SearchHit(file_id, path, title, heading, start_line, end_line,
   snippet, score)`. Scope = manifest nodes (∩ `query_metadata` tags/status) as a
   `file_id $in` filter — tags/status are never copied onto chunks. `score` is cosine
   **similarity** (higher = closer). Route: `GET /manifests/{id}/semantic?q=&k=`.
+  **Read-time validation**: a hit is dropped unless `chunk_text` is still inside lines
+  `start_line..end_line` of the file's current virtual file (hides chunks of an edit
+  that is staged but not committed, or whose post-commit cleanup failed); fetches
+  `OVERFETCH` (2) × k rows to make up for drops.
 
-Tests: `tests/test_semantic_index.py`, `tests/test_semantic_search.py`.
+Tests: `tests/test_semantic_index.py` (indexer tests write through the DAL, which records
+nothing, so they drive the indexer on their own), `tests/test_semantic_search.py`.
+
+## All-or-nothing writes (`src/kb/service.py` "Commit", `src/kb/maintenance.py`)
+
+A write lands in Postgres, the semantic index and S3 together, or leaves no reachable
+trace in any of them (user's choice for v1). LangChain's indexing machinery is kept
+(user's choice: no hand-rolled replacement), but `PGVectorStore` and `SQLRecordManager`
+commit on their own connections and can't join our transaction, so instead there is **one
+commit point, the DB commit**. Everything else is written before it, where nothing can
+reach it (search scopes to committed file ids; only a committed row points at an S3
+object), and settled after it:
+
+- `service.stage(session, files=, originals=)` (ingest, before its transaction does
+  anything): add-only index the transient `File`s, then upload originals (thread pool,
+  `UPLOAD_WORKERS = 8`). On failure it undoes its own work and raises.
+- `before_commit` event (**every** commit, `service.commit` or a plain
+  `session.commit()`): flushes, add-only indexes the active touched files (already-staged
+  chunks are skipped by the record manager, never re-embedded). Failure →
+  `IndexingError`, no commit.
+- `after_transaction_end` (outermost): after a commit, `reconcile` edited/deleted ids
+  (drops stale chunks; created ones were staged exactly — a later touch un-marks
+  "created"). After a rollback, `reconcile` every touched id and delete uploaded
+  originals no committed `files` row references. **State-based**, so a COMMIT with an
+  unknown outcome (connection lost) settles correctly either way. Only runs when
+  something was staged/uploaded; never raises (logs).
+- `service.commit(session) -> CommitResult(touched, indexed)` = commit + rollback on
+  failure; `indexed` is the staging `IndexResult`. No `index=`/`schedule=`, no
+  `KB_AUTO_INDEX`, no background indexing (all removed; don't reintroduce without
+  asking — they made the index eventually consistent).
+- Session keys: `_TOUCHED`, `_CREATED`, `_STAGED`, `_UPLOADED`, `_COMMITTED`,
+  `_LAST_STAGE` in `session.info`. A rolled-back SAVEPOINT keeps its ids (over-staging
+  is harmless).
+- Crash backstop (kill -9 between staging and settling): `scripts/gc.py [--dry-run]` →
+  `kb.maintenance.collect`: originals under `originals/` older than 24 h with no `files`
+  row (soft-deleted rows count as referencing), and record-manager groups older than 1 h
+  with no `files` row. Correctness never depends on it.
+- DB timeouts: `KB_DB_LOCK_TIMEOUT` (10s) / `KB_DB_STATEMENT_TIMEOUT` (60s) as connection
+  `options` on the app engine (`storage/db.py`), so a stuck write fails and is undone.
+- Ingest requests now include embedding time: raise the OpenShift router timeout
+  (`deploy/openshift/route-timeout.yaml`). Upload limit defaults were left as they were.
 
 ## Agent tools (`src/kb/retrieval/agent_tools.py`)
 
@@ -526,7 +596,7 @@ head`). There is now a committed pytest suite (`pytest -m "not llm"`, needs
 local `pinkas_test` DB exists for this on the Homebrew Postgres; it is **not** in `.env`,
 so set it explicitly or every DB test silently skips:
 `TEST_DATABASE_URL=postgresql+psycopg://yonatanashlag@localhost:5432/pinkas_test`); it passes in the `kb`
-env (223 passed, Docling test skipped), including `tests/test_policy.py` (pure
+env (245 passed), including `tests/test_policy.py` (pure
 permission matrix) and `tests/test_permissions.py` (service + `/nodes` enforcement). The tests use fake embeddings;
 real Ollama embeddings were verified on the dev DB (6 pages → 222 chunks, a second
 `reindex.py --all` skips all of them, and manifest-scoped `semantic_search` returns
@@ -574,5 +644,6 @@ follow this pattern — copy it for any new enum.
   now set up; the agent model still needs a tool-calling LLM) to see if
   semantic search earns its place; then consider `HybridSearchConfig` (keyword + vector
   fusion in `langchain-postgres`) and an index-status route.
-- Background indexing is in-process (`BackgroundTask`); a real worker would loop
-  `index_files`/`reindex_all`.
+- Ingest is synchronous within the request (embedding included); for big uploads, an
+  async ingest job with a status route (still all or nothing, just not in the HTTP
+  request).

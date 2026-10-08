@@ -27,6 +27,7 @@ class LoaderProcessor:
     `files` column."""
 
     retain_original = True
+    cpu_bound = True  # kb.ingest.convert runs it in the process pool (when picklable)
 
     def __init__(self, name: str, extensions: frozenset[str] | set[str], loader_factory: LoaderFactory) -> None:
         self.name = name
@@ -41,24 +42,30 @@ class LoaderProcessor:
         return ProcessedDocument(title=path.stem, content=content + "\n")
 
 
-def pymupdf4llm_processor() -> LoaderProcessor:
+# Loader factories are module-level functions, not lambdas, so the processors pickle and
+# can run in kb.ingest.convert's process pool.
+
+
+def _pymupdf4llm_loader(path: Path) -> BaseLoader:
     from langchain_pymupdf4llm import PyMuPDF4LLMLoader
 
     # mode="single": one document for the whole PDF (pages joined by a `-----` rule).
-    return LoaderProcessor(
-        "pymupdf4llm", {".pdf"}, lambda path: PyMuPDF4LLMLoader(str(path), mode="single")
-    )
+    return PyMuPDF4LLMLoader(str(path), mode="single")
 
 
-def docling_processor() -> LoaderProcessor:
+def _docling_loader(path: Path) -> BaseLoader:
     from langchain_docling import DoclingLoader
     from langchain_docling.loader import ExportType
 
-    return LoaderProcessor(
-        "docling",
-        DOCLING_EXTENSIONS,
-        lambda path: DoclingLoader(file_path=str(path), export_type=ExportType.MARKDOWN),
-    )
+    return DoclingLoader(file_path=str(path), export_type=ExportType.MARKDOWN)
+
+
+def pymupdf4llm_processor() -> LoaderProcessor:
+    return LoaderProcessor("pymupdf4llm", {".pdf"}, _pymupdf4llm_loader)
+
+
+def docling_processor() -> LoaderProcessor:
+    return LoaderProcessor("docling", DOCLING_EXTENSIONS, _docling_loader)
 
 
 def builtin_loader_processors() -> list[LoaderProcessor]:

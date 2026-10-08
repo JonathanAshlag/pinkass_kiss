@@ -1,11 +1,13 @@
 """
 Semantic search (kb.retrieval.semantic) and its wiring: service passthroughs, the
-/manifests/{id}/semantic and /index/reindex routes, the index-after-write background
-hook, and the agent tool.
+/manifests/{id}/semantic and /index/reindex routes, commit-time indexing through the
+API, and the agent tool.
 
-Chunks are seeded straight into kb_chunks with `vector_store.add_documents` (metadata
-file_id / heading / start_line / end_line), so these tests don't depend on
-kb.semantic_index.indexer -- except `test_index_files_roundtrip`, which runs only when it exists.
+`KB.node` writes files through the DAL (which records nothing for kb.service's
+commit-time indexing) and chunks are seeded straight into kb_chunks with
+`vector_store.add_documents` (metadata file_id / heading / start_line / end_line), so
+the search tests control exactly which chunks exist. The "Commit-time indexing" tests
+go through the API instead and check what every write indexes.
 Embeddings are `DeterministicFakeEmbedding`: a query equal to a chunk's text lands at
 distance 0 from it, everything else is effectively random.
 """
@@ -63,9 +65,9 @@ class KB:
         return "/".join([self.root.title, *segments])
 
     def node(self, title, content="", *, parent=None, **fields):
-        from kb import service
+        from kb.storage import dal
 
-        node = service.create_file(
+        node = dal.create_file(
             self.session,
             parent_id=(parent or self.root).id,
             title=title,
@@ -134,7 +136,12 @@ class KB:
                 self.session.execute(
                     text("DELETE FROM manifests WHERE id = ANY(:ids)"), {"ids": self.manifest_ids}
                 )
-            if self.node_ids:  # kb_chunks rows go with the files (FK ON DELETE CASCADE)
+            if self.node_ids:
+                self.session.execute(text("DELETE FROM kb_chunks WHERE file_id = ANY(:ids)"), {"ids": self.node_ids})
+                self.session.execute(
+                    text("DELETE FROM upsertion_record WHERE group_id = ANY(:ids)"),
+                    {"ids": [str(i) for i in self.node_ids]},
+                )
                 for table in ("files", "folders"):  # files first: they reference folders
                     self.session.execute(
                         text(f"DELETE FROM {table} WHERE id = ANY(:ids)"), {"ids": self.node_ids}
@@ -359,64 +366,45 @@ def test_reindex_route(monkeypatch, client):
 
 
 # --------------------------------------------------------------------------
-# Index-after-write hook
+# Commit-time indexing (every write is indexed before its response, or not at all)
 # --------------------------------------------------------------------------
 
 
-@pytest.fixture
-def recorder(monkeypatch, kb):
-    """Replaces service.index_files; each call records the ids plus how each node
-    looks from a *fresh* session -- i.e. what was committed when indexing ran."""
-    from kb import service
-    from kb.storage.db import SessionLocal
-
-    monkeypatch.setenv("KB_AUTO_INDEX", "1")
-    calls = []
-
-    def fake_index_files(file_ids, **kwargs):
-        with SessionLocal() as fresh:
-            seen = {}
-            for fid in file_ids:
-                node = service.get_node(fresh, fid, include_deleted=True)
-                seen[fid] = None if node is None else (getattr(node, "content", None), node.deleted_at is not None)
-        calls.append((list(file_ids), seen))
-
-    monkeypatch.setattr(service, "index_files", fake_index_files)
-    return calls
+def chunk_texts(file_id):
+    with __import__("kb.storage.db", fromlist=["engine"]).engine.connect() as conn:
+        return [
+            r[0]
+            for r in conn.execute(
+                text("SELECT content FROM kb_chunks WHERE file_id = :f ORDER BY start_line"), {"f": file_id}
+            )
+        ]
 
 
-def test_index_hook_runs_after_commit(kb, client, recorder):
-    r = client.post("/nodes", json={"type": "folder", "title": "hook-root"})
+def test_writes_are_indexed_when_they_return(kb, client):
+    r = client.post("/nodes", json={"type": "folder", "title": "sync-root"})
     assert r.status_code == 201
     root = uuid.UUID(r.json()["id"])
     kb.node_ids.append(root)
-    r = client.post("/nodes", json={"parent_id": str(root), "title": "hook-doc", "content": "v1"})
+    r = client.post("/nodes", json={"parent_id": str(root), "title": "sync-doc", "content": "version one"})
     doc = uuid.UUID(r.json()["id"])
     kb.node_ids.append(doc)
-    assert recorder[-1] == ([doc], {doc: ("v1", False)})
+    assert chunk_texts(doc) == ["sync-doc\n\nversion one"]  # indexed before the response
 
-    client.patch(f"/nodes/{doc}", json={"content": "v2"})
-    assert recorder[-1] == ([doc], {doc: ("v2", False)})
+    client.patch(f"/nodes/{doc}", json={"content": "version two"})
+    assert chunk_texts(doc) == ["sync-doc\n\nversion two"]  # the stale chunk is gone
 
-    # move: no reindex
-    n_calls = len(recorder)
+    before = chunk_texts(doc)
     assert client.post(f"/nodes/{doc}/move", json={"new_parent_id": str(kb.root.id)}).status_code == 200
-    assert client.post(f"/nodes/{doc}/move", json={"new_parent_id": str(root)}).status_code == 200
-    assert len(recorder) == n_calls
+    assert chunk_texts(doc) == before  # chunks store no paths: a move changes nothing
 
-    # cascade delete: the folder and its (active) descendants, all seen as deleted
-    assert client.delete(f"/nodes/{root}").status_code == 204
-    ids, seen = recorder[-1]
-    assert set(ids) == {root, doc} and all(deleted for _, deleted in seen.values())
-
-    # restore is single-node, and a node's folder must be restored first
-    assert client.post(f"/nodes/{doc}/restore").status_code == 422
-    assert client.post(f"/nodes/{root}/restore").status_code == 200
+    assert client.delete(f"/nodes/{kb.root.id}").status_code == 204  # cascades to doc
+    assert chunk_texts(doc) == []
+    assert client.post(f"/nodes/{kb.root.id}/restore").status_code == 200
     assert client.post(f"/nodes/{doc}/restore").status_code == 200
-    assert recorder[-1] == ([doc], {doc: ("v2", False)})
+    assert chunk_texts(doc) == ["sync-doc\n\nversion two"]
 
 
-def test_index_hook_on_ingest(kb, client, recorder):
+def test_ingest_route_indexes_every_file(kb, client):
     r = client.post(
         "/ingest",
         files=[("files", ("a.md", b"# A\n\nalpha")), ("files", ("b.md", b"# B\n\nbeta"))],
@@ -424,31 +412,24 @@ def test_index_hook_on_ingest(kb, client, recorder):
     )
     assert r.status_code == 201, r.text
     body = r.json()
-    created = {uuid.UUID(i) for i in [body["root_id"], *body["files_created"], *body["folders_created"]]}
-    kb.node_ids.extend(created)
-    ids, seen = recorder[-1]
-    assert set(ids) == created and all(v is not None for v in seen.values())
+    kb.node_ids.extend(uuid.UUID(i) for i in [body["root_id"], *body["files_created"], *body["folders_created"]])
+    assert len(body["files_created"]) == 2
+    assert all(chunk_texts(f) for f in body["files_created"])
 
 
-def test_index_hook_failure_never_fails_request(kb, client, monkeypatch):
-    from kb import service
+def test_indexing_failure_fails_the_write(kb, client, monkeypatch):
+    from kb.semantic_index import indexer
 
-    monkeypatch.setenv("KB_AUTO_INDEX", "1")
-
-    def boom(file_ids, **kwargs):
+    def boom(docs, **kwargs):
         raise RuntimeError("embeddings server down")
 
-    monkeypatch.setattr(service, "index_files", boom)
-    r = client.post("/nodes", json={"parent_id": str(kb.root.id), "title": "still-created", "content": "x"})
-    assert r.status_code == 201
-    kb.node_ids.append(uuid.UUID(r.json()["id"]))
-
-
-def test_index_hook_disabled_by_env(kb, client, recorder, monkeypatch):
-    monkeypatch.setenv("KB_AUTO_INDEX", "0")
-    r = client.post("/nodes", json={"parent_id": str(kb.root.id), "title": "no-index", "content": "x"})
-    kb.node_ids.append(uuid.UUID(r.json()["id"]))
-    assert recorder == []
+    parent = kb.root
+    monkeypatch.setattr(indexer, "stage_documents", boom)
+    r = client.post("/nodes", json={"parent_id": str(parent.id), "title": "never-created", "content": "x"})
+    assert r.status_code == 503 and "embeddings server down" in r.json()["detail"]
+    monkeypatch.undo()
+    children = client.get(f"/nodes/{parent.id}/children").json()
+    assert "never-created" not in {c["title"] for c in children}
 
 
 # --------------------------------------------------------------------------

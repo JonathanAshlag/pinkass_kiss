@@ -82,8 +82,8 @@ async function api(method, path, body) {
   const form = body instanceof FormData;   // multipart: let the browser set the boundary header
   const res = await fetch(path, { method, headers: body && !form ? {'Content-Type':'application/json'} : {}, body: form ? body : body ? JSON.stringify(body) : undefined });
   if (!res.ok) {
-    let d = res.statusText; try { const j = await res.json(); d = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail); } catch {}
-    toast(`${res.status}: ${d}`); throw new Error(d);
+    let d = res.statusText, j = null; try { j = await res.json(); d = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail); } catch {}
+    toast(`${res.status}: ${d}`); const err = new Error(d); err.body = j; throw err;
   }
   return res.status === 204 ? null : res.json();
 }
@@ -338,12 +338,17 @@ async function ingestForm(parentId) {
     $('#i-go').disabled = true; $('#i-go').textContent = 'Uploading…';
     let r;
     try { r = await api('POST', '/ingest', fd); }
+    catch (e) {  // all or nothing: a failed file means nothing was ingested
+      const failed = (e.body && e.body.failed) || [];
+      $('#i-report').innerHTML = `<div class="sect">Nothing was ingested</div><div class="warn">${esc(e.message)}</div>
+        ${failed.map(x => `<div class="warn">✗ ${esc(x.path)}: ${esc(x.error)}</div>`).join('')}`;
+      return;
+    }
     finally { $('#i-go').textContent = 'Upload'; $('#i-go').disabled = false; }
     const skipped = [...picked.skipped.map(x => x.rel), ...r.skipped];
     $('#i-report').innerHTML = `
       <div class="sect">Result</div>
       <div>${r.files_created.length} file(s), ${r.folders_created.length} folder(s) created · root <a href="#" id="i-root"><code>${r.root_id}</code></a></div>
-      ${r.failed.map(x => `<div class="warn">✗ ${esc(x.path)}: ${esc(x.error)}</div>`).join('')}
       ${skipped.length ? `<details><summary class="meta">${skipped.length} skipped (unsupported)</summary>${skipped.map(p => `<div class="meta">${esc(p)}</div>`).join('')}</details>` : ''}`;
     $('#i-root').onclick = async e => { e.preventDefault(); await selectNode(r.root_id); await revealInTree(r.root_id); };
     toast('ingested', true); await renderTree();

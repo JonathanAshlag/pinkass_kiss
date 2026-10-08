@@ -28,7 +28,7 @@ from typing import BinaryIO
 from sqlalchemy.orm import Session
 
 from kb.ingest.processors.base import ProcessorRegistry
-from kb.ingest.folder import DEFAULT_BLOB_STORE, IngestReport, ingest_folder
+from kb.ingest.folder import DEFAULT_BLOB_STORE, IngestFailed, IngestReport, ingest_folder
 from kb.storage.blobs import BlobStore
 
 UPLOAD_SCHEME = "upload:"
@@ -130,10 +130,12 @@ def ingest_upload(
       `root_id` is `parent_id`.
 
     Anything else, duplicate paths, or a path that's both a file and a directory raises
-    UploadError; exceeding `limits` (default: none) raises UploadTooLarge. Report paths
-    are the upload paths, e.g. "docs/logo.png"; hidden files ("docs/.env") are listed in
-    `skipped`. `blob_store` as in `ingest_folder` (originals keep their upload file name,
-    so the MIME type is right)."""
+    UploadError; exceeding `limits` (default: none) raises UploadTooLarge. All or
+    nothing, as `ingest_folder` (whose errors it raises, IngestFailed with upload paths).
+    Report paths are the upload paths, e.g. "docs/logo.png"; hidden files ("docs/.env")
+    are listed in `skipped`. `blob_store` as in `ingest_folder` (originals keep their
+    upload file name, so the MIME type is right). Originals are uploaded from the temp
+    dir before this returns, so the caller can commit after it's gone."""
     limits = limits or UploadLimits()
     files = [(_safe_relative(raw), data) for raw, data in files]
     if not files:
@@ -169,20 +171,21 @@ def ingest_upload(
             target.parent.mkdir(parents=True, exist_ok=True)
             total += _write(target, data, path, limits, total)
 
-        report = ingest_folder(
-            session,
-            base / root_name,
-            parent_id=parent_id,
-            registry=registry,
-            tags=tags,
-            root_title=root_name or None,
-            resource_for=lambda p: UPLOAD_SCHEME + p.relative_to(base).as_posix(),
-            blob_store=blob_store,
-            root_is_parent=loose,
-        )
-        # Temp-dir paths mean nothing to the caller; report upload-relative ones.
+        try:
+            report = ingest_folder(
+                session,
+                base / root_name,
+                parent_id=parent_id,
+                registry=registry,
+                tags=tags,
+                root_title=root_name or None,
+                resource_for=lambda p: UPLOAD_SCHEME + p.relative_to(base).as_posix(),
+                blob_store=blob_store,
+                root_is_parent=loose,
+            )
+        except IngestFailed as exc:  # temp-dir paths mean nothing to the caller
+            raise IngestFailed([(p.relative_to(base), err) for p, err in exc.failures]) from None
         report.skipped = [Path(path) for path, _ in files if hidden(path)] + [
             p.relative_to(base) for p in report.skipped
         ]
-        report.failed = [(p.relative_to(base), err) for p, err in report.failed]
     return report

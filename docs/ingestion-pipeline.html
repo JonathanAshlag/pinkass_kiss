@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KB Ingestion Pipeline</title>
+<style>
+:root {
+  --bg: #fbfaf8;
+  --surface: #ffffff;
+  --surface-2: #f3f1ed;
+  --text: #1d1c1a;
+  --muted: #6a675f;
+  --border: #e3e0d9;
+  --accent: #2f5d9f;
+  --accent-soft: #e6eef9;
+  --ok: #2c7a4b;
+  --ok-soft: #e4f3ea;
+  --warn: #9a6a12;
+  --warn-soft: #fbf1dc;
+  --bad: #a83a32;
+  --bad-soft: #f9e4e2;
+  --code-bg: #f1efea;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #151514; --surface: #1d1d1b; --surface-2: #252522; --text: #ecebe7; --muted: #a29f97;
+    --border: #34332f; --accent: #8db4ef; --accent-soft: #1f2c40; --ok: #79c99a; --ok-soft: #1c2e23;
+    --warn: #e2b55c; --warn-soft: #33291a; --bad: #ec8c84; --bad-soft: #3a2220; --code-bg: #262623;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #151514; --surface: #1d1d1b; --surface-2: #252522; --text: #ecebe7; --muted: #a29f97;
+  --border: #34332f; --accent: #8db4ef; --accent-soft: #1f2c40; --ok: #79c99a; --ok-soft: #1c2e23;
+  --warn: #e2b55c; --warn-soft: #33291a; --bad: #ec8c84; --bad-soft: #3a2220; --code-bg: #262623;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 var(--sans);
+}
+.wrap { max-width: 920px; margin: 0 auto; padding: 40px 16px 80px; }
+header { margin-bottom: 28px; }
+h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+.lede { color: var(--muted); font-size: 1.08rem; margin: 0; }
+nav.toc {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px 18px; margin: 24px 0 8px; font-size: 0.95rem;
+}
+nav.toc ol { margin: 4px 0 0; padding-left: 20px; columns: 2; column-gap: 32px; }
+nav.toc a { color: var(--accent); text-decoration: none; }
+nav.toc a:hover { text-decoration: underline; }
+h2 {
+  font-size: 1.4rem; margin: 48px 0 12px; padding-top: 12px; border-top: 1px solid var(--border);
+}
+h3 { font-size: 1.08rem; margin: 26px 0 8px; }
+p, li { max-width: 72ch; }
+code {
+  font-family: var(--mono); font-size: 0.88em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+pre {
+  font-family: var(--mono); font-size: 0.85rem; line-height: 1.5; background: var(--code-bg);
+  border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; overflow-x: auto;
+}
+pre code { background: none; padding: 0; }
+.table-wrap { overflow-x: auto; margin: 12px 0 16px; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; background: var(--surface); }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { background: var(--surface-2); font-weight: 600; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.callout {
+  border-left: 4px solid var(--accent); background: var(--accent-soft); padding: 12px 16px;
+  border-radius: 0 8px 8px 0; margin: 16px 0;
+}
+.callout.ok { border-color: var(--ok); background: var(--ok-soft); }
+.callout.warn { border-color: var(--warn); background: var(--warn-soft); }
+.callout p { margin: 0; }
+.callout p + p { margin-top: 8px; }
+
+/* Pipeline diagram */
+.flow { display: flex; flex-direction: column; gap: 0; margin: 20px 0; }
+.stage {
+  display: grid; grid-template-columns: 44px 1fr; gap: 14px; align-items: start;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.stage .n {
+  width: 34px; height: 34px; border-radius: 50%; background: var(--surface-2); color: var(--muted);
+  display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.95rem;
+}
+.stage.commit { border: 2px solid var(--ok); background: var(--ok-soft); }
+.stage.commit .n { background: var(--ok); color: var(--surface); }
+.stage h4 { margin: 4px 0 2px; font-size: 1rem; }
+.stage p { margin: 0; color: var(--muted); font-size: 0.93rem; }
+.stage .where { font-family: var(--mono); font-size: 0.78rem; color: var(--accent); margin-top: 4px; }
+.arrow { text-align: center; color: var(--muted); font-size: 1.1rem; line-height: 1; padding: 4px 0; }
+.tag {
+  display: inline-block; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase;
+  padding: 1px 7px; border-radius: 999px; margin-left: 6px; vertical-align: 2px;
+}
+.tag.db { background: var(--accent-soft); color: var(--accent); }
+.tag.vec { background: var(--warn-soft); color: var(--warn); }
+.tag.s3 { background: var(--bad-soft); color: var(--bad); }
+.tag.cpu { background: var(--surface-2); color: var(--muted); }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 16px 0; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.card .big { font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.card .lbl { color: var(--muted); font-size: 0.88rem; }
+.bar { height: 10px; border-radius: 5px; background: var(--surface-2); overflow: hidden; margin-top: 6px; }
+.bar span { display: block; height: 100%; background: var(--accent); }
+footer { margin-top: 56px; color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--border); padding-top: 16px; }
+@media (max-width: 640px) {
+  h1 { font-size: 1.6rem; }
+  nav.toc ol { columns: 1; }
+  .stage { grid-template-columns: 34px 1fr; gap: 10px; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>File ingestion pipeline</h1>
+  <p class="lede">How an upload becomes Postgres rows, pgvector chunks and S3 originals, all or nothing:
+  the flow, what undo does at every failure point, what a crash can leave behind and how it is swept,
+  and how fast it runs on different hardware.</p>
+</header>
+
+<nav class="toc" aria-label="Contents">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#guarantee">The guarantee</a></li>
+    <li><a href="#why">Why one commit point</a></li>
+    <li><a href="#flow">The flow, step by step</a></li>
+    <li><a href="#invisible">Why staged data is invisible</a></li>
+    <li><a href="#failures">Failure matrix: what undo does</a></li>
+    <li><a href="#crash">Crash leftovers and GC</a></li>
+    <li><a href="#edits">Edits, deletes, restores</a></li>
+    <li><a href="#api">API errors</a></li>
+    <li><a href="#speed">Speed: measured</a></li>
+    <li><a href="#prod">Speed: production estimates</a></li>
+    <li><a href="#concurrency">Concurrent requests</a></li>
+    <li><a href="#config">Configuration</a></li>
+    <li><a href="#next">Limits and next steps</a></li>
+  </ol>
+</nav>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="guarantee">1. The guarantee</h2>
+<p>A write, whether a whole folder upload or a single <code>PATCH</code>, either lands in all three stores or
+leaves no <em>reachable</em> trace in any of them:</p>
+<div class="table-wrap"><table>
+  <tr><th>Store</th><th>What it holds</th><th>Written by</th></tr>
+  <tr><td>Postgres <span class="tag db">db</span></td><td><code>folders</code> / <code>files</code> rows (the canonical data)</td><td>our SQLAlchemy session</td></tr>
+  <tr><td>pgvector <span class="tag vec">index</span></td><td><code>kb_chunks</code> (embeddings) + <code>upsertion_record</code> (LangChain's record manager)</td><td>LangChain <code>index()</code>, <code>PGVectorStore</code>, <code>SQLRecordManager</code></td></tr>
+  <tr><td>S3 <span class="tag s3">s3</span></td><td>raw originals of converted files (PDF, DOCX, ...) under <code>originals/&lt;file id&gt;</code></td><td><code>BlobStore.put_original</code> (boto3)</td></tr>
+</table></div>
+<p>The atomic unit is the <strong>whole request</strong>: if one file of a 300-file upload fails to convert, nothing
+from the upload is written anywhere, and the error lists every failed file so they can all be fixed at once.</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="why">2. Why one commit point, not one transaction</h2>
+<p>The three stores can't share a transaction. <code>PGVectorStore</code> checks out its own (async) connection and commits
+on it for every call, and <code>SQLRecordManager</code> commits inside its own sessions; neither accepts an external
+transaction. S3 has no transactions at all. Replacing LangChain's indexing machinery with hand-written SQL was
+rejected, so the design keeps it and uses a <strong>saga with a single commit point</strong>:</p>
+<ul>
+  <li>The <strong>DB commit</strong> is the moment the write happens.</li>
+  <li>Chunks and S3 objects are written <strong>before</strong> it, in places nothing can reach until the rows exist.</li>
+  <li>After the transaction ends, everything is <strong>settled</strong>: kept and tidied after a commit, undone after a rollback.</li>
+</ul>
+<p>To make that possible, migration <code>0003</code> dropped the foreign key from <code>kb_chunks.file_id</code> to <code>files</code>: chunks have
+to be insertable before their file row commits, from LangChain's own connection.</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="flow">3. The flow, step by step</h2>
+<p>For <code>POST /ingest</code> (and <code>scripts/ingest_folder.py</code>, <code>ingest_git.py</code>). Cheapest and likeliest failures run first,
+so most failures happen before anything needs undoing.</p>
+
+<div class="flow">
+  <div class="stage"><div class="n">1</div><div>
+    <h4>Validate and spool the upload</h4>
+    <p>Paths must be relative, without <code>..</code>, under one top folder or all loose; no case-insensitive duplicates;
+    size and count limits are checked while streaming. Files are mirrored into a temp dir. Nothing written yet.</p>
+    <div class="where">kb/ingest/upload.py · ingest_upload → UploadError 422 / UploadTooLarge 413</div>
+  </div></div>
+  <div class="arrow">↓</div>
+  <div class="stage"><div class="n">2</div><div>
+    <h4>Plan: walk and convert <span class="tag cpu">cpu</span></h4>
+    <p>Walk the tree (hidden entries and symlinks ignored, unsupported extensions skipped). Convert every file:
+    PDFs and Office files run in a shared <strong>process pool</strong>, markdown/text in-process. Every file gets its
+    <strong>UUID up front</strong>; converted files also get an <code>Original</code> (path, MIME, size, SHA-256, hashed locally).
+    No DB, no network.</p>
+    <div class="where">kb/ingest/folder.py · plan_folder, kb/ingest/convert.py · convert_all</div>
+  </div></div>
+  <div class="arrow">↓</div>
+  <div class="stage"><div class="n">3</div><div>
+    <h4>Any conversion failed? Stop.</h4>
+    <p><code>IngestFailed</code> with <em>every</em> <code>(path, error)</code>. Nothing has been embedded, uploaded or written, so there is nothing to undo.</p>
+    <div class="where">IngestFailed → 422 {detail, failed: [{path, error}]}</div>
+  </div></div>
+  <div class="arrow">↓</div>
+  <div class="stage"><div class="n">4</div><div>
+    <h4>Stage the index <span class="tag vec">index</span></h4>
+    <p>Build LangChain Documents from <strong>transient</strong> <code>File</code> objects (final ids and fields, not in the DB yet), split into
+    chunks and run <code>index(cleanup=None, batch_size=128)</code>: add-only, embeds and inserts, deletes nothing. The ids are
+    recorded as "touched/created" first, so even a half-done staging is undone by id.</p>
+    <div class="where">kb/service.py · stage → _stage_index → indexer.stage_documents · IndexingError 503</div>
+  </div></div>
+  <div class="arrow">↓</div>
+  <div class="stage"><div class="n">5</div><div>
+    <h4>Upload originals <span class="tag s3">s3</span></h4>
+    <p>8 parallel <code>PutObject</code>s, streamed from the temp dir, with <code>ChecksumSHA256</code> so S3 rejects corrupted bytes.
+    Every key that made it is recorded for the undo. On failure, <code>stage</code> undoes its own chunks and uploads, then raises.</p>
+    <div class="where">service._upload_originals · BlobStore.put_original · BlobStoreError 502</div>
+  </div></div>
+  <div class="arrow">↓</div>
+  <div class="stage"><div class="n">6</div><div>
+    <h4>Materialize rows <span class="tag db">db</span></h4>
+    <p>Create folders and files (with the pre-chosen ids and <code>blob_*</code> columns) inside the session's transaction,
+    with the usual permission checks. Uncommitted.</p>
+    <div class="where">kb/ingest/plan.py · materialize → service.create_file / create_folder</div>
+  </div></div>
+  <div class="arrow">↓</div>
+  <div class="stage"><div class="n">7</div><div>
+    <h4><code>before_commit</code>: stage what the transaction touched</h4>
+    <p>Flush, load the active touched files and run the same add-only <code>index()</code>. For an ingest every chunk is already
+    in the record manager, so all are <strong>skipped</strong> (no second embedding). For a <code>PATCH</code> this is where the embedding happens.
+    Failure raises <code>IndexingError</code>, so the commit doesn't happen.</p>
+    <div class="where">service._stage_touched (SQLAlchemy Session event, fires on every commit)</div>
+  </div></div>
+  <div class="arrow">↓</div>
+  <div class="stage commit"><div class="n">8</div><div>
+    <h4>COMMIT: the commit point</h4>
+    <p>Rows become visible, which makes their chunks searchable and their originals referenced.</p>
+    <div class="where">service.commit → session.commit (rollback on failure)</div>
+  </div></div>
+  <div class="arrow">↓</div>
+  <div class="stage"><div class="n">9</div><div>
+    <h4>Settle (after the outermost transaction ends)</h4>
+    <p><strong>Committed:</strong> <code>reconcile</code> edited or deleted ids, dropping stale chunks. New files were staged exactly, so they are skipped.<br>
+    <strong>Rolled back:</strong> <code>reconcile</code> every touched id (drops the staged chunks; no embedding) and delete uploaded originals no
+    committed row references. Never raises; failures are logged.</p>
+    <div class="where">service._end_transaction → _settle → indexer.reconcile, _delete_unreferenced</div>
+  </div></div>
+</div>
+
+<h3>What <code>reconcile</code> does</h3>
+<p><code>reconcile(ids)</code> = <code>index_files(ids)</code> + <code>delete_untracked_chunks(ids)</code>: it makes the index hold exactly the
+<em>committed</em> state of those ids, whatever it was before.</p>
+<ul>
+  <li><strong>Missing or deleted file</strong> (a rolled-back creation): unindexed through the record manager's keys.</li>
+  <li><strong>Existing file</strong> (a rolled-back edit): <code>index(cleanup="incremental")</code> with the committed content. Old chunks are all
+    still there (staging deletes nothing), so they report "skipped" and only the extra staged chunks are deleted.
+    <strong>Undo never embeds.</strong></li>
+  <li><strong>Untracked rows:</strong> <code>index()</code> writes vectors before records, so a crash between them leaves chunk rows with no record.
+    <code>delete_untracked_chunks</code> removes those.</li>
+</ul>
+<p>Because settling looks at the DB's state instead of remembering what happened, a <code>COMMIT</code> whose outcome is unknown
+(the connection dropped mid-commit) is settled correctly either way.</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="invisible">4. Why staged data is invisible before the commit</h2>
+<div class="table-wrap"><table>
+  <tr><th>Staged thing</th><th>Why nobody can see it</th></tr>
+  <tr><td>Chunks of a <strong>new</strong> file</td><td>Search scopes to the manifest's committed, active file ids (<code>file_id $in [...]</code>). An uncommitted id is in no scope.</td></tr>
+  <tr><td>New chunks of an <strong>edited</strong> file</td><td>The file id <em>is</em> in scope, so search also does <strong>read-time validation</strong>: a hit is dropped unless its text is still inside lines <code>start_line..end_line</code> of the file's current virtual file. It fetches 2×k rows to make up for drops.</td></tr>
+  <tr><td>Stale chunks after a failed cleanup</td><td>Same read-time validation.</td></tr>
+  <tr><td>S3 original</td><td>Only reachable through a committed row's <code>blob_key</code> (<code>GET /nodes/{id}/raw</code>).</td></tr>
+</table></div>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="failures">5. Failure matrix: what undo does</h2>
+<div class="table-wrap"><table>
+  <tr><th>Fails at</th><th>Already written</th><th>Undo</th><th>API</th></tr>
+  <tr><td>Path checks / limits</td><td>nothing</td><td>none needed</td><td class="num">422 / 413</td></tr>
+  <tr><td>Conversion (any file)</td><td>nothing</td><td>none needed</td><td class="num">422 + list</td></tr>
+  <tr><td>Embedding / chunk insert</td><td>some chunks</td><td><code>stage</code> reconciles its ids → chunks removed</td><td class="num">503</td></tr>
+  <tr><td>S3 upload (any file)</td><td>all chunks, some originals</td><td>chunks reconciled away, uploaded keys deleted</td><td class="num">502</td></tr>
+  <tr><td>Materialize (permission, constraint)</td><td>chunks + originals</td><td>rollback → settle removes both</td><td class="num">403 / 4xx / 500</td></tr>
+  <tr><td><code>before_commit</code> indexing</td><td>chunks + originals + flushed rows</td><td>rollback → settle removes all</td><td class="num">503</td></tr>
+  <tr><td>COMMIT itself</td><td>chunks + originals</td><td>rollback → settle (state-based, also when the outcome is unknown)</td><td class="num">500</td></tr>
+  <tr><td>Post-commit cleanup</td><td>committed write + stale chunks</td><td>logged; read-time validation hides them; <code>reindex</code> repairs</td><td class="num">2xx</td></tr>
+  <tr><td>Lock wait &gt; 10 s / statement &gt; 60 s</td><td>as above</td><td>Postgres cancels → rollback → settle</td><td class="num">500</td></tr>
+</table></div>
+<div class="callout ok"><p>In every row, a failed request ends with 0 new rows, 0 new chunks and 0 new S3 objects. Each case
+is covered by a failure-injection test in <code>tests/test_write_sync.py</code>.</p></div>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="crash">6. Crash leftovers and GC</h2>
+<p>The undo runs in-process. If the process dies between staging and settling (<code>kill -9</code>, OOM kill, pod eviction,
+power loss), the undo never runs. Here's what can be left:</p>
+<div class="table-wrap"><table>
+  <tr><th>Leftover</th><th>Harmful?</th><th>Swept by</th></tr>
+  <tr><td>Chunks + records of files that never committed</td><td>No: unreachable (no file row, so in no search scope)</td><td><code>gc_chunks</code>: record-manager groups last written over <strong>1 h</strong> ago with no <code>files</code> row</td></tr>
+  <tr><td>Chunk rows with no record (crash inside <code>index()</code>)</td><td>No: same reason</td><td><code>delete_untracked_chunks</code>, run by <code>reconcile</code> and <code>reindex_all</code></td></tr>
+  <tr><td>S3 originals with no row</td><td>No: nothing points at them. They only cost storage.</td><td><code>gc_originals</code>: keys under <code>originals/</code> older than <strong>24 h</strong> with no <code>files.blob_key</code></td></tr>
+  <tr><td>Stale chunks of a committed edit</td><td>No: hidden by read-time validation</td><td>the next write to the file, or <code>reindex --all</code></td></tr>
+  <tr><td>Half-written rows</td><td>Impossible: the DB transaction is atomic</td><td>n/a</td></tr>
+</table></div>
+<p>Run <code>python scripts/gc.py [--dry-run]</code> any time, e.g. as a daily cron job. The grace periods protect writes still
+in flight. Soft-deleted rows count as references, so a restore still finds its original. Correctness never depends on
+GC; it only reclaims space.</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="edits">7. Edits, deletes and restores</h2>
+<p>Every write goes through the same seam: service mutations record the ids they touch, and the <code>before_commit</code>
+event indexes them. That applies to <code>service.commit</code> and to a plain <code>session.commit()</code> alike.</p>
+<ul>
+  <li><strong>PATCH content:</strong> only changed chunks are embedded (the record manager skips unchanged ones). After the commit, stale chunks
+    are dropped. On rollback, the new chunks are dropped and the old ones were never touched.</li>
+  <li><strong>Retag / rename:</strong> only the body is embedded, so tag changes re-embed nothing.</li>
+  <li><strong>Delete:</strong> the file's chunks are unindexed after the commit. The original stays in S3 (the row still references it, for restore).</li>
+  <li><strong>Restore:</strong> re-staged before the commit, so the file is searchable as soon as the response returns.</li>
+</ul>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="api">8. API errors</h2>
+<div class="table-wrap"><table>
+  <tr><th>Exception</th><th>Status</th><th>Meaning</th></tr>
+  <tr><td><code>IngestFailed</code></td><td class="num">422</td><td>files failed to convert; body lists all of them; nothing written</td></tr>
+  <tr><td><code>UploadError</code> / <code>UploadTooLarge</code></td><td class="num">422 / 413</td><td>bad paths / over the limits</td></tr>
+  <tr><td><code>service.IndexingError</code></td><td class="num">503</td><td>embedding server or vector store failed; nothing written</td></tr>
+  <tr><td><code>BlobStoreError</code></td><td class="num">502</td><td>S3 failed; nothing written</td></tr>
+  <tr><td><code>PermissionDenied</code></td><td class="num">403</td><td>policy check failed; nothing written</td></tr>
+</table></div>
+<p>A 2xx response always means committed <em>and</em> indexed: there is no background indexing and no eventual consistency.</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="speed">9. Speed: measured</h2>
+<p>Measured on a MacBook with an M2 Pro (10 CPU cores, 6 performance + 4 efficiency) and Ollama <code>nomic-embed-text</code> on the
+Metal GPU, against local Postgres 17 + pgvector 0.8.</p>
+
+<div class="cards">
+  <div class="card"><div class="big">3.4</div><div class="lbl">pages/s: PDF → markdown, 1 worker</div></div>
+  <div class="card"><div class="big">7.7</div><div class="lbl">pages/s: PDF → markdown, 4 workers</div></div>
+  <div class="card"><div class="big">25</div><div class="lbl">chunks/s: embedding (Ollama)</div></div>
+  <div class="card"><div class="big">~40</div><div class="lbl">chunks/s: writing to pgvector</div></div>
+</div>
+
+<div class="table-wrap"><table>
+  <tr><th>Step</th><th>Speed</th><th>Scales with</th><th>Notes</th></tr>
+  <tr><td>PDF → markdown (PyMuPDF4LLM)</td><td class="num">3.4 pages/s per conversion</td><td>CPU cores</td><td>Each conversion already uses ~1.6 cores (native threads). Process pool across files.</td></tr>
+  <tr><td>DOCX / PPTX / HTML (Docling)</td><td>not benchmarked</td><td>CPU cores</td><td>Heavier; each worker loads Docling's models (hundreds of MB).</td></tr>
+  <tr><td>Embedding (Ollama, nomic, 768d)</td><td class="num">25 chunks/s</td><td>GPU</td><td>Batch size 1, 32 or 128 made no difference: Ollama runs one request at a time.</td></tr>
+  <tr><td>Chunk insert (PGVectorStore)</td><td class="num">~24 ms/chunk</td><td>Postgres CPU</td><td>About half is HNSW index maintenance (~11 ms/row, vs 0.1 ms without the index). The rest is LangChain's insert path.</td></tr>
+  <tr><td>Record manager (exists + update)</td><td class="num">~0.25 ms/chunk</td><td>-</td><td>negligible</td></tr>
+  <tr><td>S3 upload</td><td>1 PUT per original, 8 in parallel</td><td>network</td><td>small next to the rest</td></tr>
+  <tr><td>Undo (reconcile)</td><td>no embedding</td><td>-</td><td>deletes only</td></tr>
+</table></div>
+
+<h3>Parallel conversion (8 PDFs × 20 pages)</h3>
+<div class="table-wrap"><table>
+  <tr><th>Workers</th><th>Time</th><th>Pages/s</th><th style="width:40%">Relative</th></tr>
+  <tr><td class="num">1</td><td class="num">47 s</td><td class="num">3.4</td><td><div class="bar"><span style="width:44%"></span></div></td></tr>
+  <tr><td class="num">2</td><td class="num">29 s</td><td class="num">5.6</td><td><div class="bar"><span style="width:73%"></span></div></td></tr>
+  <tr><td class="num">4 (default)</td><td class="num">21 s</td><td class="num">7.7</td><td><div class="bar"><span style="width:100%"></span></div></td></tr>
+  <tr><td class="num">8</td><td class="num">29 s</td><td class="num">5.5</td><td><div class="bar"><span style="width:71%"></span></div></td></tr>
+</table></div>
+<p>Rule of thumb: the speedup is about <strong>cores ÷ 1.6</strong>, not the number of workers. More workers than that just compete.</p>
+
+<h3>One 20-page PDF (~45 chunks of ~1,500 characters)</h3>
+<div class="table-wrap"><table>
+  <tr><th>Step</th><th>Time</th></tr>
+  <tr><td>Convert</td><td class="num">~6 s</td></tr>
+  <tr><td>Embed</td><td class="num">~1.8 s</td></tr>
+  <tr><td>Write chunks</td><td class="num">~1.1 s</td></tr>
+  <tr><td>S3 + commit + settle</td><td class="num">~0.3 s</td></tr>
+  <tr><th>Total</th><th class="num">~9 s</th></tr>
+</table></div>
+<p>Markdown has no conversion step: embedding plus the write is about <strong>15 chunks/s</strong> end to end.</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="prod">10. Speed: production estimates</h2>
+<div class="callout warn"><p>These are extrapolations from the measurements above, not measurements. Treat them as ±50%.</p></div>
+<p>The workload is an upload of <strong>100 PDFs × 20 pages</strong> (2,000 pages, ~4,500 chunks). The steps run one after another within a
+request (convert everything, then embed and write in batches of 128, then S3), so their times add up. <code>KB_INGEST_WORKERS</code> is
+assumed to be set to about the pod's cores ÷ 1.6.</p>
+<div class="table-wrap"><table>
+  <tr><th>Setup</th><th>Convert</th><th>Embed</th><th>Write</th><th>Total</th><th>Bottleneck</th></tr>
+  <tr><td>This Mac (M2 Pro, Ollama on Metal)</td><td class="num">~4.5 min</td><td class="num">~3 min</td><td class="num">~2 min</td><td class="num"><strong>~9–10 min</strong></td><td>conversion</td></tr>
+  <tr><td>4 vCPU, no GPU (Ollama on CPU)</td><td class="num">~4 min</td><td class="num">8–15 min</td><td class="num">~2 min</td><td class="num"><strong>~15–20 min</strong></td><td>embedding</td></tr>
+  <tr><td>16 vCPU, no GPU</td><td class="num">~1 min</td><td class="num">2.5–5 min</td><td class="num">~2 min</td><td class="num"><strong>~6–8 min</strong></td><td>embedding</td></tr>
+  <tr><td>8 vCPU + GPU (L4/A10), Ollama</td><td class="num">~2 min</td><td class="num">15–45 s</td><td class="num">~2 min</td><td class="num"><strong>~4–5 min</strong></td><td>conversion + write</td></tr>
+  <tr><td>8 vCPU + GPU, vLLM / TEI</td><td class="num">~2 min</td><td class="num">~5 s</td><td class="num">~2 min</td><td class="num"><strong>~4 min</strong></td><td>conversion + write</td></tr>
+</table></div>
+<ul>
+  <li><strong>A GPU helps only until embedding stops being the slowest step.</strong> After that, conversion (CPU of the API pod)
+    and the pgvector write (CPU of Postgres) set the pace.</li>
+  <li>The pgvector write is ~2 min per 4,500 chunks on every setup. Postgres's CPU, not the API's, is what moves it.</li>
+  <li>The OpenShift router timeout is set to <strong>10 min</strong> (<code>deploy/openshift/route-timeout.yaml</code>). Uploads that take longer get a
+    504 at the client, while the server either finishes the write or rolls it back, so it is still all or nothing. Size the timeout,
+    or the upload limits, to your hardware.</li>
+</ul>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="concurrency">11. Concurrent requests</h2>
+<p>Endpoints are plain <code>def</code>s, so FastAPI runs each request on its own thread (40 by default) with its own session and
+transaction. Two users don't queue behind each other, but they share the slow resources:</p>
+<div class="table-wrap"><table>
+  <tr><th>Shared resource</th><th>Today</th><th>With vLLM/TEI and enough cores</th></tr>
+  <tr><td>Embedding server</td><td>Ollama: one request at a time, so uploads take turns</td><td>batches concurrent requests: parallel up to GPU capacity</td></tr>
+  <tr><td>Conversion pool</td><td>4 workers shared by all requests</td><td>parallel up to ~cores ÷ 1.6</td></tr>
+  <tr><td>pgvector writes</td><td>parallel (one connection each), on Postgres's CPUs</td><td>likely the next bottleneck: give Postgres cores</td></tr>
+  <tr><td>DB connections</td><td>15 (SQLAlchemy default). A write holds one from staging to commit; the 16th waits up to 30 s, then fails (nothing written).</td><td>raise <code>pool_size</code></td></tr>
+  <tr><td>Same file edited twice</td><td colspan="2">serialized by the row lock (by design); the second gives up after the 10 s <code>lock_timeout</code></td></tr>
+</table></div>
+<p>Small requests (reads, searches, single edits) stay fast during a big upload, except that with Ollama an edit's embedding waits
+its turn behind the upload's.</p>
+<p>Switching to vLLM/TEI needs about 5 lines in <code>vectorstore.py</code>: an OpenAI-compatible base URL, and turning off LangChain's
+OpenAI tokenizer (<code>check_embedding_ctx_length=False</code>). It also needs a full re-embed (<code>scripts/reindex.py --all</code>), because the
+record manager namespace includes the model name. A model that isn't 768-dimensional also needs a migration.</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="config">12. Configuration</h2>
+<div class="table-wrap"><table>
+  <tr><th>Variable</th><th>Default</th><th>What it does</th></tr>
+  <tr><td><code>EMBEDDINGS_MODEL</code></td><td><code>ollama:nomic-embed-text</code></td><td>LangChain <code>init_embeddings</code> spec; <code>fake</code> = deterministic vectors (tests, offline)</td></tr>
+  <tr><td><code>EMBEDDING_DIM</code></td><td>768</td><td>must match <code>kb_chunks.embedding</code></td></tr>
+  <tr><td><code>KB_INGEST_WORKERS</code></td><td>min(4, CPUs)</td><td>conversion processes; <code>1</code> = no pool. In containers, set it to the pod's CPU limit (Python sees the node's CPUs).</td></tr>
+  <tr><td><code>KB_DB_LOCK_TIMEOUT</code></td><td>10s</td><td>a write stuck on a lock fails and is undone</td></tr>
+  <tr><td><code>KB_DB_STATEMENT_TIMEOUT</code></td><td>60s</td><td>a runaway statement fails and is undone</td></tr>
+  <tr><td><code>KB_UPLOAD_MAX_FILES</code> / <code>_FILE_BYTES</code> / <code>_TOTAL_BYTES</code></td><td>500 / 100 MiB / 1 GiB</td><td>upload limits (413)</td></tr>
+  <tr><td><code>BLOB_BUCKET</code>, <code>BLOB_PREFIX</code>, <code>BLOB_ENDPOINT_URL</code></td><td>unset = no originals kept</td><td>S3 store. IAM needs ListBucket, GetObject, PutObject, DeleteObject.</td></tr>
+  <tr><td><code>BLOB_REQUIRED</code></td><td>unset</td><td><code>1</code> = abort startup without a working bucket</td></tr>
+  <tr><td>Route annotation <code>haproxy.router.openshift.io/timeout</code></td><td>10m</td><td>how long an ingest request may take</td></tr>
+</table></div>
+<p>Constants in code: staging batch size 128 (<code>indexer.STAGE_BATCH_SIZE</code>), 8 parallel S3 uploads (<code>service.UPLOAD_WORKERS</code>),
+search overfetch 2× (<code>semantic.OVERFETCH</code>), GC grace 24 h for originals and 1 h for chunks (<code>maintenance.py</code>).</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="next">13. Limits and next steps</h2>
+<ul>
+  <li><strong>Big uploads run inside the HTTP request.</strong> The fix is an async ingest job with a status route: still all or nothing,
+    just outside the request, which removes the router timeout problem.</li>
+  <li><strong>Embedding server:</strong> vLLM or TEI on a GPU for parallel, batched embedding (config support not added yet).</li>
+  <li><strong>Faster pgvector writes:</strong> a direct bulk insert was about 2× faster than LangChain's path. Other options are a lower HNSW
+    <code>ef_construction</code> (trades some recall), more Postgres CPUs, and splitting writes across a few connections.</li>
+  <li><strong>A hung converter</strong> (as opposed to a crashed one) blocks its upload; there's no per-file timeout. A crashed worker is
+    handled: the upload fails with "converter process crashed" and the pool is rebuilt.</li>
+  <li><strong>Deleted files keep their originals</strong> in S3 forever (needed for restore). There's no hard-delete/purge yet.</li>
+</ul>
+
+<footer>
+  Source of truth: <code>src/kb/service.py</code> ("Commit"), <code>src/kb/ingest/</code>, <code>src/kb/semantic_index/indexer.py</code>,
+  <code>src/kb/storage/blobs.py</code>, <code>src/kb/maintenance.py</code>, and the "All-or-nothing writes" section of <code>CLAUDE.md</code>.
+  Benchmarks from October 2026 on the <code>atomic-writes</code> branch.
+</footer>
+
+</div>
+</body>
+</html>
