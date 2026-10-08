@@ -124,6 +124,9 @@ def _require_folder(session: Session, folder_id: uuid.UUID) -> Folder:
         if session.get(File, folder_id) is not None:
             raise FieldError(f"not a folder: {folder_id}")
         raise ValueError(f"no such folder: {folder_id}")
+    if folder.deleted_at is not None:
+        # an active node under a deleted folder is unreachable (list_children, manifests, search)
+        raise FieldError(f"folder {folder.title!r} is deleted (restore it first)")
     return folder
 
 
@@ -194,7 +197,7 @@ def move_node(session: Session, node_id: uuid.UUID, new_parent_id: uuid.UUID | N
     return node
 
 
-def delete_node(session: Session, node_id: uuid.UUID, *, cascade: bool = True) -> None:
+def delete_node(session: Session, node_id: uuid.UUID) -> None:
     node = get_node(session, node_id, include_deleted=True)
     if node is None:
         raise ValueError(f"no such node: {node_id}")
@@ -202,9 +205,8 @@ def delete_node(session: Session, node_id: uuid.UUID, *, cascade: bool = True) -
     now = datetime.now(timezone.utc)
     node.deleted_at = now
 
-    if cascade:
-        for descendant in list_descendants(session, node_id, include_deleted=False):
-            descendant.deleted_at = now
+    for descendant in list_descendants(session, node_id, include_deleted=False):
+        descendant.deleted_at = now
 
     session.flush()
 

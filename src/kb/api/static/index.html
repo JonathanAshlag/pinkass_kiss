@@ -239,7 +239,7 @@ function renderEdit(n, id) {
     <div class="row">
       <button class="primary" id="b-save">Save</button>
       ${isFile ? '' : '<button id="b-child">New child…</button> <button id="b-ingest">Ingest here…</button>'}
-      ${n.deleted_at ? '<button id="b-restore">Restore</button>' : `<button class="danger" id="b-del">Delete</button>${isFile ? '' : ' <label style="margin:0"><input type="checkbox" id="b-cascade" checked> cascade</label>'}`}
+      ${n.deleted_at ? '<button id="b-restore">Restore</button>' : `<button class="danger" id="b-del">Delete</button>`}
     </div>
     <div class="row"><span>Move to folder:</span><input type="text" id="m-target" placeholder="folder id${isFile ? '' : ' (blank = root)'}" style="width:300px">
       <button id="m-pick">pick from tree</button><button id="m-go">Move</button></div>`;
@@ -264,9 +264,8 @@ function renderEdit(n, id) {
   if ($('#b-child')) $('#b-child').onclick = () => newForm(id);
   if ($('#b-ingest')) $('#b-ingest').onclick = () => ingestForm(id);
   if ($('#b-del')) $('#b-del').onclick = async () => {
-    const cascade = $('#b-cascade')?.checked ?? true;
-    if (!confirm('Delete this node' + (isFile ? '' : cascade ? ' and its subtree' : '') + '?')) return;
-    await api('DELETE', `/nodes/${id}?cascade=${cascade}`); toast('deleted', true); await refreshKeep(id);
+    if (!confirm('Delete this node' + (isFile ? '' : ' and its subtree') + '?')) return;
+    await api('DELETE', `/nodes/${id}`); toast('deleted', true); await refreshKeep(id);
   };
   if ($('#b-restore')) $('#b-restore').onclick = async () => { await api('POST', `/nodes/${id}/restore`); toast('restored', true); await refreshKeep(id); };
   $('#m-pick').onclick = () => { toast('click a folder in the tree…', true); pickTarget = t => { $('#m-target').value = t; }; };

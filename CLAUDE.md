@@ -273,7 +273,9 @@ Nodes: `get_node` (either table) / `get_file` / `get_folder`, `list_ancestors`
 (parent must be a folder), `create_folder`, `update_node` (raises `FieldError` for a
 column the node's table lacks), `move_node` (raises `TreeCycleError` if a folder would
 land under its own descendant, `FieldError` for a file moved to the root or anything
-moved into a file), `delete_node` (cascading soft delete), `restore_node`, `get_content`
+moved into a file). Creating or moving into a **deleted** folder is a `FieldError` (422):
+the node would be active but unreachable. `delete_node` (always cascades: the
+`cascade=false` option was removed because it left active children under a deleted folder), `restore_node`, `get_content`
 (None for folders), `query_metadata` (filter by tags/status/`node_type`/kind/parent_id;
 a status filter yields files only). `FieldError` is a `ValueError` subclass → API 422.
 The DAL stays policy-unaware.

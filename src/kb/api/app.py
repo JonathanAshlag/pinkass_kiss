@@ -292,12 +292,8 @@ def restore_node(
 
 
 @app.delete("/nodes/{node_id}", status_code=204, response_class=Response)
-def delete_node(
-    node_id: uuid.UUID,
-    cascade: bool = True,
-    session: Session = Depends(get_session),
-):
-    service.delete_node(session, node_id, cascade=cascade)
+def delete_node(node_id: uuid.UUID, session: Session = Depends(get_session)):
+    service.delete_node(session, node_id)
     _commit(session)
 
 
