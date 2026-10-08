@@ -633,12 +633,12 @@ method / training / setup / baselines / results / conclusion / other) from keywo
 heuristics (`classify_section`) -- a label only, it never moves text. An earlier
 fixed-template layout (introduction.md, methods/, experiments/...) was replaced by this
 because 31% of sections matched no rule and files became grab bags. Questions/answers
-are never stored in the KB. `tests/eval/test_qasper.py` is the deterministic suite (committed
-20-paper fixture `tests/eval/fixtures/qasper_20.jsonl`); `tests/eval/test_qasper_llm.py` runs a
-LangGraph agent (Anthropic, Ollama or any OpenAI-compatible server) bound to
-`AgentTools(...).as_langchain()`, scored by Answer-F1 (`QASPER_SEMANTIC=1` indexes the
-corpus once and adds the `semantic_search` tool, for comparing). Replaced the earlier HotPotQA eval
-(its test file has been deleted).
+are never stored in the KB. `tests/test_tools.py` is the deterministic suite for the DCI tools
+(a small synthetic corpus, no dataset); `tests/test_e2e.py` runs a LangGraph agent (Anthropic,
+Ollama or any OpenAI-compatible server) over the DCI tools against the QASPER corpus (committed
+20-paper fixture `tests/eval/fixtures/qasper_20.jsonl`, loaded by `tests/conftest.py`), graded by
+an LLM judge (`kb.evaluation.LLMJudge`); see its docstring for the `E2E_*` env vars. Both replaced
+`tests/eval/test_qasper.py` / `test_qasper_llm.py` (and the earlier HotPotQA eval), all deleted.
 
 ## Known gotcha already hit once
 
@@ -655,8 +655,8 @@ follow this pattern — copy it for any new enum.
 - Authz, manifest boundaries beyond storage, concurrency checks, real validation hooks
   (currently a DB constraint violation from the API surfaces as a raw 500) — all
   explicitly deferred from layer 3, not designed yet.
-- Run the QASPER LLM eval with `QASPER_SEMANTIC=1` vs without (Ollama embeddings are
-  now set up; the agent model still needs a tool-calling LLM) to see if
+- Give `tests/test_e2e.py` a switch that adds the `semantic_search` tool (the old
+  `QASPER_SEMANTIC=1` went away with `test_qasper_llm.py`) and compare runs with and without it to see if
   semantic search earns its place; then consider `HybridSearchConfig` (keyword + vector
   fusion in `langchain-postgres`) and an index-status route.
 - Ingest is synchronous within the request (embedding included); for big uploads, an
