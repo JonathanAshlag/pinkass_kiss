@@ -576,8 +576,9 @@ object), and settled after it:
   is harmless).
 - Crash backstop (kill -9 between staging and settling): `scripts/gc.py [--dry-run]` →
   `kb.maintenance.collect`: originals under `originals/` older than 24 h with no `files`
-  row (soft-deleted rows count as referencing), and record-manager groups older than 1 h
-  with no `files` row. Correctness never depends on it.
+  row (soft-deleted rows count as referencing), and record-manager groups older than 24 h
+  with no `files` row (24 h, not less: a long ingest's chunks wait that long for their rows, #21).
+  Correctness never depends on it.
 - DB timeouts: `KB_DB_LOCK_TIMEOUT` (10s) / `KB_DB_STATEMENT_TIMEOUT` (60s) as connection
   `options` on the app engine (`storage/db.py`), so a stuck write fails and is undone.
 - Ingest requests now include embedding time: raise the OpenShift router timeout

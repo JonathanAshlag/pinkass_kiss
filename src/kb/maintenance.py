@@ -25,7 +25,8 @@ from kb.storage.models import File
 log = logging.getLogger(__name__)
 
 ORIGINALS_GRACE = timedelta(hours=24)
-CHUNKS_GRACE = timedelta(hours=1)
+# Chunks are embedded before their rows exist, so this must outlast the longest ingest (#21).
+CHUNKS_GRACE = timedelta(hours=24)
 
 
 @dataclass
