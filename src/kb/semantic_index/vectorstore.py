@@ -11,6 +11,14 @@ Env vars:
 - `EMBEDDINGS_MODEL`  -- `init_embeddings` spec, default `ollama:nomic-embed-text`;
                          `fake` = DeterministicFakeEmbedding (offline dev, tests). Every
                          write embeds before it commits, so some model must be reachable.
+                         It names the record manager's namespace, so changing it means a
+                         full re-embed (`scripts/reindex.py --all`).
+- `EMBEDDINGS_BASE_URL` -- set with an `openai:<model>` spec to use any OpenAI-compatible
+                         embeddings server instead of OpenAI: TEI or vLLM, e.g.
+                         `http://localhost:8090/v1`. `<model>` is the served model name
+                         (vLLM checks it, TEI ignores it). `EMBEDDINGS_API_KEY` if the
+                         server wants one; `EMBEDDINGS_BATCH_SIZE` (default 32, TEI's
+                         default `--max-client-batch-size`) caps inputs per request.
 - `EMBEDDING_DIM`     -- vector size, default 768. Must match `kb_chunks.embedding`
                          (the migration reads the same var when it creates the table).
 
@@ -98,6 +106,19 @@ def _init_embeddings(model: str) -> Embeddings:
         from langchain_core.embeddings import DeterministicFakeEmbedding
 
         return DeterministicFakeEmbedding(size=EMBEDDING_DIM)
+    base_url = os.environ.get("EMBEDDINGS_BASE_URL", "").strip()
+    if base_url and model.startswith("openai:"):
+        from langchain_openai import OpenAIEmbeddings
+
+        return OpenAIEmbeddings(
+            model=model.removeprefix("openai:"),
+            base_url=base_url,
+            api_key=os.environ.get("EMBEDDINGS_API_KEY") or "unused",
+            # Off: it pre-tokenizes with OpenAI's tiktoken and sends token ids, which is
+            # wrong for any other model's tokenizer. The server tokenizes the text itself.
+            check_embedding_ctx_length=False,
+            chunk_size=int(os.environ.get("EMBEDDINGS_BATCH_SIZE") or 32),
+        )
     from langchain.embeddings import init_embeddings
 
     return init_embeddings(model)

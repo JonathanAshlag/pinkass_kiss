@@ -98,9 +98,16 @@ tests/                unit/integration suites; eval/ = QASPER suites + fixtures
 **Local dev environment:** conda env `kb` (Python 3.13), with the project installed via
 `pip install -e ".[test]"` (pyproject.toml is the only dependency list; there is no
 requirements.txt). Run tools with `conda run -n kb ...` or after `conda activate kb`.
-Embeddings come from Ollama (`brew services start ollama`, model `nomic-embed-text`,
-768d), which every write needs (it embeds before it commits) as does search;
+Embeddings come from a local **TEI** server (Hugging Face text-embeddings-inference, `brew
+install text-embeddings-inference`, Metal build; `text-embeddings-router --model-id
+nomic-ai/nomic-embed-text-v1.5 --port 8090`, logs in `~/Library/Logs/tei/`), reached as an
+OpenAI-compatible server (`EMBEDDINGS_MODEL=openai:nomic-ai/nomic-embed-text-v1.5`,
+`EMBEDDINGS_BASE_URL=http://localhost:8090/v1`, in `.env`) -- the same code path as TEI/vLLM
+in production. Every write needs it (it embeds before it commits), as does search;
 `EMBEDDINGS_MODEL=fake` runs without it (deterministic fake vectors; what the tests use).
+TEI's Metal backend is slow (~4 chunks/s vs Ollama's ~17-25 for the identical model and
+vectors, cosine 1.0); Ollama is still supported (`ollama:nomic-embed-text`, or its own
+OpenAI-compatible `/v1`), but switching the spec re-embeds everything (namespace).
 
 To run migrations locally: `set -a && source .env && set +a && alembic upgrade head`
 (a local Postgres with a `pinkas` database, trust auth, is what's been used for
@@ -484,8 +491,11 @@ Built from LangChain parts; only KB-specific glue is hand-written.
   since 0003: chunks are staged before their row commits), `heading`, `start_line`,
   `end_line`, `langchain_metadata`; HNSW
   cosine) + `SQLRecordManager` (table `upsertion_record`, namespace
-  `kb_chunks/<model>`) + `init_embeddings(EMBEDDINGS_MODEL)` (default
-  `ollama:nomic-embed-text`, 768d; `fake` = `DeterministicFakeEmbedding`). `get_index_store()`/`set_index_store()`; tests use
+  `kb_chunks/<model>`) + `init_embeddings(EMBEDDINGS_MODEL)` (code default
+  `ollama:nomic-embed-text`, 768d; `fake` = `DeterministicFakeEmbedding`; `openai:<model>` +
+  `EMBEDDINGS_BASE_URL` = any OpenAI-compatible server (TEI, vLLM) via `OpenAIEmbeddings` with
+  `check_embedding_ctx_length=False` (else it sends tiktoken token ids) and
+  `chunk_size=EMBEDDINGS_BATCH_SIZE` (32, TEI's default `--max-client-batch-size`)). `get_index_store()`/`set_index_store()`; tests use
   `DeterministicFakeEmbedding`. Searches run with `hnsw.iterative_scan=relaxed_order`
   so narrow `$in` filters still return k hits. `chunk_key_encoder` makes uuid chunk ids
   (the default sha1 one warns; sha256 hex doesn't fit the uuid column).
@@ -596,11 +606,11 @@ head`). There is now a committed pytest suite (`pytest -m "not llm"`, needs
 local `pinkas_test` DB exists for this on the Homebrew Postgres; it is **not** in `.env`,
 so set it explicitly or every DB test silently skips:
 `TEST_DATABASE_URL=postgresql+psycopg://yonatanashlag@localhost:5432/pinkas_test`); it passes in the `kb`
-env (245 passed), including `tests/test_policy.py` (pure
+env (246 passed), including `tests/test_policy.py` (pure
 permission matrix) and `tests/test_permissions.py` (service + `/nodes` enforcement). The tests use fake embeddings;
 real Ollama embeddings were verified on the dev DB (6 pages → 222 chunks, a second
 `reindex.py --all` skips all of them, and manifest-scoped `semantic_search` returns
-ranked hits).
+ranked hits). The dev DB was then migrated to TEI (9 active files, 400 chunks re-embedded in 2.5 min under the new namespace, old `kb_chunks/ollama:...` records deleted; a second `--all` skips all 400).
 
 ## QASPER evaluation
 

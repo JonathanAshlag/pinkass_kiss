@@ -80,6 +80,24 @@ def test_blank_doc_has_no_chunks():
     assert split_documents([doc_of("  \n\n ")]) == []
 
 
+def test_openai_compatible_server_embeddings(monkeypatch):
+    from langchain_openai import OpenAIEmbeddings
+
+    from kb.semantic_index.vectorstore import _init_embeddings
+
+    monkeypatch.setenv("EMBEDDINGS_BASE_URL", "http://tei:8080/v1")
+    monkeypatch.delenv("EMBEDDINGS_API_KEY", raising=False)
+    monkeypatch.delenv("EMBEDDINGS_BATCH_SIZE", raising=False)
+    emb = _init_embeddings("openai:nomic-ai/nomic-embed-text-v1.5")
+    assert isinstance(emb, OpenAIEmbeddings)
+    assert (emb.model, emb.openai_api_base) == ("nomic-ai/nomic-embed-text-v1.5", "http://tei:8080/v1")
+    assert emb.check_embedding_ctx_length is False  # no tiktoken token ids sent to a non-OpenAI model
+    assert emb.chunk_size == 32  # TEI's default --max-client-batch-size
+
+    monkeypatch.setenv("EMBEDDINGS_BATCH_SIZE", "128")
+    assert _init_embeddings("openai:m").chunk_size == 128
+
+
 # --------------------------------------------------------------------------
 # DB-backed (needs TEST_DATABASE_URL)
 # --------------------------------------------------------------------------

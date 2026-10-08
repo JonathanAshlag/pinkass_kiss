@@ -347,6 +347,7 @@ Metal GPU, against local Postgres 17 + pgvector 0.8.</p>
   <tr><td>PDF → markdown (PyMuPDF4LLM)</td><td class="num">3.4 pages/s per conversion</td><td>CPU cores</td><td>Each conversion already uses ~1.6 cores (native threads). Process pool across files.</td></tr>
   <tr><td>DOCX / PPTX / HTML (Docling)</td><td>not benchmarked</td><td>CPU cores</td><td>Heavier; each worker loads Docling's models (hundreds of MB).</td></tr>
   <tr><td>Embedding (Ollama, nomic, 768d)</td><td class="num">25 chunks/s</td><td>GPU</td><td>Batch size 1, 32 or 128 made no difference: Ollama runs one request at a time.</td></tr>
+  <tr><td>Embedding (TEI 1.9 on Metal, same model)</td><td class="num">~4 chunks/s</td><td>GPU</td><td>Identical vectors to Ollama (cosine 1.0), but TEI's Mac GPU backend is slow; fp16 doesn't help. TEI is built for NVIDIA GPUs, where it batches.</td></tr>
   <tr><td>Chunk insert (PGVectorStore)</td><td class="num">~24 ms/chunk</td><td>Postgres CPU</td><td>About half is HNSW index maintenance (~11 ms/row, vs 0.1 ms without the index). The rest is LangChain's insert path.</td></tr>
   <tr><td>Record manager (exists + update)</td><td class="num">~0.25 ms/chunk</td><td>-</td><td>negligible</td></tr>
   <tr><td>S3 upload</td><td>1 PUT per original, 8 in parallel</td><td>network</td><td>small next to the rest</td></tr>
@@ -411,8 +412,8 @@ transaction. Two users don't queue behind each other, but they share the slow re
 </table></div>
 <p>Small requests (reads, searches, single edits) stay fast during a big upload, except that with Ollama an edit's embedding waits
 its turn behind the upload's.</p>
-<p>Switching to vLLM/TEI needs about 5 lines in <code>vectorstore.py</code>: an OpenAI-compatible base URL, and turning off LangChain's
-OpenAI tokenizer (<code>check_embedding_ctx_length=False</code>). It also needs a full re-embed (<code>scripts/reindex.py --all</code>), because the
+<p>TEI and vLLM are supported through the same code (<code>EMBEDDINGS_MODEL=openai:&lt;model&gt;</code> + <code>EMBEDDINGS_BASE_URL</code>):
+LangChain's <code>OpenAIEmbeddings</code> with its OpenAI tokenizer turned off, 32 inputs per request. Switching models or servers needs a full re-embed (<code>scripts/reindex.py --all</code>), because the
 record manager namespace includes the model name. A model that isn't 768-dimensional also needs a migration.</p>
 
 <!-- ------------------------------------------------------------------ -->
@@ -420,6 +421,8 @@ record manager namespace includes the model name. A model that isn't 768-dimensi
 <div class="table-wrap"><table>
   <tr><th>Variable</th><th>Default</th><th>What it does</th></tr>
   <tr><td><code>EMBEDDINGS_MODEL</code></td><td><code>ollama:nomic-embed-text</code></td><td>LangChain <code>init_embeddings</code> spec; <code>fake</code> = deterministic vectors (tests, offline)</td></tr>
+  <tr><td><code>EMBEDDINGS_BASE_URL</code></td><td>unset</td><td>with <code>openai:&lt;model&gt;</code>: an OpenAI-compatible server (TEI, vLLM). Dev: <code>http://localhost:8090/v1</code> (TEI)</td></tr>
+  <tr><td><code>EMBEDDINGS_BATCH_SIZE</code></td><td>32</td><td>inputs per embeddings request (TEI's default cap)</td></tr>
   <tr><td><code>EMBEDDING_DIM</code></td><td>768</td><td>must match <code>kb_chunks.embedding</code></td></tr>
   <tr><td><code>KB_INGEST_WORKERS</code></td><td>min(4, CPUs)</td><td>conversion processes; <code>1</code> = no pool. In containers, set it to the pod's CPU limit (Python sees the node's CPUs).</td></tr>
   <tr><td><code>KB_DB_LOCK_TIMEOUT</code></td><td>10s</td><td>a write stuck on a lock fails and is undone</td></tr>

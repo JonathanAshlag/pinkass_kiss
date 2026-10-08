@@ -42,8 +42,9 @@ See [CLAUDE.md](CLAUDE.md) for the full design notes, schema and decisions.
 
 - Python 3.11+
 - PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector) extension
-- [Ollama](https://ollama.com) with `nomic-embed-text` for embeddings (or another LangChain
-  embeddings provider via `EMBEDDINGS_MODEL`)
+- An embeddings server: any OpenAI-compatible one (TEI, vLLM) serving `nomic-embed-text-v1.5`
+  (`EMBEDDINGS_MODEL=openai:<model>` + `EMBEDDINGS_BASE_URL`), or any other LangChain
+  embeddings provider via `EMBEDDINGS_MODEL` (e.g. `ollama:nomic-embed-text`)
 
 ## Setup
 
@@ -58,8 +59,9 @@ cp .env.example .env        # set DATABASE_URL at minimum
 set -a && source .env && set +a
 alembic upgrade head
 
-# 4. Embeddings (needed for indexing and semantic search)
-brew services start ollama && ollama pull nomic-embed-text
+# 4. Embeddings (needed for indexing and semantic search): TEI, as set in .env.example
+brew install text-embeddings-inference
+text-embeddings-router --model-id nomic-ai/nomic-embed-text-v1.5 --port 8090
 ```
 
 Every write embeds its files before it commits, so some embeddings model must be reachable;
