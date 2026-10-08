@@ -14,7 +14,6 @@ from pathlib import Path
 from langchain_core.document_loaders import BaseLoader
 
 from kb.ingest.processors.base import ProcessedDocument
-from kb.ingest.processors.markdown import title_from_markdown
 
 LoaderFactory = Callable[[Path], BaseLoader]
 
@@ -39,7 +38,7 @@ class LoaderProcessor:
         content = "\n\n".join(d.page_content.strip() for d in docs if d.page_content.strip())
         if not content:
             raise ValueError("no text extracted (scanned or image-only document?)")
-        return ProcessedDocument(title=title_from_markdown(content, path), content=content + "\n")
+        return ProcessedDocument(title=path.stem, content=content + "\n")
 
 
 def pymupdf4llm_processor() -> LoaderProcessor:

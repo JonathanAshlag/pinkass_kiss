@@ -311,7 +311,7 @@ footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--line);
         <div class="where">kb.ingest.folder.plan_folder → processors registry</div>
         <ul>
           <li>Hidden entries and symlinks are ignored. The processor is chosen by lowercase extension.</li>
-          <li><b>Markdown</b> (<code>MarkdownProcessor</code>): content is stored verbatim with no frontmatter parsing. The title is the first <code># H1</code>, else the filename stem.</li>
+          <li><b>Markdown</b> (<code>MarkdownProcessor</code>): content is stored verbatim with no frontmatter parsing. The title is the filename stem (for every format).</li>
           <li><b>PDF</b> (<code>LoaderProcessor</code> + <code>PyMuPDF4LLMLoader</code>, or Docling when installed, which also covers .docx/.pptx/.html) is converted to markdown. Empty output counts as a failure.</li>
           <li>Unsupported files go to <code>report.skipped</code> and processor errors to <code>report.failed</code>. Both are per file and never fatal.</li>
           <li>The result is a <code>FolderPlan</code> of <code>PlannedNode(path, type, title, content, fields)</code>.</li>
