@@ -661,7 +661,7 @@ def test_ingest_pdf_sets_blob_columns(db_session, tmp_path, blob_store):
     assert node.sources == [{"resource": pdf.resolve().as_uri()}]
     assert (node.blob_mime_type, node.blob_size_bytes) == ("application/pdf", pdf.stat().st_size)
     assert node.blob_key == f"originals/{node.id}" and node.blob_checksum.startswith("sha256:")
-    assert blob_store.get_original(node.blob_key) == pdf.read_bytes()
+    assert blob_store.get_original(node.blob_key).read() == pdf.read_bytes()
 
 
 def test_ingest_pdf_without_blob_store_leaves_blob_null(db_session, tmp_path):
@@ -701,7 +701,7 @@ def test_upload_pdf_keeps_original(db_session, tmp_path, blob_store):
     node = service.get_node(db_session, report.files_created[0])
     assert node.sources == [{"resource": "upload:docs/report.pdf"}]
     assert node.blob_mime_type == "application/pdf"
-    assert blob_store.get_original(node.blob_key) == data
+    assert blob_store.get_original(node.blob_key).read() == data
 
 
 def test_raw_original_endpoint(client, db_session, tmp_path, blob_store):
@@ -720,6 +720,13 @@ def test_raw_original_endpoint(client, db_session, tmp_path, blob_store):
         assert res.headers["content-type"] == "application/pdf"
         assert 'filename="report.pdf"' in res.headers["content-disposition"]
         assert client.get(f"/nodes/{pdf_id}").json()["blob_mime_type"] == "application/pdf"
+
+        # A non-Latin name (Latin-1-only headers used to make this a 500, #16).
+        hebrew = make_pdf(tmp_path / "hebrew" / "דוח.pdf")
+        hebrew_id = ingest_folder(db_session, tmp_path / "hebrew").files_created[0]
+        res = client.get(f"/nodes/{hebrew_id}/raw")
+        assert res.status_code == 200 and res.content == hebrew.read_bytes()
+        assert res.headers["content-disposition"] == "attachment; filename*=utf-8''%D7%93%D7%95%D7%97.pdf"
 
         assert client.get(f"/nodes/{md_id}/raw").status_code == 404  # markdown keeps no original
         assert client.get(f"/nodes/{uuid.uuid4()}/raw").status_code == 404

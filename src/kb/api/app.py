@@ -7,6 +7,7 @@ same as Alembic).
 """
 
 import logging
+import urllib.parse
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,8 +24,9 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -257,11 +259,16 @@ def get_node_raw(node_id: uuid.UUID, session: Session = Depends(get_session)):
     original = service.get_original(session, node_id)
     if original is None:
         raise HTTPException(404, f"node {node_id} has no retained original")
-    data, mime, filename = original
-    return Response(
-        content=data,
+    body, mime, filename = original
+    # Headers are Latin-1: non-ASCII (or quote-containing) names go RFC 6266's filename*= way.
+    quoted = urllib.parse.quote(filename)
+    disposition = f'attachment; filename="{filename}"' if quoted == filename else f"attachment; filename*=utf-8''{quoted}"
+    # Streamed, never read whole: originals can be 100 MiB each.
+    return StreamingResponse(
+        body.iter_chunks(),
         media_type=mime,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": disposition},
+        background=BackgroundTask(body.close),
     )
 
 

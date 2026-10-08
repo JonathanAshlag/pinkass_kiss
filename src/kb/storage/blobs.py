@@ -172,13 +172,14 @@ class BlobStore:
             raise BlobStoreError(f"listing s3://{self.bucket}: {_describe(exc)}") from exc
         return out
 
-    def get_original(self, key: str) -> bytes | None:
-        """The stored bytes for `key`, or None if missing. Without `s3:ListBucket`, S3
+    def get_original(self, key: str) -> Any | None:
+        """A stream of the stored bytes for `key` (a botocore StreamingBody: read it, or
+        `iter_chunks()`, then `close()`), or None if missing. Without `s3:ListBucket`, S3
         answers a missing key with AccessDenied, which is raised (as BlobStoreError), not
         guessed to be "missing" -- that would hide a real permission problem."""
         try:
             resp = self.client.get_object(Bucket=self.bucket, Key=self.prefix + key)
-            return resp["Body"].read()
+            return resp["Body"]
         except self.client.exceptions.NoSuchKey:
             return None
         except (ClientError, BotoCoreError) as exc:

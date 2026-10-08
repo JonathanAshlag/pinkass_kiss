@@ -39,7 +39,7 @@ def test_put_get_delete_original(blob_store, pdf):
     listing = blob_store.client.list_objects_v2(Bucket="bkt")["Contents"]
     assert [o["Key"] for o in listing] == [f"kb/{key}"]  # prefixed
     assert blob_store.client.head_object(Bucket="bkt", Key=f"kb/{key}")["ContentType"] == "application/pdf"
-    assert blob_store.get_original(key) == PDF
+    assert blob_store.get_original(key).read() == PDF
     assert [k for k, _ in blob_store.list_originals()] == [key]
 
     blob_store.delete_originals([key, original_key(uuid.uuid4())])  # a missing key is fine
