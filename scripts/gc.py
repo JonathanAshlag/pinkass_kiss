@@ -1,7 +1,7 @@
 """
 Sweeps what a crashed write left behind (see kb.maintenance): S3 originals no `files`
 row references (older than 24 h) and indexed chunks of files that never committed
-(older than 1 h). Safe to run any time, e.g. from a cron job; never needed for
+(older than 24 h). Safe to run any time, e.g. from a cron job; never needed for
 correctness, only to reclaim space.
 
 Needs DATABASE_URL, plus BLOB_BUCKET (and AWS_*) to sweep originals; see .env.example.
