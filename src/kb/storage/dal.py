@@ -408,14 +408,17 @@ def resolve_manifest(
     visited.add(manifest_id)
 
     result: set[Node] = set()
-    members = session.scalars(
-        select(ManifestMember).where(ManifestMember.manifest_id == manifest_id)
+    members = list(
+        session.scalars(select(ManifestMember).where(ManifestMember.manifest_id == manifest_id))
     )
+    file_ids = [m.file_id for m in members if m.file_id is not None]
+    if file_ids:
+        result.update(
+            session.scalars(select(File).where(File.id.in_(file_ids), File.deleted_at.is_(None)))
+        )
     for member in members:
         if member.file_id is not None:
-            node = get_file(session, member.file_id)
-            if node is not None:
-                result.add(node)
+            continue
         elif member.folder_id is not None:
             folder = get_folder(session, member.folder_id)
             if folder is not None:

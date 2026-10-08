@@ -151,7 +151,7 @@ attribute (`"file"` / `"folder"`), which the API exposes as `type`.
 | `generated` | nullable JSONB **object** (not array) — OKF's `{by, at}` provenance field, added alongside `verified`. `NULL` = no provenance recorded |
 | `stale_after` | nullable `timestamptz` — an absolute instant, not a relative TTL, matching OKF's semantics exactly; `kb.okf.is_stale(node)` compares it against now |
 | `status` (enum `draft`\|`stable`\|`deprecated`) | lifecycle field |
-| `content` | markdown body, NOT NULL |
+| `content` | markdown body, NOT NULL. **Deferred** in the ORM (not in `SELECT files.*`-style loads; read lazily on access): bulk readers that need the text add `.options(undefer(File.content))` (`search_lines` in batches of `dci._CONTENT_BATCH`, `FileNodeLoader`, pre-commit staging). Reading it on a detached `File` raises `DetachedInstanceError` |
 | `deleted_at` | soft delete, NULL = active |
 | `blob_key`, `blob_size_bytes`, `blob_mime_type`, `blob_checksum` | the retained original of a converted file (PDF, ...): per-file key `originals/<file id>` in the `kb.storage.blobs` store (no dedupe, by choice: undo can delete it without asking who else uses it), checksum `sha256:<hex>`. NULL for markdown nodes or when no blob store is configured |
 | `created_at`, `updated_at` | `updated_at` kept current by a DB trigger (`trg_files_set_updated_at` → `set_updated_at()`), not the ORM |

@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import event, select
-from sqlalchemy.orm import Session, SessionTransaction
+from sqlalchemy.orm import Session, SessionTransaction, undefer
 
 from kb import okf
 from kb.policy import Action, Actor, PermissionDenied, check
@@ -192,7 +192,11 @@ def _stage_touched(session: Session) -> None:
         return
     session.flush()
     files = list(
-        session.scalars(select(File).where(File.id.in_(ids), File.deleted_at.is_(None)))
+        session.scalars(
+            select(File)
+            .where(File.id.in_(ids), File.deleted_at.is_(None))
+            .options(undefer(File.content))
+        )
     )
     session.info[_LAST_STAGE] = _stage_index(session, files)
 
