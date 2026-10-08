@@ -14,7 +14,7 @@ service layer calls it.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session, aliased
 
 from kb.storage.models import File, FileKind, Folder, FolderKind, Manifest, ManifestMember, Node
@@ -26,6 +26,11 @@ class ManifestCycleError(ValueError):
 
 class TreeCycleError(ValueError):
     """Raised when moving a folder would place it under its own subtree."""
+
+
+# Serializes folder moves: two concurrent moves (A under B, B under A) would each pass the
+# cycle check. Held until commit, so never move a folder inside a long transaction.
+_FOLDER_MOVE_LOCK = 4242
 
 
 class FieldError(ValueError):
@@ -188,6 +193,7 @@ def move_node(session: Session, node_id: uuid.UUID, new_parent_id: uuid.UUID | N
     else:
         _require_folder(session, new_parent_id)
         if isinstance(node, Folder):
+            session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _FOLDER_MOVE_LOCK})
             descendant_ids = {d.id for d in list_descendants(session, node_id, include_deleted=True)}
             if new_parent_id in descendant_ids:
                 raise TreeCycleError("cannot move a folder under its own descendant")
