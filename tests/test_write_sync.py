@@ -185,6 +185,40 @@ def test_move_does_not_touch_the_index(db):
     assert chunks_of(d.id) == before
 
 
+def test_concurrent_crossing_folder_moves_cannot_make_a_cycle(db):
+    """#17: A under B and B under A at once used to both pass the cycle check."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from kb import service
+    from kb.storage.db import SessionLocal, engine
+    from kb.storage.dal import TreeCycleError
+
+    a, b = folder(db), folder(db)
+    service.commit(db)
+    service.move_node(db, a.id, b.id)  # holds the move lock until commit
+
+    def move_b_under_a():
+        with SessionLocal() as other:
+            service.move_node(other, b.id, a.id)
+            service.commit(other)
+
+    with ThreadPoolExecutor(1) as pool:
+        racing = pool.submit(move_b_under_a)
+        with engine.connect() as conn:  # wait until the other move is blocked on the lock
+            for _ in range(100):
+                waiting = conn.execute(
+                    text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")
+                ).scalar()
+                if waiting:
+                    break
+                time.sleep(0.05)
+        assert waiting, "the second move never waited on the lock"
+        service.commit(db)
+        with pytest.raises(TreeCycleError):
+            racing.result(timeout=10)
+
+
 def test_savepoint_rollback_keeps_outer_ids(db):
     from kb import service
 
