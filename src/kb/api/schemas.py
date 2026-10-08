@@ -157,19 +157,15 @@ class ManifestMemberRead(BaseModel):
     child_manifest_id: uuid.UUID | None
 
 
-class IngestFailure(BaseModel):
-    path: str
-    error: str
-
-
 class IngestReportRead(BaseModel):
-    """kb.ingest.IngestReport, with paths relative to the uploaded folder's parent."""
+    """kb.ingest.IngestReport, with paths relative to the uploaded folder's parent. An
+    ingest is all or nothing: if any file fails to convert, the response is a 422 whose
+    `failed` lists every such file ({path, error}) and nothing is created."""
 
     root_id: uuid.UUID
     files_created: list[uuid.UUID]
     folders_created: list[uuid.UUID]
     skipped: list[str]
-    failed: list[IngestFailure]
 
 
 class IngestExtensionsRead(BaseModel):

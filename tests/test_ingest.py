@@ -174,27 +174,24 @@ def test_loader_processor_joins_docs_and_titles(tmp_path):
         empty.process(tmp_path / "x.e")
 
 
-def test_pdf_plan_keeps_original_in_blob_store(tmp_path, blob_store):
+def test_pdf_plan_records_original_without_uploading(tmp_path):
+    import hashlib
+
     pdf = make_pdf(tmp_path / "docs" / "report.pdf")
     write(tmp_path / "docs" / "notes.md", "# Notes")
 
-    plan = plan_folder(tmp_path / "docs", blob_store=blob_store)
+    plan = plan_folder(tmp_path / "docs")  # no blob store involved: planning does no network I/O
 
     nodes = {n.path: n for n in plan.nodes}
     report = nodes["report.pdf"]
     assert report.title == "report"
     assert "widget count rose sharply" in report.content and "Second page text" in report.content
-    assert report.fields["blob_mime_type"] == "application/pdf"
-    assert report.fields["blob_size_bytes"] == pdf.stat().st_size
-    assert blob_store.get_original(report.fields["blob_key"]) == pdf.read_bytes()
-    assert not any(k.startswith("blob_") for k in nodes["notes.md"].fields)  # markdown: content is the original
-    assert blob_store.client.list_objects_v2(Bucket="bkt")["KeyCount"] == 1
-
-
-def test_plan_without_blob_store_keeps_nothing(tmp_path):
-    make_pdf(tmp_path / "report.pdf")
-    (node,) = plan_folder(tmp_path).nodes[1:]
-    assert not any(k.startswith("blob_") for k in node.fields)
+    assert report.original.path == pdf and report.original.mime == "application/pdf"
+    assert report.original.size == pdf.stat().st_size
+    assert report.original.sha256 == hashlib.sha256(pdf.read_bytes()).hexdigest()
+    assert not any(k.startswith("blob_") for k in report.fields)  # set by ingest_folder, with a store
+    assert nodes["notes.md"].original is None  # markdown: content is the original
+    assert report.id is not None and nodes["notes.md"].id is not None  # ids chosen up front
 
 
 def test_corrupt_pdf_is_reported_failed(tmp_path):
@@ -205,26 +202,6 @@ def test_corrupt_pdf_is_reported_failed(tmp_path):
 
     assert [n.path for n in plan.nodes] == ["", "ok.md"]
     assert [p.name for p, _ in plan.failed] == ["broken.pdf"]
-
-
-def test_blob_store_error_fails_only_that_file(tmp_path):
-    from kb.storage.blobs import BlobStore
-
-    class BrokenStore(BlobStore):
-        def __init__(self):
-            pass
-
-        def put_original(self, data, mime):
-            raise ConnectionError("bucket unreachable")
-
-    make_pdf(tmp_path / "report.pdf")
-    write(tmp_path / "ok.md", "# OK")
-
-    plan = plan_folder(tmp_path, blob_store=BrokenStore())
-
-    assert [n.path for n in plan.nodes] == ["", "ok.md"]
-    ((path, err),) = plan.failed
-    assert path.name == "report.pdf" and "bucket unreachable" in err
 
 
 def test_converter_routing():
@@ -239,7 +216,7 @@ def test_converter_routing():
 
 def docling_plan(tmp_path: Path, name: str):
     pytest.importorskip("langchain_docling")
-    plan = plan_folder(tmp_path, blob_store=None)
+    plan = plan_folder(tmp_path)
     assert not plan.failed, plan.failed
     return {n.path: n for n in plan.nodes}[name]
 
@@ -279,16 +256,121 @@ def test_docling_converts_xlsx(tmp_path):
     assert "apple" in node.content and "fruit" in node.content
 
 
-def test_docling_keeps_original_in_blob_store(tmp_path, blob_store):
+def test_docling_records_original(tmp_path):
     pytest.importorskip("langchain_docling")
     html = write(tmp_path / "page.html", "<html><body><h1>T</h1><p>body</p></body></html>")
 
-    plan = plan_folder(tmp_path, blob_store=blob_store)
+    plan = plan_folder(tmp_path)
 
     assert not plan.failed, plan.failed
     node = {n.path: n for n in plan.nodes}["page.html"]
-    assert blob_store.get_original(node.fields["blob_key"]) == html.read_bytes()
-    assert node.fields["blob_mime_type"] == "text/html"
+    assert node.original.path == html and node.original.mime == "text/html"
+
+
+# --------------------------------------------------------------------------
+# Parallel conversion (kb.ingest.convert, no DB)
+# --------------------------------------------------------------------------
+
+# Module-level so they pickle into the pool's (spawned) workers.
+
+
+class PidProcessor:
+    """Records which process converted the file; `.boom` files raise, `.die` kills the worker."""
+
+    name = "pid"
+    extensions = frozenset({".pid", ".boom", ".die"})
+    cpu_bound = True
+
+    def process(self, path):
+        import os
+
+        if path.suffix == ".boom":
+            raise RuntimeError("bad input")
+        if path.suffix == ".die":
+            os._exit(1)
+        return ProcessedDocument(title=path.stem, content=f"{os.getpid()}\n")
+
+
+def pid_registry():
+    registry = ProcessorRegistry()
+    registry.register(PidProcessor())
+    registry.register(MarkdownProcessor())
+    return registry
+
+
+def test_cpu_bound_files_convert_in_worker_processes_in_order(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setenv("KB_INGEST_WORKERS", "2")
+    for i in range(6):
+        write(tmp_path / f"{i}.pid", "")
+    write(tmp_path / "a.md", "# md")
+    write(tmp_path / "x.boom", "")
+
+    plan = plan_folder(tmp_path, registry=pid_registry())
+
+    assert [n.path for n in plan.nodes] == ["", "0.pid", "1.pid", "2.pid", "3.pid", "4.pid", "5.pid", "a.md"]
+    pids = {int(n.content) for n in plan.nodes[1:7]}
+    assert os.getpid() not in pids  # converted in the pool
+    assert plan.nodes[7].content == "# md"  # markdown: in-process
+    assert plan.failed == [(tmp_path.resolve() / "x.boom", "RuntimeError: bad input")]
+
+
+def test_one_worker_converts_in_process(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setenv("KB_INGEST_WORKERS", "1")
+    for i in range(3):
+        write(tmp_path / f"{i}.pid", "")
+
+    plan = plan_folder(tmp_path, registry=pid_registry())
+
+    assert {int(n.content) for n in plan.nodes[1:]} == {os.getpid()}
+
+
+def test_unpicklable_processor_runs_in_process(tmp_path, monkeypatch):
+    import os
+
+    class Local(PidProcessor):  # a local class can't be pickled
+        pass
+
+    monkeypatch.setenv("KB_INGEST_WORKERS", "2")
+    registry = ProcessorRegistry()
+    registry.register(Local())
+    for i in range(3):
+        write(tmp_path / f"{i}.pid", "")
+
+    plan = plan_folder(tmp_path, registry=registry)
+
+    assert {int(n.content) for n in plan.nodes[1:]} == {os.getpid()}
+
+
+def test_crashed_worker_fails_the_plan_and_the_pool_recovers(tmp_path, monkeypatch):
+    monkeypatch.setenv("KB_INGEST_WORKERS", "2")
+    crash = tmp_path / "crash"
+    write(crash / "a.pid", "")
+    write(crash / "b.die", "")
+
+    plan = plan_folder(crash, registry=pid_registry())
+
+    assert "b.die" in {p.name for p, _ in plan.failed}
+    assert all("crashed" in error for _, error in plan.failed)
+
+    ok = tmp_path / "ok"
+    write(ok / "a.pid", "")
+    write(ok / "b.pid", "")
+    plan = plan_folder(ok, registry=pid_registry())
+    assert not plan.failed and len(plan.nodes) == 3
+
+
+def test_builtin_converters_pickle():
+    import pickle
+
+    registry = default_registry()
+    for name in ("x.pdf", "x.docx"):
+        processor = registry.for_path(Path(name))
+        assert processor.cpu_bound
+        assert pickle.loads(pickle.dumps(processor)).name == processor.name
 
 
 # --------------------------------------------------------------------------
@@ -329,7 +411,6 @@ def test_mirrors_tree_and_skips_unsupported(db_session, tmp_path):
     assert len(report.files_created) == 3
     assert len(report.folders_created) == 3  # docs, guide, deep
     assert sorted(p.name for p in report.skipped) == ["diagram.png", "logo.png"]
-    assert report.failed == []
 
     root = children_by_title(db_session, None)["docs"]
     assert root.id == report.root_id and root.node_type == "folder"
@@ -435,18 +516,33 @@ def test_upload_mirrors_tree(db_session):
             ("docs/readme.md", b"# Readme"),
             ("docs/guide/setup.md", b"# Setup"),
             ("docs/img/logo.png", b"\x89PNG"),
-            ("docs/bad.md", b"\xff\xfe not utf-8"),
         ],
         tags=["up"],
     )
 
     assert [p.as_posix() for p in report.skipped] == ["docs/img/logo.png"]
-    assert [p.as_posix() for p, _ in report.failed] == ["docs/bad.md"]
     root = children_by_title(db_session, None)["docs"]
     assert root.id == report.root_id
     guide = children_by_title(db_session, children_by_title(db_session, root.id)["guide"].id)
     assert guide["setup"].sources == [{"resource": "upload:docs/guide/setup.md"}]
     assert guide["setup"].tags == ["up"]
+
+
+def test_upload_with_a_bad_file_ingests_nothing(db_session):
+    from kb.ingest import IngestFailed, ingest_upload
+
+    with pytest.raises(IngestFailed) as exc:
+        ingest_upload(
+            db_session,
+            [
+                ("bad/readme.md", b"# Readme"),
+                ("bad/x.md", b"\xff\xfe not utf-8"),
+                ("bad/y.md", b"\xff\xfe nor this"),
+            ],
+        )
+    # every failure is listed (not just the first), with upload paths
+    assert [p.as_posix() for p, _ in exc.value.failures] == ["bad/x.md", "bad/y.md"]
+    assert "bad" not in children_by_title(db_session, None)
 
 
 def test_upload_loose_files_go_into_parent(db_session):
@@ -539,7 +635,6 @@ def client(db_session, monkeypatch):
 
     from kb.api import app, get_session
 
-    monkeypatch.setenv("KB_AUTO_INDEX", "0")  # no embeddings server here; see test_search.py
 
     app.dependency_overrides[get_session] = lambda: db_session  # rolled back by db_session
     try:
@@ -560,12 +655,12 @@ def test_ingest_pdf_sets_blob_columns(db_session, tmp_path, blob_store):
 
     report = ingest_folder(db_session, tmp_path / "papers", blob_store=blob_store)
 
-    assert report.failed == [] and len(report.files_created) == 1
+    assert len(report.files_created) == 1
     node = service.get_node(db_session, report.files_created[0])
     assert node.title == "report" and "widget count rose sharply" in node.content
     assert node.sources == [{"resource": pdf.resolve().as_uri()}]
     assert (node.blob_mime_type, node.blob_size_bytes) == ("application/pdf", pdf.stat().st_size)
-    assert node.blob_key.startswith("sha256/") and node.blob_checksum.startswith("sha256:")
+    assert node.blob_key == f"originals/{node.id}" and node.blob_checksum.startswith("sha256:")
     assert blob_store.get_original(node.blob_key) == pdf.read_bytes()
 
 
@@ -601,13 +696,8 @@ def test_upload_pdf_keeps_original(db_session, tmp_path, blob_store):
 
     data = make_pdf(tmp_path / "report.pdf").read_bytes()
 
-    report = ingest_upload(
-        db_session,
-        [("docs/report.pdf", data), ("docs/broken.pdf", b"nope")],
-        blob_store=blob_store,
-    )
+    report = ingest_upload(db_session, [("docs/report.pdf", data)], blob_store=blob_store)
 
-    assert [p.as_posix() for p, _ in report.failed] == ["docs/broken.pdf"]
     node = service.get_node(db_session, report.files_created[0])
     assert node.sources == [{"resource": "upload:docs/report.pdf"}]
     assert node.blob_mime_type == "application/pdf"
@@ -694,7 +784,7 @@ def test_ingest_endpoint(client, db_session):
     assert res.status_code == 201, res.text
     body = res.json()
     assert len(body["files_created"]) == 1 and len(body["folders_created"]) == 2
-    assert body["skipped"] == ["notes/p.png"] and body["failed"] == []
+    assert body["skipped"] == ["notes/p.png"] and "failed" not in body
     assert client.get(f"/nodes/{body['root_id']}").json()["tags"] == ["t1", "t2"]
 
     bad = client.post("/ingest", files=[("files", ("a.md", b"x"))], data={"paths": ["../a.md"]})

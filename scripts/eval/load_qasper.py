@@ -35,10 +35,10 @@ Needs DATABASE_URL for --to-kb (see .env.example).
 Usage:
     pip install datasets
     python scripts/eval/load_qasper.py --split validation --limit 20 --out tests/eval/fixtures/qasper_20.jsonl
-    python scripts/eval/load_qasper.py --to-kb --limit 20 [--index]
+    python scripts/eval/load_qasper.py --to-kb --limit 20
 
---index also embeds the loaded papers into the semantic index (kb_chunks); it needs
-the embeddings model (EMBEDDINGS_MODEL) reachable. Off by default.
+--to-kb also embeds the papers into the semantic index (kb_chunks) before committing, as
+every write does, so the embeddings model (EMBEDDINGS_MODEL) must be reachable.
 
 Importable too: `from load_qasper import load_qasper`.
 """
@@ -304,9 +304,9 @@ def paper_nodes(paper: dict) -> list[PlannedNode]:
 # --------------------------------------------------------------------------
 
 
-def load_into_kb(papers: list[dict], *, index: bool = False) -> dict[str, str]:
-    """Create the KB from the papers. Returns {paper id: paper folder node id}. With
-    `index`, every created node is also added to the semantic index after the commit."""
+def load_into_kb(papers: list[dict]) -> dict[str, str]:
+    """Create the KB from the papers (indexed, like every write). Returns {paper id:
+    paper folder node id}."""
     from kb import service
     from kb.storage.db import SessionLocal
     from kb.ingest import materialize
@@ -325,16 +325,9 @@ def load_into_kb(papers: list[dict], *, index: bool = False) -> dict[str, str]:
         for paper in papers:
             created = materialize(session, paper_nodes(paper), parent_id=root.id)
             ids[paper["id"]] = str(created[""].id)
-        committed = service.commit(session, index=index)
-    if index:
-        result = committed.indexed
-        if result is None:
-            sys.exit("--index: indexing failed, see the log above")
-        print(
-            f"indexed {len(committed.touched)} nodes: {result.num_added} chunks added, "
-            f"{result.num_skipped} unchanged, {len(result.failed)} failed",
-            file=sys.stderr,
-        )
+        result = service.commit(session).indexed
+    if result is not None:
+        print(f"indexed: {result.num_added} chunks added, {result.num_skipped} unchanged", file=sys.stderr)
     return ids
 
 
@@ -348,16 +341,13 @@ def main() -> None:
         action="store_true",
         help="load the first --limit papers into the KB DB and write the eval set (questions only) to --out",
     )
-    p.add_argument("--index", action="store_true", help="with --to-kb: also build the semantic index")
     args = p.parse_args()
 
-    if args.index and not args.to_kb:
-        p.error("--index requires --to-kb")
     if args.to_kb and args.limit is None:
         p.error("--to-kb requires --limit")
     papers = list(load_qasper(args.split, args.limit))
     if args.to_kb:
-        ids = load_into_kb(papers, index=args.index)
+        ids = load_into_kb(papers)
         out_path = "qasper_eval.jsonl" if args.out == "-" else args.out
         with open(out_path, "w", encoding="utf-8") as f:
             for paper in papers:

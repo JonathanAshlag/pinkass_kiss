@@ -1,32 +1,73 @@
-"""kb.storage.blobs: content-addressed originals in S3 (moto's in-process fake, see the
+"""kb.storage.blobs: per-file originals in S3 (moto's in-process fake, see the
 `blob_store` fixture) and env-based store selection. No DB, no network."""
 
 import hashlib
+import uuid
 
 import pytest
 from botocore.stub import Stubber
 
 from kb.storage import blobs
-from kb.storage.blobs import BlobStore, BlobStoreError, guess_mime
+from kb.storage.blobs import BlobStore, BlobStoreError, Original, guess_mime, original_key
 
 PDF = b"%PDF-1.7 fake bytes"
 DIGEST = hashlib.sha256(PDF).hexdigest()
 
 
-def test_put_original_is_content_addressed(blob_store):
-    cols = blob_store.put_original(PDF, "application/pdf")
-    assert blob_store.put_original(PDF, "application/pdf") == cols  # idempotent
-    assert cols == {
-        "blob_key": f"sha256/{DIGEST}",
+@pytest.fixture
+def pdf(tmp_path):
+    path = tmp_path / "report.pdf"
+    path.write_bytes(PDF)
+    return Original.of(path)
+
+
+def test_original_describes_the_file(pdf):
+    assert (pdf.mime, pdf.size, pdf.sha256) == ("application/pdf", len(PDF), DIGEST)
+    fid = uuid.uuid4()
+    assert original_key(fid) == f"originals/{fid}"
+    assert pdf.columns(original_key(fid)) == {
+        "blob_key": f"originals/{fid}",
         "blob_size_bytes": len(PDF),
         "blob_mime_type": "application/pdf",
         "blob_checksum": f"sha256:{DIGEST}",
     }
+
+
+def test_put_get_delete_original(blob_store, pdf):
+    key = original_key(uuid.uuid4())
+    blob_store.put_original(key, pdf)
     listing = blob_store.client.list_objects_v2(Bucket="bkt")["Contents"]
-    assert [o["Key"] for o in listing] == [f"kb/sha256/{DIGEST}"]  # one object, prefixed
-    head = blob_store.client.head_object(Bucket="bkt", Key=f"kb/sha256/{DIGEST}")
-    assert head["ContentType"] == "application/pdf"
-    assert blob_store.get_original(cols["blob_key"]) == PDF
+    assert [o["Key"] for o in listing] == [f"kb/{key}"]  # prefixed
+    assert blob_store.client.head_object(Bucket="bkt", Key=f"kb/{key}")["ContentType"] == "application/pdf"
+    assert blob_store.get_original(key) == PDF
+    assert [k for k, _ in blob_store.list_originals()] == [key]
+
+    blob_store.delete_originals([key, original_key(uuid.uuid4())])  # a missing key is fine
+    assert blob_store.get_original(key) is None
+    assert blob_store.list_originals() == []
+
+
+def test_put_original_sends_the_planned_checksum(blob_store, pdf):
+    # S3 rejects a PUT whose bytes don't hash to ChecksumSHA256 (moto doesn't check, so
+    # assert the header is sent: the hash taken while planning, base64 of the digest).
+    import base64
+
+    from botocore.stub import ANY
+
+    with Stubber(blob_store.client) as stub:
+        stub.add_response(
+            "put_object",
+            {},
+            {
+                "Bucket": "bkt",
+                "Key": "kb/originals/x",
+                "Body": ANY,
+                "ContentType": "application/pdf",
+                "ChecksumSHA256": base64.b64encode(bytes.fromhex(DIGEST)).decode(),
+            },
+        )
+        blob_store.put_original("originals/x", pdf)
+        stub.assert_no_pending_responses()
 
 
 def test_get_original_missing_is_none(blob_store):
@@ -38,7 +79,9 @@ def test_other_s3_errors_raise_blob_store_error(blob_store):
     with pytest.raises(BlobStoreError, match="NoSuchBucket"):
         store.get_original("sha256/x")
     with pytest.raises(BlobStoreError, match="NoSuchBucket"):
-        store.put_original(PDF, "application/pdf")
+        store.put_original("originals/x", Original.of(__file__))
+    with pytest.raises(BlobStoreError, match="NoSuchBucket"):
+        store.delete_originals(["originals/x"])
 
 
 def test_access_denied_is_an_error_not_missing(blob_store):
@@ -59,8 +102,9 @@ def test_check(blob_store):
             blob_store.check()
 
 
-def test_put_original_defaults_mime(blob_store):
-    assert blob_store.put_original(b"x", None)["blob_mime_type"] == "application/octet-stream"
+def test_original_defaults_mime(tmp_path):
+    (tmp_path / "noext").write_bytes(b"x")
+    assert Original.of(tmp_path / "noext").mime == "application/octet-stream"
 
 
 def test_guess_mime():

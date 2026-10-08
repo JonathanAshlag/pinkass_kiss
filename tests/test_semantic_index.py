@@ -80,6 +80,24 @@ def test_blank_doc_has_no_chunks():
     assert split_documents([doc_of("  \n\n ")]) == []
 
 
+def test_openai_compatible_server_embeddings(monkeypatch):
+    from langchain_openai import OpenAIEmbeddings
+
+    from kb.semantic_index.vectorstore import _init_embeddings
+
+    monkeypatch.setenv("EMBEDDINGS_BASE_URL", "http://tei:8080/v1")
+    monkeypatch.delenv("EMBEDDINGS_API_KEY", raising=False)
+    monkeypatch.delenv("EMBEDDINGS_BATCH_SIZE", raising=False)
+    emb = _init_embeddings("openai:nomic-ai/nomic-embed-text-v1.5")
+    assert isinstance(emb, OpenAIEmbeddings)
+    assert (emb.model, emb.openai_api_base) == ("nomic-ai/nomic-embed-text-v1.5", "http://tei:8080/v1")
+    assert emb.check_embedding_ctx_length is False  # no tiktoken token ids sent to a non-OpenAI model
+    assert emb.chunk_size == 32  # TEI's default --max-client-batch-size
+
+    monkeypatch.setenv("EMBEDDINGS_BATCH_SIZE", "128")
+    assert _init_embeddings("openai:m").chunk_size == 128
+
+
 # --------------------------------------------------------------------------
 # DB-backed (needs TEST_DATABASE_URL)
 # --------------------------------------------------------------------------
@@ -125,12 +143,14 @@ def db(migrated_db):
 
 
 def make(db, *, content="", title=None, parent_id=None, **cols):
-    """A file (in a fresh root folder unless `parent_id` is given); returns its id."""
-    from kb import service
+    """A file (in a fresh root folder unless `parent_id` is given); returns its id.
+    Written through the DAL, which records nothing for kb.service's commit-time
+    indexing, so these tests drive the indexer (the repair tool) on their own."""
+    from kb.storage import dal
 
     if parent_id is None:
-        parent_id = service.create_folder(db, parent_id=None, title=f"f-{uuid.uuid4().hex[:8]}").id
-    node = service.create_file(
+        parent_id = dal.create_folder(db, parent_id=None, title=f"f-{uuid.uuid4().hex[:8]}").id
+    node = dal.create_file(
         db, parent_id=parent_id, title=title or f"n-{uuid.uuid4().hex[:8]}", content=content, **cols
     )
     db.commit()
@@ -189,14 +209,14 @@ def test_reindex_unchanged_large_file_is_all_skipped(db, store):
 
 
 def test_edit_replaces_changed_and_deletes_stale(db, store):
-    from kb import service
+    from kb.storage import dal
     from kb.semantic_index.indexer import index_files
 
     fid = make(db, content="".join(section(i) for i in range(5)))
     first = index_files([fid])
     before = {r.content for r in chunks_of(fid)}
 
-    service.update_node(db, fid, content="".join(section(i) for i in range(3)) + section(3, tag="x"))
+    dal.update_node(db, fid, content="".join(section(i) for i in range(3)) + section(3, tag="x"))
     db.commit()
     result = index_files([fid])
     after = {r.content for r in chunks_of(fid)}
@@ -210,12 +230,12 @@ def test_edit_replaces_changed_and_deletes_stale(db, store):
 
 
 def test_retag_only_adds_nothing(db, store):
-    from kb import service
+    from kb.storage import dal
     from kb.semantic_index.indexer import index_files
 
     fid = make(db, content="".join(section(i) for i in range(2)), tags=["a"])
     first = index_files([fid])
-    service.update_node(db, fid, tags=["b", "c"], status="stable")
+    dal.update_node(db, fid, tags=["b", "c"], status="stable")
     db.commit()
     result = index_files([fid])
     assert result.num_added == 0
@@ -223,17 +243,17 @@ def test_retag_only_adds_nothing(db, store):
 
 
 def test_soft_delete_then_restore(db, store):
-    from kb import service
+    from kb.storage import dal
     from kb.semantic_index.indexer import index_files
 
     fid = make(db, content=section(1))
     n = index_files([fid]).num_added
-    service.delete_node(db, fid)
+    dal.delete_node(db, fid)
     db.commit()
     assert index_files([fid]).num_deleted == n
     assert chunks_of(fid) == []
 
-    service.restore_node(db, fid)
+    dal.restore_node(db, fid)
     db.commit()
     assert index_files([fid]).num_added == n
     assert len(chunks_of(fid)) == n
@@ -270,13 +290,13 @@ def test_embedding_failure_is_isolated(db, failing_store):
 
 
 def test_reindex_all_removes_chunks_of_deleted_files(db, store):
-    from kb import service
+    from kb.storage import dal
     from kb.semantic_index.indexer import index_files, reindex_all
 
     keep = make(db, content=section(1))
     drop = make(db, content=section(2))
     index_files([keep, drop])
-    service.delete_node(db, drop)  # soft delete without unindexing
+    dal.delete_node(db, drop)  # soft delete without unindexing (the DAL records nothing)
     db.commit()
     assert chunks_of(drop)
 

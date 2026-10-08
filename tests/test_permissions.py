@@ -23,7 +23,6 @@ def client(migrated_db, monkeypatch):
 
     from kb.api import app
 
-    monkeypatch.setenv("KB_AUTO_INDEX", "0")
     return TestClient(app)
 
 

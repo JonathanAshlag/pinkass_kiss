@@ -13,6 +13,8 @@ images, `.tsv` and `.xlsm` have no processor and are skipped.
 A processor may also set `retain_original = True` (optional, default False) when its
 `content` is a conversion rather than the file itself; the walker then keeps the raw
 bytes in the blob store (kb.storage.blobs) and records them in the node's `blob_*` columns.
+And `cpu_bound = True` (optional) to have it run in kb.ingest.convert's process pool,
+so many such files convert in parallel; it must then be picklable (no lambdas).
 """
 
 from dataclasses import dataclass, field

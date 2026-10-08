@@ -17,6 +17,7 @@ dependencies = [
     "langchain-postgres>=0.0.18",
     "langchain-text-splitters>=1.0",
     "langchain-ollama>=1.0",
+    "langchain-openai>=1.0",  # OpenAI-compatible embeddings servers (TEI, vLLM)
     "langchain-docling>=1.0",  # docx, pptx, xlsx, csv, html (pulls in torch)
     "docling-slim[format-html,format-office]",  # langchain-docling ships slim: html + docx/pptx/xlsx parsers
     "langchain-pymupdf4llm>=1.0",  # pdf

@@ -83,14 +83,20 @@ class FileNodeLoader(BaseLoader):
             stmt = stmt.where(File.id.in_(self.file_ids))
         with self.session_factory() as session:
             for node in session.scalars(stmt.order_by(File.id)):
-                yield Document(
-                    page_content=node.content,
-                    metadata={
-                        "file_id": str(node.id),
-                        "title": node.title,
-                        "line_offset": body_line_offset(node),
-                    },
-                )
+                yield node_document(node)
+
+
+def node_document(node: File) -> Document:
+    """The loader's `Document` for one file -- also for a file that isn't committed (or
+    even flushed) yet, which is how writes stage their chunks before the commit."""
+    return Document(
+        page_content=node.content,
+        metadata={
+            "file_id": str(node.id),
+            "title": node.title,
+            "line_offset": body_line_offset(node),
+        },
+    )
 
 
 def heading_paths(text: str) -> list[str | None]:

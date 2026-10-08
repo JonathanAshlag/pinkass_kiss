@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Iterator
 
 from fastapi import (
-    BackgroundTasks,
     Body,
     Depends,
     FastAPI,
@@ -33,10 +32,9 @@ from kb import service
 from kb.storage import blobs
 from kb.storage.db import SessionLocal
 from kb.retrieval.dci import DEFAULT_MAX_CHARS, DEFAULT_READ_LIMIT, MAX_CHARS_LIMIT
-from kb.ingest import UploadError, UploadLimits, UploadTooLarge, default_registry, ingest_upload
+from kb.ingest import IngestFailed, UploadError, UploadLimits, UploadTooLarge, default_registry, ingest_upload
 from kb.api.schemas import (
     IngestExtensionsRead,
-    IngestFailure,
     IndexFailure,
     IndexResultRead,
     IngestReportRead,
@@ -110,6 +108,25 @@ def _unprocessable_handler(request, exc):
     return _json_error(422, str(exc))
 
 
+@app.exception_handler(IngestFailed)
+def _ingest_failed_handler(request, exc):
+    # A ValueError subclass; Starlette picks the most specific handler.
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": str(exc),
+            "failed": [{"path": p.as_posix(), "error": e} for p, e in exc.failures],
+        },
+    )
+
+
+@app.exception_handler(service.IndexingError)
+def _indexing_error_handler(request, exc):
+    # Embeddings server / vector store down: nothing was written.
+    log.error("indexing: %s", exc)
+    return _json_error(503, f"indexing unavailable, nothing was written: {exc}")
+
+
 @app.exception_handler(service.PermissionDenied)
 def _permission_denied_handler(request, exc):
     return _json_error(403, str(exc))
@@ -160,21 +177,16 @@ def health():
 
 
 # --------------------------------------------------------------------------
-# Committing writes (kb.service.commit keeps the semantic index in step)
+# Committing writes (kb.service.commit: all or nothing, index and S3 included)
 # --------------------------------------------------------------------------
 
 
-def _commit(session: Session, background_tasks: BackgroundTasks) -> None:
-    """Commit the request's writes *now* via service.commit, which then schedules
-    indexing of whatever they touched as a background task (if KB_AUTO_INDEX is on).
-
-    The explicit commit is what guarantees the indexer (which opens its own session)
-    sees the new state. FastAPI 0.115 happens to close yield-dependencies -- and so run
-    get_session's commit -- before background tasks, but that ordering has changed
-    between FastAPI releases, so it isn't relied on. get_session's own commit is then
-    a harmless no-op. If the commit raises, nothing is scheduled.
-    """
-    service.commit(session, schedule=background_tasks.add_task)
+def _commit(session: Session) -> None:
+    """Commit the request's writes *now*, all or nothing across the DB, the semantic
+    index and S3 (kb.service.commit): the response then reflects committed state, and an
+    IndexingError (503) means nothing was written. get_session's own commit is then a
+    harmless no-op."""
+    service.commit(session)
 
 
 def _read(session: Session, node) -> NodeRead:
@@ -190,7 +202,7 @@ def _read(session: Session, node) -> NodeRead:
 
 @app.post("/nodes", response_model=NodeRead, status_code=201)
 def create_node(
-    body: NodeCreate, background_tasks: BackgroundTasks, session: Session = Depends(get_session)
+    body: NodeCreate, session: Session = Depends(get_session)
 ):
     # exclude_unset lets DB server defaults (kind='manual', tags='{}', status='draft',
     # ...) apply when the client omits those fields.
@@ -201,7 +213,7 @@ def create_node(
         node = service.create_folder(session, **payload)
     else:
         node = service.create_file(session, **payload)
-    _commit(session, background_tasks)
+    _commit(session)
     return _read(session, node)
 
 
@@ -257,11 +269,10 @@ def get_node_raw(node_id: uuid.UUID, session: Session = Depends(get_session)):
 def update_node(
     node_id: uuid.UUID,
     body: NodeUpdate,
-    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
 ):
     node = service.update_node(session, node_id, **body.model_dump(exclude_unset=True))
-    _commit(session, background_tasks)
+    _commit(session)
     return _read(session, node)
 
 
@@ -273,22 +284,21 @@ def move_node(node_id: uuid.UUID, body: MoveRequest, session: Session = Depends(
 
 @app.post("/nodes/{node_id}/restore", response_model=NodeRead)
 def restore_node(
-    node_id: uuid.UUID, background_tasks: BackgroundTasks, session: Session = Depends(get_session)
+    node_id: uuid.UUID, session: Session = Depends(get_session)
 ):
     node = service.restore_node(session, node_id)
-    _commit(session, background_tasks)
+    _commit(session)
     return _read(session, node)
 
 
 @app.delete("/nodes/{node_id}", status_code=204, response_class=Response)
 def delete_node(
     node_id: uuid.UUID,
-    background_tasks: BackgroundTasks,
     cascade: bool = True,
     session: Session = Depends(get_session),
 ):
     service.delete_node(session, node_id, cascade=cascade)
-    _commit(session, background_tasks)
+    _commit(session)
 
 
 @app.get("/nodes/{node_id}/children", response_model=list[NodeSummary])
@@ -434,7 +444,8 @@ def semantic_search(
 @app.post("/index/reindex", response_model=IndexResultRead)
 def reindex(body: ReindexRequest | None = Body(None)):
     """(Re)index the given node ids, or the whole KB when `file_ids` is omitted. Runs
-    synchronously and returns the counts; ignores KB_AUTO_INDEX (it's an explicit ask)."""
+    synchronously and returns the counts. A repair tool: every write already indexes
+    before it commits, so on a healthy KB this finds nothing to do."""
     if body is None or body.file_ids is None:
         result = service.reindex_all()
     else:
@@ -461,7 +472,6 @@ def ingest_extensions():
 
 @app.post("/ingest", response_model=IngestReportRead, status_code=201)
 def ingest(
-    background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
     # Relative path of each file, same order as `files` (e.g. "docs/guide/setup.md").
     # Sent separately because multipart filenames aren't reliably kept with directories.
@@ -480,13 +490,12 @@ def ingest(
         tags=tags,
         limits=UploadLimits.from_env(),
     )
-    _commit(session, background_tasks)
+    _commit(session)
     return IngestReportRead(
         root_id=report.root_id,
         files_created=report.files_created,
         folders_created=report.folders_created,
         skipped=[p.as_posix() for p in report.skipped],
-        failed=[IngestFailure(path=p.as_posix(), error=e) for p, e in report.failed],
     )
 
 
