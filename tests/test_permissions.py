@@ -239,3 +239,31 @@ def test_restore_needs_an_active_parent(db_session):
     with pytest.raises(service.PermissionDenied):
         service.restore_node(db_session, doc.id, actor="agent")
     assert service.restore_node(db_session, doc.id).deleted_at is None
+
+
+def test_create_or_move_into_a_deleted_folder_is_refused(db_session):
+    """Issue #15: these used to succeed (skipping the permission check) and leave an
+    active node nobody can reach."""
+    from kb import service
+
+    root = service.create_folder(db_session, parent_id=None, title=name())
+    gone = service.create_folder(db_session, parent_id=root.id, title="gone")
+    doc = service.create_file(db_session, parent_id=root.id, title="doc", content="x")
+    sub = service.create_folder(db_session, parent_id=root.id, title="sub")
+    service.delete_node(db_session, gone.id)
+
+    for actor in ("agent", "human"):
+        with pytest.raises(service.FieldError):
+            service.create_file(db_session, parent_id=gone.id, title="f", content="x", actor=actor)
+        with pytest.raises(service.FieldError):
+            service.create_folder(db_session, parent_id=gone.id, title="d", actor=actor)
+        for node in (doc, sub):
+            with pytest.raises(service.FieldError):
+                service.move_node(db_session, node.id, gone.id, actor=actor)
+
+
+def test_api_create_in_a_deleted_folder_is_422(client):
+    root = client.post("/nodes", json={"type": "folder", "title": name()}).json()
+    assert client.delete(f"/nodes/{root['id']}").status_code == 204
+    body = {"parent_id": root["id"], "title": "x", "content": "x"}
+    assert client.post("/nodes", json=body).status_code == 422

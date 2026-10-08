@@ -329,7 +329,7 @@ def _check_create(
     """Creating a node needs CREATE_INSIDE on its parent folder; choosing a non-default
     kind or agent lock up front counts as changing them."""
     _reject_auto_updated(columns.get("kind"))
-    parent = dal.get_folder(session, parent_id) if parent_id is not None else None
+    parent = dal.get_folder(session, parent_id, include_deleted=True) if parent_id is not None else None
     if parent is None:
         return  # a root folder, or a bad parent_id that dal reports
     _check(session, actor, Action.CREATE_INSIDE, parent)
@@ -402,25 +402,21 @@ def move_node(
     if node.parent_id == new_parent_id:
         return node
     _check(session, actor, Action.MOVE, node)
-    destination = dal.get_folder(session, new_parent_id) if new_parent_id is not None else None
+    destination = dal.get_folder(session, new_parent_id, include_deleted=True) if new_parent_id is not None else None
     if destination is not None:
         _check(session, actor, Action.CREATE_INSIDE, destination)
     return dal.move_node(session, node_id, new_parent_id)
 
 
-def delete_node(
-    session: Session, node_id: uuid.UUID, *, cascade: bool = True, actor: Actor = "human"
-) -> None:
+def delete_node(session: Session, node_id: uuid.UUID, *, actor: Actor = "human") -> None:
     """Needs DELETE on the node itself only (a skeleton's lock doesn't reach up: deleting
     a manual folder cascades through any skeletons inside it).
 
-    Records the node plus, with `cascade`, exactly the descendants the cascade
-    soft-deletes (dal.delete_node only touches still-active ones), so their chunks go."""
+    Records the node plus exactly the descendants the cascade soft-deletes
+    (dal.delete_node only touches still-active ones), so their chunks go."""
     _check(session, actor, Action.DELETE, _existing(session, node_id))
-    touched = [node_id]
-    if cascade:
-        touched += [d.id for d in dal.list_descendants(session, node_id)]
-    dal.delete_node(session, node_id, cascade=cascade)
+    touched = [node_id, *(d.id for d in dal.list_descendants(session, node_id))]
+    dal.delete_node(session, node_id)
     _touch(session, *touched)
 
 
