@@ -375,7 +375,10 @@ with dot) and `process(path) -> ProcessedDocument(title, content, extra)`, where
 `extra` holds additional `files` columns. To add a format (PDF, docx...), write one
 processor module and register it in `default_registry()`. `plan_folder` doesn't change.
 Only `MarkdownProcessor` exists today: content stored verbatim, **no frontmatter
-parsing** (user's choice), title = first `# ` H1 else filename stem.
+parsing** (user's choice). **Title = filename stem for every processor** (user's choice: no
+H1/heading parsing — converters render headings inconsistently, e.g. Docling turns a Word
+Heading 1 into `##`). Files created through
+`POST /nodes` take an explicit, required `title`.
 
 CLI: `python scripts/ingest_folder.py PATH [--parent-id UUID] [--tag T ...] [--dry-run]`.
 
@@ -410,10 +413,12 @@ It filters hidden and unsupported files client-side, so those are never uploaded
 
 **Non-markdown formats** (`ingest/processors/converters.py`): `LoaderProcessor(name, extensions,
 loader_factory)` runs any LangChain `BaseLoader` as a `Processor` (docs joined, title =
-first H1 else stem, empty text → failed). Built-ins: `PyMuPDF4LLMLoader(mode="single")`
+stem, empty text → failed). Built-ins: `PyMuPDF4LLMLoader(mode="single")`
 for `.pdf`; `DoclingLoader(export_type=MARKDOWN)` for `.docx .pptx .xlsx .csv .html .htm` (it pulls
-in torch). Both are core dependencies with no fallbacks; images aren't ingested. Text/code
-files use `text.py`; git repos use `ingest/git.py` (`ingest_git_repo`).
+in torch). Both are core dependencies with no fallbacks; images aren't ingested. Plain text
+(`.txt .text .rst .log`) uses `text.py`. **Code/config files (`.py`, `.json`, ...) are not
+ingested** (user's choice: out of scope, invites misuse); don't re-add without asking. Git
+repos use `ingest/git.py` (`ingest_git_repo`).
 
 **Raw originals** (`src/kb/storage/blobs.py`): processors with `retain_original = True` (the
 loader ones, not markdown) get their source bytes stored via `BlobStore.put_original` and the

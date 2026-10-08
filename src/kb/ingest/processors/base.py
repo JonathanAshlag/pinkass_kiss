@@ -64,12 +64,11 @@ def default_registry() -> ProcessorRegistry:
     """A fresh registry with every built-in processor."""
     from kb.ingest.processors.converters import builtin_loader_processors
     from kb.ingest.processors.markdown import MarkdownProcessor
-    from kb.ingest.processors.text import CodeProcessor, PlainTextProcessor
+    from kb.ingest.processors.text import PlainTextProcessor
 
     registry = ProcessorRegistry()
     registry.register(MarkdownProcessor())
     for processor in builtin_loader_processors():
         registry.register(processor)
     registry.register(PlainTextProcessor())
-    registry.register(CodeProcessor())
     return registry

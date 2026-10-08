@@ -1,6 +1,6 @@
 """
 Ingests a git repository: shallow-clones it into a temp dir, then runs `ingest_folder`
-over the working tree, so every format the registry handles (markdown, code, docx, ...)
+over the working tree, so every format the registry handles (markdown, text, docx, ...)
 comes along. A repo is a *source* of files rather than a file format, so this isn't a
 `Processor`.
 

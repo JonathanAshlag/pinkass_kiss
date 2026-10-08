@@ -54,14 +54,18 @@ def test_default_registry_handles_pdf():
     assert not getattr(registry.for_path(Path("a.md")), "retain_original", False)
 
 
-def test_markdown_title_from_h1_else_stem(tmp_path):
+def test_code_files_are_not_supported():
+    registry = default_registry()
+    assert {".txt", ".md"} <= registry.supported_extensions
+    assert not {".py", ".js", ".json", ".yaml", ".sh", ".sql"} & registry.supported_extensions
+
+
+def test_markdown_title_is_file_stem(tmp_path):
     proc = MarkdownProcessor()
-    with_h1 = write(tmp_path / "a.md", "intro\n\n# Real Title #\n\nbody\n## Sub\n")
-    no_h1 = write(tmp_path / "my-notes.md", "## only a subheading\n")
+    with_h1 = write(tmp_path / "my-notes.md", "intro\n\n# Real Title #\n\nbody\n## Sub\n")
     doc = proc.process(with_h1)
-    assert doc.title == "Real Title"
+    assert doc.title == "my-notes"  # the H1 is not parsed
     assert doc.content == with_h1.read_text()  # stored verbatim
-    assert proc.process(no_h1).title == "my-notes"
 
 
 # --------------------------------------------------------------------------
@@ -81,7 +85,7 @@ def test_plan_lists_root_then_files_only(tmp_path):
     assert [(n.path, n.type, n.title) for n in plan.nodes] == [
         ("", "folder", "docs"),
         ("guide/deep/faq.md", "file", "faq"),
-        ("readme.md", "file", "Readme"),
+        ("readme.md", "file", "readme"),
     ]
     faq = plan.nodes[1]
     assert faq.content == "no heading"
@@ -163,7 +167,7 @@ def test_loader_processor_joins_docs_and_titles(tmp_path):
     proc = LoaderProcessor("fake", {".FAKE"}, FakeLoader)
     assert proc.extensions == frozenset({".fake"})
     doc = proc.process(tmp_path / "x.fake")
-    assert (doc.title, doc.content, doc.extra) == ("Big Title", "intro\n# Big Title\n\nmore\n", {})
+    assert (doc.title, doc.content, doc.extra) == ("x", "intro\n# Big Title\n\nmore\n", {})
 
     empty = LoaderProcessor("empty", {".e"}, lambda p: type("L", (), {"load": lambda self: []})())
     with pytest.raises(ValueError, match="no text"):
@@ -178,7 +182,7 @@ def test_pdf_plan_keeps_original_in_blob_store(tmp_path, blob_store):
 
     nodes = {n.path: n for n in plan.nodes}
     report = nodes["report.pdf"]
-    assert report.title == "Quarterly Report"
+    assert report.title == "report"
     assert "widget count rose sharply" in report.content and "Second page text" in report.content
     assert report.fields["blob_mime_type"] == "application/pdf"
     assert report.fields["blob_size_bytes"] == pdf.stat().st_size
@@ -243,7 +247,7 @@ def docling_plan(tmp_path: Path, name: str):
 def test_docling_converts_html(tmp_path):
     write(tmp_path / "page.html", "<html><body><h1>Release Notes</h1><p>Widgets got faster.</p></body></html>")
     node = docling_plan(tmp_path, "page.html")
-    assert node.title == "Release Notes"
+    assert node.title == "page"
     assert "Widgets got faster." in node.content
 
 
@@ -261,7 +265,7 @@ def test_docling_converts_docx(tmp_path):
     doc.add_paragraph("The gadget ships in March.")
     doc.save(str(tmp_path / "memo.docx"))
     node = docling_plan(tmp_path, "memo.docx")
-    assert node.title == "Design Memo"
+    assert node.title == "memo"
     assert "The gadget ships in March." in node.content
 
 
@@ -330,9 +334,9 @@ def test_mirrors_tree_and_skips_unsupported(db_session, tmp_path):
     root = children_by_title(db_session, None)["docs"]
     assert root.id == report.root_id and root.node_type == "folder"
     top = children_by_title(db_session, root.id)
-    assert set(top) == {"Readme", "guide"}
+    assert set(top) == {"readme", "guide"}
     guide = children_by_title(db_session, top["guide"].id)
-    assert set(guide) == {"Setup", "deep"}
+    assert set(guide) == {"setup", "deep"}
     faq = children_by_title(db_session, guide["deep"].id)["faq"]
     assert faq.content == "no heading"
     assert faq.tags == ["run:1"]
@@ -441,8 +445,8 @@ def test_upload_mirrors_tree(db_session):
     root = children_by_title(db_session, None)["docs"]
     assert root.id == report.root_id
     guide = children_by_title(db_session, children_by_title(db_session, root.id)["guide"].id)
-    assert guide["Setup"].sources == [{"resource": "upload:docs/guide/setup.md"}]
-    assert guide["Setup"].tags == ["up"]
+    assert guide["setup"].sources == [{"resource": "upload:docs/guide/setup.md"}]
+    assert guide["setup"].tags == ["up"]
 
 
 def test_upload_loose_files_go_into_parent(db_session):
@@ -463,8 +467,8 @@ def test_upload_loose_files_go_into_parent(db_session):
     assert report.folders_created == [] and len(report.files_created) == 1
     assert [p.as_posix() for p in report.skipped] == ["logo.png"]
     children = children_by_title(db_session, parent.id)
-    assert set(children) == {"Existing", "A"}
-    assert children["A"].sources == [{"resource": "upload:a.md"}] and children["A"].tags == ["up"]
+    assert set(children) == {"Existing", "a"}
+    assert children["a"].sources == [{"resource": "upload:a.md"}] and children["a"].tags == ["up"]
     assert service.get_folder(db_session, parent.id).tags == []  # the parent isn't retagged
 
 
@@ -478,7 +482,7 @@ def test_upload_reports_hidden_files_as_skipped(db_session):
 
     assert sorted(p.as_posix() for p in report.skipped) == ["docs/.env", "docs/.git/notes.md"]
     assert len(report.files_created) == 1 and report.folders_created == [report.root_id]
-    assert set(children_by_title(db_session, report.root_id)) == {"A"}
+    assert set(children_by_title(db_session, report.root_id)) == {"a"}
 
 
 def test_upload_streams_file_objects(db_session):
@@ -486,7 +490,7 @@ def test_upload_streams_file_objects(db_session):
 
     report = ingest_upload(db_session, [("docs/a.md", io.BytesIO(b"# A\n\nbody"))])
 
-    node = children_by_title(db_session, report.root_id)["A"]
+    node = children_by_title(db_session, report.root_id)["a"]
     assert node.content == "# A\n\nbody"
 
 
@@ -558,7 +562,7 @@ def test_ingest_pdf_sets_blob_columns(db_session, tmp_path, blob_store):
 
     assert report.failed == [] and len(report.files_created) == 1
     node = service.get_node(db_session, report.files_created[0])
-    assert node.title == "Quarterly Report" and "widget count rose sharply" in node.content
+    assert node.title == "report" and "widget count rose sharply" in node.content
     assert node.sources == [{"resource": pdf.resolve().as_uri()}]
     assert (node.blob_mime_type, node.blob_size_bytes) == ("application/pdf", pdf.stat().st_size)
     assert node.blob_key.startswith("sha256/") and node.blob_checksum.startswith("sha256:")
@@ -619,7 +623,7 @@ def test_raw_original_endpoint(client, db_session, tmp_path, blob_store):
     try:
         report = ingest_folder(db_session, tmp_path / "papers")
         by_title = children_by_title(db_session, report.root_id)
-        pdf_id, md_id = by_title["Quarterly Report"].id, by_title["Notes"].id
+        pdf_id, md_id = by_title["report"].id, by_title["notes"].id
 
         res = client.get(f"/nodes/{pdf_id}/raw")
         assert res.status_code == 200 and res.content == pdf.read_bytes()
