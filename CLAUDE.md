@@ -466,7 +466,8 @@ none (originals not kept). Tests use the moto-backed `blob_store` fixture
 the env store (`blob_store=None` keeps none). Uploads happen in `service.stage`, before
 the transaction (so `ingest_upload`'s temp dir can be gone by commit time); a blob error
 fails the whole write and deletes what was uploaded. `GET /nodes/{id}/raw` downloads it
-(404 if none).
+(404 if none), streamed from S3 (never read whole), with an RFC 6266 `filename*=` for
+non-ASCII names.
 
 Production hardening: the boto3 client gets 5 s connect / 30 s read timeouts and
 standard retries, 3 attempts total (`BLOB_CONNECT_TIMEOUT`/`BLOB_READ_TIMEOUT`/

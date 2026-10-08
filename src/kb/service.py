@@ -15,6 +15,7 @@ session lifecycle (opening, closing) is the caller's job, not this module's.
 """
 
 import logging
+import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -584,8 +585,9 @@ def read_lines(
 # --------------------------------------------------------------------------
 
 
-def get_original(session: Session, node_id: uuid.UUID) -> tuple[bytes, str, str] | None:
-    """(data, mime, filename) of a node's retained original, or None if it has none
+def get_original(session: Session, node_id: uuid.UUID) -> tuple[Any, str, str] | None:
+    """(stream, mime, filename) of a node's retained original (stream as returned by
+    `BlobStore.get_original`; the caller closes it), or None if it has none
     (markdown nodes, or no blob store configured). Raises ValueError for no such node."""
     from kb.storage import blobs
 
@@ -597,12 +599,14 @@ def get_original(session: Session, node_id: uuid.UUID) -> tuple[bytes, str, str]
     store = blobs.get_blob_store()
     if not node.blob_key or store is None:
         return None
-    data = store.get_original(node.blob_key)
-    if data is None:
+    body = store.get_original(node.blob_key)
+    if body is None:
         return None
     resource = next((s.get("resource") for s in node.sources if isinstance(s, dict)), None)
     filename = resource.rsplit("/", 1)[-1].rsplit(":", 1)[-1] if resource else node.title
-    return data, node.blob_mime_type or "application/octet-stream", filename
+    if resource and resource.startswith("file:"):
+        filename = urllib.parse.unquote(filename)  # file URIs percent-encode non-ASCII names
+    return body, node.blob_mime_type or "application/octet-stream", filename
 
 
 # --------------------------------------------------------------------------

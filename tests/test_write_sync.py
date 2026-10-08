@@ -322,7 +322,7 @@ def test_ingest_success_lands_everywhere(db, papers, blob_store):
     assert sorted(objects(blob_store)) == sorted(n.blob_key for n in pdfs)
     for n in pdfs:
         assert n.blob_key == f"originals/{n.id}"
-        assert blob_store.get_original(n.blob_key) == (papers / f"{n.title}.pdf").read_bytes()
+        assert blob_store.get_original(n.blob_key).read() == (papers / f"{n.title}.pdf").read_bytes()
     assert all(chunks_of(fid) for fid in report.files_created)
 
 
