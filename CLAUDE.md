@@ -55,6 +55,7 @@ src/kb/
                       body_line_offset); imports only storage.models, never dal
   policy.py           who may do what: folder/file kinds + agent lock; pure, imports only storage.models
   maintenance.py      GC of what a crashed write leaves (orphan originals / chunks), see "All-or-nothing writes"
+  settings.py         every production setting (env var, default, parsing), see "Settings"
   storage/            layer 1: canonical data
     db.py             Base, engine, SessionLocal (reads DATABASE_URL from env)
     models.py         SQLAlchemy models: Folder, File (Node = File | Folder), Manifest, ManifestMember
@@ -118,6 +119,21 @@ downgrade a pre-split DB, so the old objects were dropped by hand first.
 
 To run the API locally: `set -a && source .env && set +a && uvicorn kb.api:app
 --app-dir src --reload` — then see `/docs` for the interactive OpenAPI UI.
+
+## Settings (`src/kb/settings.py`)
+
+The one place that reads the app's environment: a frozen `Settings` dataclass, one field
+per env var (default, parser, display), loaded and validated once by `get_settings()`
+(bad value → `ValueError` naming the var; `DATABASE_URL` required). Unset/empty = default.
+It also loads `<repo>/.env` (moved here from `storage/db.py`). Modules read
+`get_settings().<field>`, never `os.environ`. `python -m kb.settings` prints effective
+values (secrets/DB password masked) and their source; the API logs the same at startup.
+Tests: the `override_settings(**changes)` fixture (`tests/conftest.py`) swaps them,
+`load_settings({...})` tests parsing (`tests/test_settings.py`); don't `setenv` app vars.
+Not covered: `migrations/` (reads `DATABASE_URL`/`EMBEDDING_DIM` itself, never imports
+app code), test/eval vars (`E2E_*`, `JUDGE_*`, `OPIK_*`), deploy-manifest knobs.
+Promoted from constants: `BLOB_UPLOAD_WORKERS` (8), `KB_STAGE_BATCH_SIZE` (128),
+`KB_GC_GRACE_HOURS` (24, originals and chunks alike).
 
 ## Schema as it stands (migration 0001)
 
@@ -420,7 +436,7 @@ they'd overwrite each other) and a path that's both a file and a directory (`n/a
 `n/a/b.md`). All path checks run before anything is written. Hidden files (a `.` segment
 below the uploaded root) aren't written but are listed in `report.skipped`.
 **Limits**: `UploadLimits(max_files, max_file_bytes, max_total_bytes)` (None = no cap;
-`ingest_upload` defaults to none). The API uses `UploadLimits.from_env()`
+`ingest_upload` defaults to none). The API uses `UploadLimits.from_settings()`
 (`KB_UPLOAD_MAX_FILES`/`_MAX_FILE_BYTES`/`_MAX_TOTAL_BYTES`; empty = default 500 files /
 100 MiB / 1 GiB, `0` = no cap). Exceeding one raises `UploadTooLarge(UploadError)` → **413**;
 byte caps are enforced while streaming. Starlette's own form parser caps a request at
@@ -556,7 +572,7 @@ object), and settled after it:
 
 - `service.stage(session, files=, originals=)` (ingest, before its transaction does
   anything): add-only index the transient `File`s, then upload originals (thread pool,
-  `UPLOAD_WORKERS = 8`). On failure it undoes its own work and raises.
+  `BLOB_UPLOAD_WORKERS`, default 8). On failure it undoes its own work and raises.
 - `before_commit` event (**every** commit, `service.commit` or a plain
   `session.commit()`): flushes, add-only indexes the active touched files (already-staged
   chunks are skipped by the record manager, never re-embedded). Failure →

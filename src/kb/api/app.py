@@ -31,6 +31,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from kb import service
+from kb.settings import describe, get_settings
 from kb.storage import blobs
 from kb.storage.db import SessionLocal
 from kb.retrieval.dci import DEFAULT_MAX_CHARS, DEFAULT_READ_LIMIT, MAX_CHARS_LIMIT
@@ -54,13 +55,17 @@ from kb.api.schemas import (
     ToolOutputRead,
 )
 
+# uvicorn configures only its own loggers; without this, kb.* INFO logs (settings, blob check) are dropped.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
 log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Checks the blob store once at startup: with BLOB_REQUIRED=1 a missing or broken
-    store aborts startup; otherwise a broken one is only logged."""
+    """Logs the effective settings, then checks the blob store once at startup: with
+    BLOB_REQUIRED=1 a missing or broken store aborts startup; otherwise a broken one is
+    only logged."""
+    log.info("settings:\n%s", "\n".join(describe(get_settings())))
     try:
         status = blobs.check_blob_store()
         log.info("blob store: %s", status)
@@ -491,7 +496,7 @@ def ingest(
         [(path, upload.file) for path, upload in zip(paths, files)],
         parent_id=parent_id,
         tags=tags,
-        limits=UploadLimits.from_env(),
+        limits=UploadLimits.from_settings(),
     )
     _commit(session)
     return IngestReportRead(

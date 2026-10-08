@@ -115,19 +115,17 @@ def test_guess_mime():
 
 
 # --------------------------------------------------------------------------
-# get_blob_store / set_blob_store (env selection)
+# get_blob_store / set_blob_store (selection from kb.settings)
 # --------------------------------------------------------------------------
 
 
 @pytest.fixture
-def clean_env(monkeypatch):
-    for var in (
-        "BLOB_BUCKET", "BLOB_ENDPOINT_URL", "BLOB_PREFIX", "BLOB_REQUIRED",
-        "BLOB_CONNECT_TIMEOUT", "BLOB_READ_TIMEOUT", "BLOB_MAX_ATTEMPTS",
-    ):
-        monkeypatch.delenv(var, raising=False)
+def clean_env(override_settings, monkeypatch):
+    """No blob settings (whatever .env says); yields `override_settings`."""
+    override_settings(blob_bucket=None, blob_endpoint_url=None, blob_prefix="", blob_required=False)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     blobs.reset_blob_store()
-    yield monkeypatch
+    yield override_settings
     blobs.reset_blob_store()
 
 
@@ -137,7 +135,7 @@ def test_no_env_means_no_store(clean_env):
 
 
 def test_blob_required_without_bucket_raises(clean_env):
-    clean_env.setenv("BLOB_REQUIRED", "1")
+    clean_env(blob_required=True)
     with pytest.raises(BlobStoreError, match="BLOB_BUCKET"):
         blobs.get_blob_store()
     with pytest.raises(BlobStoreError):
@@ -153,26 +151,20 @@ def test_check_blob_store(clean_env, blob_store):
 
 
 def test_client_timeouts_and_retries(clean_env):
-    clean_env.setenv("BLOB_BUCKET", "bkt")
-    clean_env.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    clean_env(blob_bucket="bkt")
     config = blobs.get_blob_store().client.meta.config
     assert (config.connect_timeout, config.read_timeout) == (5.0, 30.0)
     assert config.retries == {"mode": "standard", "total_max_attempts": 3}
 
     blobs.reset_blob_store()
-    clean_env.setenv("BLOB_CONNECT_TIMEOUT", "2")
-    clean_env.setenv("BLOB_READ_TIMEOUT", "10")
-    clean_env.setenv("BLOB_MAX_ATTEMPTS", "5")
+    clean_env(blob_connect_timeout=2.0, blob_read_timeout=10.0, blob_max_attempts=5)
     config = blobs.get_blob_store().client.meta.config
     assert (config.connect_timeout, config.read_timeout) == (2.0, 10.0)
     assert config.retries["total_max_attempts"] == 5
 
 
-def test_bucket_env(clean_env):
-    clean_env.setenv("BLOB_BUCKET", "bkt")
-    clean_env.setenv("BLOB_PREFIX", "kb/")
-    clean_env.setenv("BLOB_ENDPOINT_URL", "http://minio:9000")
-    clean_env.setenv("AWS_DEFAULT_REGION", "us-east-1")
+def test_bucket_settings(clean_env):
+    clean_env(blob_bucket="bkt", blob_prefix="kb/", blob_endpoint_url="http://minio:9000")
     store = blobs.get_blob_store()
     assert isinstance(store, BlobStore)
     assert (store.bucket, store.prefix, store.client.meta.endpoint_url) == ("bkt", "kb/", "http://minio:9000")
@@ -180,7 +172,7 @@ def test_bucket_env(clean_env):
 
 
 def test_set_blob_store_overrides(clean_env, blob_store):
-    clean_env.setenv("BLOB_BUCKET", "other")
+    clean_env(blob_bucket="other")
     blobs.set_blob_store(blob_store)
     assert blobs.get_blob_store() is blob_store
     blobs.set_blob_store(None)

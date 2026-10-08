@@ -17,7 +17,6 @@ path that is both a file and a directory are UploadErrors. Hidden files are not
 uploaded into the tree but reported in `skipped`, like unsupported extensions.
 """
 
-import os
 import tempfile
 import uuid
 from collections.abc import Iterable
@@ -29,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from kb.ingest.processors.base import ProcessorRegistry
 from kb.ingest.folder import DEFAULT_BLOB_STORE, IngestFailed, IngestReport, ingest_folder
+from kb.settings import get_settings
 from kb.storage.blobs import BlobStore
 
 UPLOAD_SCHEME = "upload:"
@@ -45,28 +45,16 @@ class UploadTooLarge(UploadError):
 
 @dataclass(frozen=True)
 class UploadLimits:
-    """Caps on one upload; None = no cap. `from_env` reads the KB_UPLOAD_* variables."""
+    """Caps on one upload; None = no cap. `from_settings` = the configured KB_UPLOAD_* caps."""
 
     max_files: int | None = None
     max_file_bytes: int | None = None
     max_total_bytes: int | None = None
 
-    # The file-count default stays under Starlette's own multipart ceiling (1000 files and
-    # 1000 plain fields per form -- every file sends a `paths` field), which answers a
-    # bigger form with a bare 400 before our code runs.
-    DEFAULTS = {"max_files": 500, "max_file_bytes": 100 * 1024**2, "max_total_bytes": 1024**3}
-
     @classmethod
-    def from_env(cls) -> "UploadLimits":
-        """KB_UPLOAD_MAX_FILES / _MAX_FILE_BYTES / _MAX_TOTAL_BYTES; unset or empty = the
-        default, 0 = no cap."""
-
-        def read(name: str) -> int | None:
-            raw = os.environ.get(f"KB_UPLOAD_{name.upper()}", "").strip()
-            value = int(raw) if raw else cls.DEFAULTS[name]
-            return value or None
-
-        return cls(**{name: read(name) for name in cls.DEFAULTS})
+    def from_settings(cls) -> "UploadLimits":
+        s = get_settings()
+        return cls(s.upload_max_files, s.upload_max_file_bytes, s.upload_max_total_bytes)
 
 
 def _safe_relative(raw: str) -> PurePosixPath:

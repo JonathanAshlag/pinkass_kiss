@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session, SessionTransaction, undefer
 
 from kb import okf
 from kb.policy import Action, Actor, PermissionDenied, check
+from kb.settings import get_settings
 
 from kb.retrieval import dci
 
@@ -100,7 +101,6 @@ _UPLOADED = "kb.uploaded_originals"  # {key: BlobStore} uploaded by this transac
 _COMMITTED = "kb.committed"
 _LAST_STAGE = "kb.last_stage_result"  # outlives the transaction; read by commit()
 
-UPLOAD_WORKERS = 8
 
 
 class IndexingError(Exception):
@@ -149,7 +149,7 @@ def _upload_originals(session: Session, uploads: list[tuple[Any, str, Any]]) -> 
         except BaseException as exc:  # noqa: BLE001 -- collected, re-raised below
             errors.append(exc)
 
-    with ThreadPoolExecutor(max_workers=min(UPLOAD_WORKERS, len(uploads))) as pool:
+    with ThreadPoolExecutor(max_workers=min(get_settings().blob_upload_workers, len(uploads))) as pool:
         list(pool.map(put, uploads))
     if errors:
         raise errors[0]

@@ -33,13 +33,10 @@ from sqlalchemy import text
 
 from kb.semantic_index.chunking import FileNodeLoader, split_documents
 from kb.semantic_index.vectorstore import IndexStore, chunk_key_encoder, get_index_store
+from kb.settings import get_settings
 
 log = logging.getLogger(__name__)
 
-# Chunks per embedding call when staging. Without cleanup, index() needs no
-# one-batch-per-file rule (that's only for incremental cleanup, see _index_one), so a
-# whole upload is embedded in batches of this size across files.
-STAGE_BATCH_SIZE = 128
 
 
 @dataclass
@@ -82,7 +79,8 @@ def stage_documents(docs, *, store: IndexStore | None = None) -> IndexResult:
             cleanup=None,
             source_id_key="file_id",  # still recorded as the group_id, for reconcile/unindex
             key_encoder=chunk_key_encoder,
-            batch_size=STAGE_BATCH_SIZE,
+            # No cleanup, so no one-batch-per-file rule (see _index_one): batches span files.
+            batch_size=get_settings().stage_batch_size,
         )
     )
     return result
