@@ -1,0 +1,35 @@
+# Scratch space for uploads on OpenShift (merge into the API's Deployment, or apply as a
+# patch: oc patch deployment/kb-api --patch-file deploy/openshift/upload-scratch.yaml).
+#
+# POST /ingest touches local disk twice: Starlette spools every uploaded file over 1 MB
+# to a temp file while parsing the form, and kb.ingest.upload mirrors the upload into a
+# temp dir for the processors. Both use TMPDIR (default /tmp). An emptyDir there works
+# under the default `restricted` SCC and with a read-only root filesystem.
+#
+# Size it for ~2x the largest upload you allow (spooled copy + mirrored copy) times the
+# requests a pod may run at once: KB_UPLOAD_MAX_TOTAL_BYTES defaults to 1 GiB. Going
+# over sizeLimit / the ephemeral-storage limit gets the pod evicted, so also cap request
+# bodies at the router/ingress, which fails fast instead.
+spec:
+  template:
+    spec:
+      containers:
+        - name: kb-api  # must match the container name in the Deployment
+          env:
+            - name: TMPDIR
+              value: /tmp
+            # - name: KB_UPLOAD_MAX_FILES        # default 500
+            # - name: KB_UPLOAD_MAX_FILE_BYTES   # default 100 MiB
+            # - name: KB_UPLOAD_MAX_TOTAL_BYTES  # default 1 GiB
+          resources:
+            requests:
+              ephemeral-storage: 1Gi
+            limits:
+              ephemeral-storage: 5Gi
+          volumeMounts:
+            - name: upload-scratch
+              mountPath: /tmp
+      volumes:
+        - name: upload-scratch
+          emptyDir:
+            sizeLimit: 4Gi

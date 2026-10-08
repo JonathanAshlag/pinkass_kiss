@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>pinkass_kiss System Design</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: sticky contents rail on the left, one reading column; diagrams are bordered boards that scroll sideways on their own. */
+:root {
+  --bg: #f6f7f8;
+  --surface: #ffffff;
+  --sunk: #eceff1;
+  --fg: #16202a;
+  --muted: #5a6875;
+  --line: #d5dbe0;
+  --accent: #1f6f8b;
+  --accent-soft: #d9ebf1;
+  --store: #6b4fa0;
+  --store-soft: #ebe5f5;
+  --ok: #2c7a3f;
+  --ok-soft: #dcefe0;
+  --no: #b3361f;
+  --no-soft: #f6dfd9;
+  --warn: #8a5a00;
+  --warn-soft: #f5ead0;
+  --font-body: "Instrument Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11171c; --surface: #182129; --sunk: #0d1216; --fg: #e3e9ee; --muted: #93a2ae;
+    --line: #2b3843; --accent: #5fb4d1; --accent-soft: #173341; --store: #b29ae0; --store-soft: #2a2140;
+    --ok: #6cc583; --ok-soft: #173322; --no: #ef8a73; --no-soft: #3d1d16; --warn: #e0b456; --warn-soft: #362a10;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11171c; --surface: #182129; --sunk: #0d1216; --fg: #e3e9ee; --muted: #93a2ae;
+  --line: #2b3843; --accent: #5fb4d1; --accent-soft: #173341; --store: #b29ae0; --store-soft: #2a2140;
+  --ok: #6cc583; --ok-soft: #173322; --no: #ef8a73; --no-soft: #3d1d16; --warn: #e0b456; --warn-soft: #362a10;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 var(--font-body);
+  padding-inline: 16px;
+}
+.page {
+  max-width: 1180px; margin: 0 auto; padding-block: 40px 80px;
+  display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 48px;
+}
+@media (max-width: 860px) { .page { grid-template-columns: minmax(0, 1fr); gap: 24px; } nav.toc { position: static !important; } }
+
+nav.toc { position: sticky; top: 24px; align-self: start; font-size: 14px; }
+nav.toc .brand { font-family: var(--font-mono); font-size: 13px; color: var(--accent); margin-bottom: 14px; }
+nav.toc ol { list-style: none; padding: 0; margin: 0; display: grid; gap: 2px; }
+nav.toc a { display: block; padding: 5px 10px; border-radius: 6px; color: var(--muted); text-decoration: none; }
+nav.toc a:hover, nav.toc a:focus-visible { background: var(--sunk); color: var(--fg); outline: none; }
+nav.toc .num { font-family: var(--font-mono); font-size: 12px; margin-right: 6px; color: var(--accent); }
+
+main { min-width: 0; }
+header.hero { padding-bottom: 28px; border-bottom: 1px solid var(--line); margin-bottom: 8px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { font-size: clamp(30px, 4.4vw, 44px); line-height: 1.1; margin: 10px 0 14px; letter-spacing: -0.02em; text-wrap: balance; }
+h2 { font-size: 27px; line-height: 1.2; margin: 0 0 6px; letter-spacing: -0.01em; text-wrap: balance; }
+h3 { font-size: 18px; margin: 34px 0 10px; text-wrap: balance; }
+h4 { font-size: 15px; margin: 0 0 6px; }
+p, li { max-width: 68ch; }
+p { margin: 0 0 14px; }
+.lede { font-size: 18px; color: var(--muted); max-width: 64ch; }
+section { padding-top: 56px; scroll-margin-top: 16px; }
+.sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 14px; flex-wrap: wrap; }
+.sec-num { font-family: var(--font-mono); font-size: 14px; color: var(--accent); }
+code, .mono { font-family: var(--font-mono); font-size: .86em; }
+:not(pre) > code { background: var(--sunk); padding: 1px 5px; border-radius: 4px; }
+a { color: var(--accent); }
+
+.board { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin: 18px 0 22px; overflow-x: auto; }
+.board-cap { font-family: var(--font-mono); font-size: 12px; color: var(--muted); margin-bottom: 14px; letter-spacing: .04em; text-transform: uppercase; }
+
+/* layer stack */
+.stack { display: grid; gap: 10px; min-width: 620px; }
+.stack-row { display: grid; grid-template-columns: 150px 1fr; gap: 14px; align-items: stretch; }
+.stack-label { font-family: var(--font-mono); font-size: 12px; color: var(--muted); padding-top: 10px; }
+.boxes { display: flex; gap: 8px; flex-wrap: wrap; }
+.box { border: 1px solid var(--line); background: var(--bg); border-radius: 7px; padding: 8px 12px; font-size: 14px; flex: 1 1 140px; }
+.box b { display: block; font-size: 14px; }
+.box span { font-size: 12.5px; color: var(--muted); }
+.box.accent { border-color: var(--accent); background: var(--accent-soft); }
+.box.store { border-color: var(--store); background: var(--store-soft); }
+.box.dashed { border-style: dashed; }
+.arrow-down { text-align: center; color: var(--muted); font-family: var(--font-mono); font-size: 12px; margin-left: 164px; }
+
+/* pipeline */
+.pipeline { list-style: none; margin: 0; padding: 0; counter-reset: step; display: grid; gap: 0; }
+.pipeline > li { position: relative; padding: 0 0 22px 52px; max-width: none; }
+.pipeline > li::before {
+  counter-increment: step; content: counter(step);
+  position: absolute; left: 0; top: 0; width: 32px; height: 32px; border-radius: 50%;
+  display: grid; place-items: center; font-family: var(--font-mono); font-size: 13px;
+  background: var(--accent); color: var(--surface); font-weight: 500;
+}
+.pipeline > li::after { content: ""; position: absolute; left: 15.5px; top: 34px; bottom: 2px; width: 1px; background: var(--line); }
+.pipeline > li:last-child::after { display: none; }
+.pipeline h4 { padding-top: 5px; font-size: 16px; }
+.pipeline .where { font-family: var(--font-mono); font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.pipeline p, .pipeline ul { font-size: 15px; }
+.pipeline ul { margin: 4px 0 0; padding-left: 18px; }
+.pipeline li li { margin-bottom: 3px; }
+.tag { display: inline-block; font-family: var(--font-mono); font-size: 11px; padding: 1px 7px; border-radius: 99px; vertical-align: 2px; margin-left: 6px; }
+.tag.db { background: var(--store-soft); color: var(--store); }
+.tag.io { background: var(--accent-soft); color: var(--accent); }
+.tag.async { background: var(--warn-soft); color: var(--warn); }
+
+/* tables */
+.tbl-wrap { overflow-x: auto; margin: 14px 0 20px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); background: var(--sunk); }
+td code { white-space: nowrap; }
+.chip { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 99px; white-space: nowrap; }
+.chip.y { background: var(--ok-soft); color: var(--ok); }
+.chip.n { background: var(--no-soft); color: var(--no); }
+.chip.c { background: var(--warn-soft); color: var(--warn); }
+
+/* cards grid */
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin: 16px 0 22px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; min-width: 0; }
+.card p { font-size: 14.5px; margin-bottom: 0; }
+.card .k { font-family: var(--font-mono); font-size: 12px; color: var(--accent); margin-bottom: 4px; }
+.card.gap { border-color: var(--warn); }
+.card.gap .k { color: var(--warn); }
+
+pre {
+  background: var(--sunk); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px;
+  font: 13px/1.55 var(--font-mono); overflow-x: auto; margin: 12px 0 18px; color: var(--fg);
+}
+pre .c { color: var(--muted); }
+pre .h { color: var(--accent); }
+pre .s { color: var(--store); }
+
+.callout { border-left: 3px solid var(--accent); background: var(--accent-soft); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 16px 0; font-size: 15px; }
+.callout.warn { border-color: var(--warn); background: var(--warn-soft); }
+.callout p:last-child { margin-bottom: 0; }
+
+
+/* where-it-lives: stores as zones with sample rows */
+.estate { display: grid; grid-template-columns: minmax(0, 1fr) 250px; gap: 14px; margin: 16px 0 12px; }
+@media (max-width: 980px) { .estate { grid-template-columns: minmax(0, 1fr); } }
+.zone { border-radius: 12px; padding: 16px; min-width: 0; border: 1.5px solid; }
+.zone-pg { border-color: var(--store); background: var(--store-soft); }
+.zone-s3 { border-color: var(--warn); background: var(--warn-soft); align-self: start; }
+.zone-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 12px; }
+.zone-kind { font-weight: 700; font-size: 17px; }
+.zone-pg .zone-kind { color: var(--store); }
+.zone-s3 .zone-kind { color: var(--warn); }
+.zone-sub { font-size: 13px; color: var(--muted); }
+.sub { background: var(--surface); border: 1px solid var(--line); border-radius: 9px; padding: 14px; min-width: 0; }
+.sub + .sub { margin-top: 12px; }
+.sub-derived { border: 1.5px dashed var(--accent); }
+.sub-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 4px; }
+.sub-title { font-weight: 600; font-size: 15px; }
+.sub-derived .sub-title { color: var(--accent); }
+.sub-note { font-size: 12.5px; color: var(--muted); }
+.mt-label { font-family: var(--font-mono); font-size: 12.5px; font-weight: 500; margin: 12px 0 5px; }
+.mt-meta { font-weight: 400; color: var(--muted); margin-left: 8px; }
+.mt-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 7px; }
+table.mt { font: 12px/1.45 var(--font-mono); width: 100%; }
+table.mt th, table.mt td { padding: 6px 10px; white-space: nowrap; }
+table.mt th { font: 600 11px/1.4 var(--font-mono); text-transform: none; letter-spacing: 0; }
+table.mt td.nil { color: var(--muted); font-style: italic; }
+table.mt td.txt { color: var(--muted); }
+table.mt td.vec { color: var(--accent); }
+table.mt td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.mt-foot { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
+.key { display: inline-block; font-family: var(--font-mono); font-size: 11.5px; padding: 0 6px; border-radius: 4px; border: 1px solid; white-space: nowrap; }
+.key.k1 { color: var(--store); border-color: var(--store); background: var(--store-soft); }
+.key.k2 { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.key.k3 { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+.key.kb { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+.obj { background: var(--surface); border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; }
+.obj-key { margin-bottom: 8px; }
+.obj dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; font-size: 13px; }
+.obj dt { color: var(--muted); font-family: var(--font-mono); font-size: 12px; }
+.obj dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.links { display: grid; gap: 6px; margin: 4px 0 8px; font-size: 13.5px; }
+.links > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.rel { color: var(--muted); }
+
+/* sync flow svg */
+svg text { font-family: var(--font-body); }
+.svg-wrap { min-width: 760px; }
+
+footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="page">
+
+<nav class="toc" aria-label="Contents">
+  <div class="brand">pinkass_kiss / design</div>
+  <ol>
+    <li><a href="#overview"><span class="num">00</span>System at a glance</a></li>
+    <li><a href="#trajectory"><span class="num">01</span>A document's trajectory</a></li>
+    <li><a href="#index"><span class="num">02</span>Semantic index integrity</a></li>
+    <li><a href="#permissions"><span class="num">03</span>Permissions</a></li>
+    <li><a href="#agents"><span class="num">04</span>Agentic retrieval tools</a></li>
+  </ol>
+</nav>
+
+<main>
+<header class="hero">
+  <div class="eyebrow">High-level design · branch qasper · Oct 2026</div>
+  <h1>pinkass_kiss: a lean knowledge base that serves context to agents</h1>
+  <p class="lede">Markdown files with OKF-style frontmatter, kept in a Postgres virtual filesystem. Every read and write passes through one service layer. A pgvector index is derived from the files, and agents explore the corpus with bounded <code>ls</code> / <code>grep</code> / <code>read</code> tools scoped to a manifest.</p>
+</header>
+
+<!-- ===================================================== 00 -->
+<section id="overview">
+  <div class="sec-head"><span class="sec-num">00</span><h2>System at a glance</h2></div>
+  <p>Data comes <b>in</b> through ingestion, lives in <b>storage</b> with a <b>derived index</b> beside it, and goes <b>out</b> through the service to the REST API and the agent tools. <code>kb.service</code> is the chokepoint: nothing outside it touches the DAL directly, so permission checks and index bookkeeping happen in one place.</p>
+
+  <div class="board">
+    <div class="board-cap">Layers and their modules</div>
+    <div class="stack">
+      <div class="stack-row">
+        <div class="stack-label">consumers</div>
+        <div class="boxes">
+          <div class="box"><b>Dev UI</b><span>/ui · vanilla JS</span></div>
+          <div class="box"><b>REST API</b><span>kb.api.app · FastAPI</span></div>
+          <div class="box"><b>Agent tools</b><span>kb.retrieval.agent_tools</span></div>
+          <div class="box"><b>CLI scripts</b><span>ingest_folder, reindex, load_qasper</span></div>
+        </div>
+      </div>
+      <div class="stack-row">
+        <div class="stack-label">in / out</div>
+        <div class="boxes">
+          <div class="box"><b>Ingest</b><span>plan_folder → materialize · processors</span></div>
+          <div class="box"><b>DCI retrieval</b><span>list_paths · search_lines · read_lines</span></div>
+          <div class="box"><b>Semantic retrieval</b><span>semantic_search, manifest-scoped</span></div>
+        </div>
+      </div>
+      <div class="stack-row">
+        <div class="stack-label">chokepoint</div>
+        <div class="boxes">
+          <div class="box accent"><b>kb.service</b><span>policy.check on every mutation · touched-id tracking · commit() → index sync · get_warnings</span></div>
+        </div>
+      </div>
+      <div class="stack-row">
+        <div class="stack-label">rules &amp; format</div>
+        <div class="boxes">
+          <div class="box"><b>kb.policy</b><span>pure permission matrix</span></div>
+          <div class="box"><b>kb.okf</b><span>advisory checks · virtual file rendering</span></div>
+        </div>
+      </div>
+      <div class="stack-row">
+        <div class="stack-label">storage</div>
+        <div class="boxes">
+          <div class="box store"><b>Postgres (canonical)</b><span>folders · files · manifests · manifest_members via kb.storage.dal</span></div>
+          <div class="box store"><b>Blob store</b><span>raw originals · S3 or local dir</span></div>
+          <div class="box store dashed"><b>pgvector (derived)</b><span>kb_chunks · upsertion_record, rebuildable</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card"><div class="k">canonical vs. derived</div><p>The <code>files</code> table is the source of truth. <code>kb_chunks</code> can be dropped and rebuilt from it at any time with <code>reindex_all</code>.</p></div>
+    <div class="card"><div class="k">current state only</div><p>No version history and no audit log. Deletes are soft (<code>deleted_at</code>) and cascade through folder subtrees.</p></div>
+    <div class="card"><div class="k">folders organise, files know</div><p>Folders carry title, description, tags, kind and lock only. All text lives in files, so a folder's description goes in a child such as <code>00-overview.md</code>.</p></div>
+    <div class="card"><div class="k">manifests scope agents</div><p>A manifest is a named list of files, folders and other manifests. Folder membership is resolved at read time, so new files under a member folder are included automatically.</p></div>
+  </div>
+</section>
+
+<!-- ===================================================== 01 -->
+<section id="trajectory">
+  <div class="sec-head"><span class="sec-num">01</span><h2>A document's trajectory</h2></div>
+  <p>Follow one upload, a folder <code>handbook/</code> holding <code>setup.md</code> and <code>policy.pdf</code>, from the browser to a searchable chunk. The whole ingest is a single database transaction: it either lands completely or not at all.</p>
+
+  <div class="board">
+    <ol class="pipeline">
+      <li>
+        <h4>Pick a folder in the UI</h4>
+        <div class="where">static/index.html · GET /ingest/extensions</div>
+        <p>The dev UI uses <code>&lt;input webkitdirectory&gt;</code>. It asks the API which extensions have a processor and drops hidden and unsupported files on the client, so they are never uploaded.</p>
+      </li>
+      <li>
+        <h4>Multipart upload</h4>
+        <div class="where">POST /ingest <span class="tag io">HTTP</span></div>
+        <p>The request carries <code>files[]</code> plus a parallel <code>paths[]</code> (relative paths, because multipart filenames lose directories), an optional <code>parent_id</code> and <code>tags[]</code>. A count mismatch is a 422.</p>
+      </li>
+      <li>
+        <h4>Validate and stage on disk</h4>
+        <div class="where">kb.ingest.upload.ingest_upload <span class="tag io">temp dir</span></div>
+        <ul>
+          <li>Paths must be relative, <code>/</code>-separated, free of <code>..</code>, and all under one top-level folder. Anything else raises <code>UploadError</code> (422).</li>
+          <li>Bytes are written into a temp dir that mirrors the tree, so processors stay path-based.</li>
+          <li>Each source is recorded as <code>upload:&lt;rel path&gt;</code>, not the temp path.</li>
+        </ul>
+      </li>
+      <li>
+        <h4>Plan: walk and convert, without touching the DB</h4>
+        <div class="where">kb.ingest.folder.plan_folder → processors registry</div>
+        <ul>
+          <li>Hidden entries and symlinks are ignored. The processor is chosen by lowercase extension.</li>
+          <li><b>Markdown</b> (<code>MarkdownProcessor</code>): content is stored verbatim with no frontmatter parsing. The title is the first <code># H1</code>, else the filename stem.</li>
+          <li><b>PDF</b> (<code>LoaderProcessor</code> + <code>PyMuPDF4LLMLoader</code>, or Docling when installed, which also covers .docx/.pptx/.html) is converted to markdown. Empty output counts as a failure.</li>
+          <li>Unsupported files go to <code>report.skipped</code> and processor errors to <code>report.failed</code>. Both are per file and never fatal.</li>
+          <li>The result is a <code>FolderPlan</code> of <code>PlannedNode(path, type, title, content, fields)</code>.</li>
+        </ul>
+      </li>
+      <li>
+        <h4>Keep the raw original (converted formats only)</h4>
+        <div class="where">kb.storage.blobs.put_original <span class="tag io">S3 / local</span></div>
+        <p>For processors with <code>retain_original</code> (the PDF loader, not markdown), the source bytes are stored content-addressed at <code>sha256/&lt;hex&gt;</code> in S3 (<code>BLOB_BUCKET</code>). The plan gets <code>blob_key</code>, <code>blob_size_bytes</code>, <code>blob_mime_type</code> and <code>blob_checksum</code>. Blobs are written before the DB commit, so a rollback can leave a harmless, deduplicated orphan.</p>
+      </li>
+      <li>
+        <h4>Materialize: plan becomes nodes</h4>
+        <div class="where">kb.ingest.plan.materialize → service.create_folder / create_file <span class="tag db">INSERT</span></div>
+        <ul>
+          <li>The root becomes a folder (title = top-level dir name). Ancestor directories the plan implies are created as plain folders only when something below them is created, so empty dirs get no node.</li>
+          <li>Every create goes through the service as actor <code>human</code>, so the policy runs a <code>CREATE_INSIDE</code> check on each parent.</li>
+          <li>The service records each new id in <code>session.info</code> as a touched id.</li>
+          <li>Postgres assigns ids with <code>gen_random_uuid()</code>. The file id doubles as the OKF frontmatter <code>id</code>.</li>
+        </ul>
+      </li>
+      <li>
+        <h4>Commit</h4>
+        <div class="where">service.commit(session, schedule=BackgroundTasks.add_task) <span class="tag db">COMMIT</span></div>
+        <p>One transaction for the whole folder. If it fails, nothing is created and the touched set is cleared. If it succeeds, the touched ids are handed to the indexer as a background task, and the HTTP response returns an <code>IngestReport</code> (root id, created ids, skipped, failed).</p>
+      </li>
+      <li>
+        <h4>Index (after the response)</h4>
+        <div class="where">semantic_index.indexer.index_files <span class="tag async">background</span></div>
+        <ul>
+          <li><code>FileNodeLoader</code> reads each active file in its own session.</li>
+          <li>The markdown body is split with <code>RecursiveCharacterTextSplitter</code> (markdown, 1500 chars / 200 overlap). Each chunk gets its heading path and virtual-file line range.</li>
+          <li>The text is embedded as <code>"&lt;title&gt; &gt; &lt;heading&gt;"</code> + chunk via Ollama <code>nomic-embed-text</code> (768d) and stored in <code>kb_chunks</code>.</li>
+        </ul>
+      </li>
+    </ol>
+  </div>
+
+  <h3>Where it ends up</h3>
+  <p>After the upload, the two documents live in three places. Matching coloured keys mark the same value appearing in more than one table: that is how the stores point at each other.</p>
+
+  <div class="estate">
+    <div class="zone zone-pg">
+      <div class="zone-head">
+        <span class="zone-kind">Postgres</span>
+        <span class="zone-sub">database <code>pinkas</code> · one instance holds both the canonical tables and the vector index</span>
+      </div>
+
+      <div class="sub">
+        <div class="sub-head"><span class="sub-title">Canonical tables</span><span class="sub-note">source of truth · written in the ingest transaction</span></div>
+
+        <div class="mt-label">folders</div>
+        <div class="mt-wrap"><table class="mt">
+          <thead><tr><th>id</th><th>parent_id</th><th>kind</th><th>agent_locked</th><th>title</th><th>deleted_at</th></tr></thead>
+          <tbody>
+            <tr><td><span class="key k1">a1f0…</span></td><td class="nil">NULL</td><td>manual</td><td>false</td><td>handbook</td><td class="nil">NULL</td></tr>
+          </tbody>
+        </table></div>
+
+        <div class="mt-label">files</div>
+        <div class="mt-wrap"><table class="mt">
+          <thead><tr><th>id</th><th>parent_id</th><th>title</th><th>tags</th><th>sources</th><th>content</th><th>blob_key</th></tr></thead>
+          <tbody>
+            <tr><td><span class="key k2">3f9c…</span></td><td><span class="key k1">a1f0…</span></td><td>Setup</td><td>{onboarding}</td><td>[{resource: "upload:handbook/setup.md"}]</td><td class="txt">"# Setup\n\nInstall the CLI…"</td><td class="nil">NULL</td></tr>
+            <tr><td><span class="key k3">7b2e…</span></td><td><span class="key k1">a1f0…</span></td><td>Leave policy</td><td>{onboarding}</td><td>[{resource: "upload:handbook/policy.pdf"}]</td><td class="txt">"# Leave policy\n\n## Scope…"</td><td><span class="key kb">sha256/9e1c…</span></td></tr>
+          </tbody>
+        </table></div>
+        <p class="mt-foot">Also here, untouched by ingest: <code>manifests</code> and <code>manifest_members</code>, which point at folder and file ids.</p>
+      </div>
+
+      <div class="sub sub-derived">
+        <div class="sub-head"><span class="sub-title">pgvector index</span><span class="sub-note">derived · written after commit · rebuildable with <code>reindex_all</code></span></div>
+
+        <div class="mt-label">kb_chunks <span class="mt-meta">HNSW cosine index on embedding</span></div>
+        <div class="mt-wrap"><table class="mt">
+          <thead><tr><th>langchain_id</th><th>file_id</th><th>heading</th><th>start_line</th><th>end_line</th><th>content</th><th>embedding</th></tr></thead>
+          <tbody>
+            <tr><td>c01…</td><td><span class="key k2">3f9c…</span></td><td>Setup</td><td class="num">10</td><td class="num">34</td><td class="txt">"Install the CLI…"</td><td class="vec">[0.021, −0.114, … ] 768d</td></tr>
+            <tr><td>c02…</td><td><span class="key k3">7b2e…</span></td><td>Leave policy &gt; Scope</td><td class="num">11</td><td class="num">40</td><td class="txt">"This policy covers…"</td><td class="vec">[−0.007, 0.090, … ] 768d</td></tr>
+            <tr><td>c03…</td><td><span class="key k3">7b2e…</span></td><td>Leave policy &gt; Requests</td><td class="num">37</td><td class="num">71</td><td class="txt">"Submit requests…"</td><td class="vec">[0.152, −0.031, … ] 768d</td></tr>
+          </tbody>
+        </table></div>
+
+        <div class="mt-label">upsertion_record <span class="mt-meta">LangChain record manager</span></div>
+        <div class="mt-wrap"><table class="mt">
+          <thead><tr><th>key</th><th>group_id</th><th>namespace</th><th>updated_at</th></tr></thead>
+          <tbody>
+            <tr><td>c01…</td><td><span class="key k2">3f9c…</span></td><td>kb_chunks/ollama:nomic-embed-text</td><td class="num">1.7914e9</td></tr>
+            <tr><td>c02…</td><td><span class="key k3">7b2e…</span></td><td>kb_chunks/ollama:nomic-embed-text</td><td class="num">1.7914e9</td></tr>
+            <tr><td>c03…</td><td><span class="key k3">7b2e…</span></td><td>kb_chunks/ollama:nomic-embed-text</td><td class="num">1.7914e9</td></tr>
+          </tbody>
+        </table></div>
+        <p class="mt-foot">The chunk id is derived from a hash of the chunk's text and metadata, so an unchanged chunk keeps its key and is skipped on the next run.</p>
+      </div>
+    </div>
+
+    <div class="zone zone-s3">
+      <div class="zone-head">
+        <span class="zone-kind">S3</span>
+        <span class="zone-sub"><code>$BLOB_BUCKET</code> / <code>$BLOB_PREFIX</code></span>
+      </div>
+      <div class="obj">
+        <div class="obj-key"><span class="key kb">sha256/9e1c…</span></div>
+        <dl>
+          <dt>bytes</dt><dd>original policy.pdf</dd>
+          <dt>size</dt><dd>412 KB</dd>
+          <dt>mime</dt><dd>application/pdf</dd>
+          <dt>checksum</dt><dd>sha256:9e1c…</dd>
+        </dl>
+      </div>
+      <p class="mt-foot">Only converted formats get an object. <code>setup.md</code> has none: its markdown is already the original. Same bytes give the same key, so re-uploads share one object. Download with <code>GET /nodes/{id}/raw</code>.</p>
+      <p class="mt-foot">Without <code>BLOB_BUCKET</code>, originals are not kept. For local dev, point <code>BLOB_ENDPOINT_URL</code> at MinIO.</p>
+    </div>
+  </div>
+
+  <div class="links">
+    <div><span class="key k1">folders.id</span><span class="rel">← <code>files.parent_id</code> · real FK, <code>ON DELETE RESTRICT</code> (deletes are soft anyway)</span></div>
+    <div><span class="key k2">files.id</span><span class="rel">← <code>kb_chunks.file_id</code> · real FK, <code>ON DELETE CASCADE</code>; also <code>upsertion_record.group_id</code> (plain text)</span></div>
+    <div><span class="key kb">files.blob_key</span><span class="rel">→ S3 object key · plain text, no DB constraint across stores</span></div>
+  </div>
+
+  <h3>The virtual file: one rendering, shared line numbers</h3>
+  <p>Agents never see raw columns. <code>kb.okf.render_virtual_file</code> renders each file as a frontmatter block (one <code>key: &lt;JSON&gt;</code> line per set field) followed by the body. Grep hits, <code>read_lines</code> ranges and semantic chunk line numbers all use these coordinates, so a hit from any tool can be opened with any other.</p>
+<pre><span class="c"> 1</span>  ---
+<span class="c"> 2</span>  <span class="h">id:</span> "3f9c…"
+<span class="c"> 3</span>  <span class="h">type:</span> "file"
+<span class="c"> 4</span>  <span class="h">kind:</span> "manual"
+<span class="c"> 5</span>  <span class="h">title:</span> "Setup"
+<span class="c"> 6</span>  <span class="h">status:</span> "draft"
+<span class="c"> 7</span>  <span class="h">tags:</span> ["onboarding"]
+<span class="c"> 8</span>  <span class="h">sources:</span> [{"resource": "upload:handbook/setup.md"}]
+<span class="c"> 9</span>  ---
+<span class="c">10</span>  <span class="s"># Setup</span>                 <span class="c">← body line 1 = virtual line 1 + body_line_offset (9)</span>
+<span class="c">11</span>
+<span class="c">12</span>  Install the CLI with …</pre>
+  <p>Only the body is embedded, so retagging a file never re-embeds it. Changing the rendering shifts every chunk's line numbers, so the format is pinned by golden tests and needs a reindex if it changes.</p>
+
+  <h3>After ingest: the rest of the lifecycle</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Operation</th><th>Route</th><th>Database effect</th><th>Index effect</th></tr></thead>
+    <tbody>
+      <tr><td>Edit content or metadata</td><td><code>PATCH /nodes/{id}</code></td><td>UPDATE; trigger bumps <code>updated_at</code></td><td>Re-index; only changed chunks are re-embedded</td></tr>
+      <tr><td>Move</td><td><code>POST /nodes/{id}/move</code></td><td><code>parent_id</code> changes; cycle check</td><td>None. Chunks store no paths</td></tr>
+      <tr><td>Delete</td><td><code>DELETE /nodes/{id}</code></td><td><code>deleted_at</code> set on the node and its whole subtree</td><td>Chunks of every soft-deleted file are removed</td></tr>
+      <tr><td>Restore</td><td><code>POST /nodes/{id}/restore</code></td><td>Clears <code>deleted_at</code> on that node only; parent must be active</td><td>Re-indexed</td></tr>
+      <tr><td>Manifest edits</td><td><code>/manifests/{id}/members</code></td><td>Membership rows</td><td>None. Scope is applied at query time</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ===================================================== 02 -->
+<section id="index">
+  <div class="sec-head"><span class="sec-num">02</span><h2>Semantic index integrity</h2></div>
+  <p>The goal: every active file with content has exactly its current chunks in <code>kb_chunks</code>, and nothing else does. Instead of reacting to specific events, the design reconciles. Every write records which ids it touched; after commit, the indexer looks at each of those ids in the database and makes the index match whatever it finds.</p>
+
+  <div class="board">
+    <div class="board-cap">Write → commit → reconcile</div>
+    <div class="svg-wrap">
+    <svg viewBox="0 0 900 250" width="100%" role="img" aria-label="Sync flow from service mutation to the vector index">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" style="fill: var(--muted)"/>
+        </marker>
+      </defs>
+      <g style="font-size:13px">
+        <rect x="10" y="30" width="170" height="74" rx="8" style="fill: var(--accent-soft); stroke: var(--accent)"/>
+        <text x="95" y="58" text-anchor="middle" style="fill: var(--fg); font-weight:600">service mutation</text>
+        <text x="95" y="78" text-anchor="middle" style="fill: var(--muted); font-size:12px">create · update · delete</text>
+        <text x="95" y="94" text-anchor="middle" style="fill: var(--muted); font-size:12px">restore · materialize</text>
+
+        <rect x="230" y="30" width="170" height="74" rx="8" style="fill: var(--surface); stroke: var(--line)"/>
+        <text x="315" y="58" text-anchor="middle" style="fill: var(--fg); font-weight:600">_touch(ids)</text>
+        <text x="315" y="78" text-anchor="middle" style="fill: var(--muted); font-size:12px">session.info set</text>
+        <text x="315" y="94" text-anchor="middle" style="fill: var(--muted); font-size:12px">+ cascade descendants</text>
+
+        <rect x="450" y="30" width="170" height="74" rx="8" style="fill: var(--store-soft); stroke: var(--store)"/>
+        <text x="535" y="58" text-anchor="middle" style="fill: var(--fg); font-weight:600">service.commit()</text>
+        <text x="535" y="78" text-anchor="middle" style="fill: var(--muted); font-size:12px">COMMIT first,</text>
+        <text x="535" y="94" text-anchor="middle" style="fill: var(--muted); font-size:12px">then hand off ids</text>
+
+        <rect x="670" y="30" width="220" height="74" rx="8" style="fill: var(--warn-soft); stroke: var(--warn)"/>
+        <text x="780" y="58" text-anchor="middle" style="fill: var(--fg); font-weight:600">index_files(ids)</text>
+        <text x="780" y="78" text-anchor="middle" style="fill: var(--muted); font-size:12px">sync, or BackgroundTask</text>
+        <text x="780" y="94" text-anchor="middle" style="fill: var(--muted); font-size:12px">own session, sees new state</text>
+
+        <line x1="180" y1="67" x2="226" y2="67" style="stroke: var(--muted)" marker-end="url(#ah)"/>
+        <line x1="400" y1="67" x2="446" y2="67" style="stroke: var(--muted)" marker-end="url(#ah)"/>
+        <line x1="620" y1="67" x2="666" y2="67" style="stroke: var(--muted)" marker-end="url(#ah)"/>
+
+        <path d="M535,104 L535,150 L315,150" style="fill:none; stroke: var(--no); stroke-dasharray: 4 3" marker-end="url(#ah)"/>
+        <text x="425" y="143" text-anchor="middle" style="fill: var(--no); font-size:12px">rollback → set cleared, nothing indexed</text>
+
+        <line x1="780" y1="104" x2="700" y2="176" style="stroke: var(--muted)" marker-end="url(#ah)"/>
+        <line x1="780" y1="104" x2="860" y2="176" style="stroke: var(--muted)" marker-end="url(#ah)"/>
+        <rect x="590" y="180" width="200" height="56" rx="8" style="fill: var(--ok-soft); stroke: var(--ok)"/>
+        <text x="690" y="203" text-anchor="middle" style="fill: var(--fg); font-weight:600">active file with content</text>
+        <text x="690" y="222" text-anchor="middle" style="fill: var(--muted); font-size:12px">index(cleanup="incremental")</text>
+        <rect x="800" y="180" width="90" height="56" rx="8" style="fill: var(--no-soft); stroke: var(--no)"/>
+        <text x="845" y="203" text-anchor="middle" style="fill: var(--fg); font-weight:600">anything else</text>
+        <text x="845" y="222" text-anchor="middle" style="fill: var(--muted); font-size:12px">unindex</text>
+      </g>
+    </svg>
+    </div>
+  </div>
+
+  <h3>The mechanisms that keep it complete</h3>
+  <div class="grid2">
+    <div class="card"><div class="k">1 · single write seam</div><p>Every mutation goes through <code>kb.service</code>, which records touched ids. Delete also records every descendant its cascade soft-deletes, so a folder delete unindexes the whole subtree.</p></div>
+    <div class="card"><div class="k">2 · commit before index</div><p>The indexer runs strictly after <code>COMMIT</code>, in its own session, so it always reads committed state. A failed commit or a rollback clears the touched set, so a write that never happened is never indexed.</p></div>
+    <div class="card"><div class="k">3 · ids, not events</div><p><code>index_files</code> takes any id and reconciles it. Active with content: index. Soft-deleted, missing, folder or blank: unindex. Reprocessing an id is always safe, so over-indexing costs nothing but time.</p></div>
+    <div class="card"><div class="k">4 · content hashes</div><p>LangChain's <code>SQLRecordManager</code> stores a hash per chunk. With <code>cleanup="incremental"</code>, unchanged chunks are skipped, new ones embedded, and stale ones for that file deleted.</p></div>
+    <div class="card"><div class="k">5 · one batch per file</div><p>Each file is indexed as a single batch (<code>batch_size=len(chunks)</code>). Incremental cleanup runs after every batch, so splitting a file across batches used to delete and re-embed its later chunks on every run. A regression test covers a 162-chunk file.</p></div>
+    <div class="card"><div class="k">6 · per-file isolation</div><p>A failure on one file is caught and listed in <code>IndexResult.failed</code>. The other files in the batch are still indexed.</p></div>
+    <div class="card"><div class="k">7 · DB-level backstop</div><p><code>kb_chunks.file_id</code> references <code>files</code> with <code>ON DELETE CASCADE</code>, so a hard delete can never leave orphan chunks pointing at a missing file.</p></div>
+    <div class="card"><div class="k">8 · full rebuild</div><p><code>reindex_all()</code> (<code>POST /index/reindex</code>, <code>scripts/reindex.py --all</code>) re-indexes every active file with full cleanup, removing any chunk this run did not confirm. A second run on an unchanged corpus skips everything.</p></div>
+  </div>
+
+  <h3>Scope is applied at query time, not stored on chunks</h3>
+  <p>Chunks hold only <code>file_id</code>, heading and line range. Paths, tags, status and manifest membership are resolved when a search runs and passed as a <code>file_id $in [...]</code> filter. Moves, retags and manifest edits therefore cannot leave the index out of date, because there is nothing about them in the index. Searches set <code>hnsw.iterative_scan=relaxed_order</code> so a narrow filter still returns <i>k</i> hits.</p>
+
+  <h3>Where a document can still go missing today</h3>
+  <p>The design repairs drift but does not yet detect it. These are the known gaps:</p>
+  <div class="grid2">
+    <div class="card gap"><div class="k">process dies after commit</div><p>The index task is an in-process <code>BackgroundTask</code>. If the server stops between commit and indexing, those ids are lost. Nothing is persisted to retry from.</p></div>
+    <div class="card gap"><div class="k">embeddings server down</div><p>Failures are logged, never raised, and never retried. The write succeeds and the file stays unindexed until the next edit or a reindex.</p></div>
+    <div class="card gap"><div class="k">bypassing the seam</div><p>Code that calls <code>session.commit()</code> directly, or runs with <code>KB_AUTO_INDEX=0</code>, commits without indexing.</p></div>
+    <div class="card gap"><div class="k">no drift detector</div><p>There is no index-status route that compares <code>files.updated_at</code> against the record manager, so drift is only fixed when someone runs a reindex.</p></div>
+  </div>
+  <div class="callout">
+    <p><b>Suggested closure:</b> write touched ids to an outbox table inside the same transaction and have a worker drain it with retries. Add a periodic reconcile that diffs active file ids and content hashes against <code>upsertion_record</code>, exposed as an index-status route. Both reuse <code>index_files</code> unchanged, since it already accepts any id.</p>
+  </div>
+</section>
+
+<!-- ===================================================== 03 -->
+<section id="permissions">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Permissions</h2></div>
+  <p>Rules live in <code>kb.policy</code>, a pure module with no session and no I/O. The service loads the node and its ancestors (nearest first) and calls <code>check(actor, action, node, ancestors)</code> before every mutation. A denial raises <code>PermissionDenied</code>, which the API maps to <b>403</b>. Reads are never restricted. There is no authentication yet: the actor is the string <code>"human"</code> or <code>"agent"</code>, and the API always uses <code>"human"</code>.</p>
+
+  <h3>Folder kinds</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Folder kind</th><th>View</th><th>Create inside, edit</th><th>Rename, move, delete</th><th>Agent: create inside, edit</th><th>Agent: rename, move, delete</th></tr></thead>
+    <tbody>
+      <tr><td><b>skeleton</b><br><span style="color:var(--muted);font-size:13px">fixed structure</span></td><td><span class="chip y">yes</span></td><td><span class="chip y">yes</span></td><td><span class="chip n">locked</span></td><td><span class="chip c">yes, unless agent-locked</span></td><td><span class="chip n">locked</span></td></tr>
+      <tr><td><b>manual</b><br><span style="color:var(--muted);font-size:13px">default</span></td><td><span class="chip y">yes</span></td><td><span class="chip y">yes</span></td><td><span class="chip y">yes</span></td><td><span class="chip c">yes, unless agent-locked</span></td><td><span class="chip c">yes, unless agent-locked</span></td></tr>
+      <tr><td><b>auto_updated</b><br><span style="color:var(--muted);font-size:13px">reserved for jobs</span></td><td><span class="chip y">yes</span></td><td><span class="chip n">locked</span></td><td><span class="chip n">locked</span></td><td><span class="chip n">locked</span></td><td><span class="chip n">locked</span></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Files</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>File situation</th><th>Human</th><th>Agent</th></tr></thead>
+    <tbody>
+      <tr><td><code>manual</code> file in a manual or skeleton folder</td><td><span class="chip y">edit, rename, move, delete</span></td><td><span class="chip c">same, unless the file or its own folder is agent-locked</span></td></tr>
+      <tr><td>File is <code>auto_updated</code>, or its folder is</td><td><span class="chip n">locked</span></td><td><span class="chip n">locked</span></td></tr>
+      <tr><td>Create something inside a file</td><td><span class="chip n">never</span></td><td><span class="chip n">never</span></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="grid2">
+    <div class="card"><div class="k">skeleton locks only itself</div><p>Its contents (manual sub-folders, files) can be renamed, moved and deleted freely. Deleting a manual folder cascades through skeletons inside it. To change a skeleton, first switch its kind to <code>manual</code> in a separate update.</p></div>
+    <div class="card"><div class="k">agent lock is not recursive</div><p><code>agent_locked</code> on a folder covers the folder and the files directly in it. Its sub-folders and everything below them stay open to agents. Agents also cannot create in, or move into, a locked folder.</p></div>
+    <div class="card"><div class="k">agents never change rules</div><p><code>SET_KIND</code> and <code>SET_AGENT_LOCK</code> are always denied for agents, so an agent cannot unlock its way past a restriction.</p></div>
+    <div class="card"><div class="k">auto_updated is reserved</div><p>It exists in the enums and the policy, but the service refuses to set it on create or update. Only the DAL can write it, which tests use to exercise the lock.</p></div>
+  </div>
+
+  <h3>How the service composes checks per operation</h3>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Operation</th><th>Checks run</th></tr></thead>
+    <tbody>
+      <tr><td>Create</td><td><code>CREATE_INSIDE</code> on the parent, plus <code>SET_KIND</code> / <code>SET_AGENT_LOCK</code> on it when a non-default kind or lock is requested</td></tr>
+      <tr><td>Update</td><td>Per <b>changed</b> field: <code>title</code> → <code>RENAME</code>, <code>kind</code> → <code>SET_KIND</code>, <code>agent_locked</code> → <code>SET_AGENT_LOCK</code>, anything else → <code>EDIT</code>. Checks run against the current state.</td></tr>
+      <tr><td>Move</td><td><code>MOVE</code> on the node + <code>CREATE_INSIDE</code> on the destination. The DAL also rejects cycles (409).</td></tr>
+      <tr><td>Delete</td><td><code>DELETE</code> on the node</td></tr>
+      <tr><td>Restore</td><td><code>CREATE_INSIDE</code> on the parent, which must be active (else 422: restore the folder first)</td></tr>
+    </tbody>
+  </table></div>
+  <div class="callout warn"><p>Agents have no write tools yet. The <code>"agent"</code> branch is wired through the service and tested so that write tools can be added later without changing the rules.</p></div>
+</section>
+
+<!-- ===================================================== 04 -->
+<section id="agents">
+  <div class="sec-head"><span class="sec-num">04</span><h2>Agentic retrieval tools</h2></div>
+  <p>Agents don't get a retriever that picks passages for them. They explore the corpus the way a developer explores a repo, with bounded line-oriented primitives (direct corpus interaction, see <code>reference/paper.md</code>). <code>AgentTools(manifest_id)</code> exposes them as plain-text tools, and <code>as_langchain()</code> wraps them for LangChain or LangGraph.</p>
+
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Tool</th><th>Like</th><th>Signature (agent-facing)</th><th>Output</th></tr></thead>
+    <tbody>
+      <tr><td><code>list_paths</code></td><td><code>ls</code> / <code>find</code></td><td><code>(under=None, recursive=False)</code></td><td><code>path  [status]  description</code> per file, <code>path/</code> per folder</td></tr>
+      <tr><td><code>search_lines</code></td><td><code>grep -n</code></td><td><code>(pattern, ignore_case=True, files_only=False)</code></td><td><code>path:line:text</code>, or paths only</td></tr>
+      <tr><td><code>read_lines</code></td><td><code>sed -n</code></td><td><code>(path, offset=1, limit=50)</code></td><td>header <code>path (lines a-b of N)</code>, then numbered lines</td></tr>
+      <tr><td><code>semantic_search</code><br><span style="color:var(--muted);font-size:12px">opt-in</span></td><td>vector search</td><td><code>(query, k=5)</code></td><td><code>path:start-end [heading] (similarity)</code> + snippet</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Design rules every tool follows</h3>
+  <div class="grid2">
+    <div class="card"><div class="k">manifest is the boundary</div><p>Every call resolves the manifest to its node set first (folder members expand to their live subtree). A path outside it does not exist for the agent: <code>no such path in manifest</code>.</p></div>
+    <div class="card"><div class="k">paths are derived</div><p>Paths are <code>/</code>-joined titles from the KB root, computed at read time and never stored. Sibling title collisions get a <code>~&lt;8 hex of id&gt;</code> suffix. A raw uuid works anywhere a path does.</p></div>
+    <div class="card"><div class="k">bounded output</div><p>Every result is capped at 20,000 chars (max 50,000), cut at a line boundary with a <code>[truncated … — hint]</code> note that tells the model how to narrow the call.</p></div>
+    <div class="card"><div class="k">errors are text</div><p>A bad path, invalid regex or out-of-range argument returns <code>error: …</code> instead of raising, so the model can correct itself. If the index is down, <code>semantic_search</code> says so and points the model to <code>search_lines</code>.</p></div>
+    <div class="card"><div class="k">one coordinate system</div><p>Grep line numbers, <code>read_lines</code> offsets and semantic hit ranges all refer to the same virtual file, so any hit can be opened directly with <code>read_lines(path, offset=start_line)</code>.</p></div>
+    <div class="card"><div class="k">read-only, self-contained</div><p>Each call opens and closes its own session, so a tool object can outlive a transaction and run on the framework's threads. There are no write tools.</p></div>
+  </div>
+
+  <h3>A typical exploration</h3>
+<pre><span class="c"># illustrative trace: shapes are real, paths and text are made up
+# agent bound to AgentTools(manifest_id).as_langchain(include_semantic=True)</span>
+<span class="h">list_paths()</span>
+qasper/1909.00694/  Minimally supervised learning of affective events…
+qasper/1910.01363/  …
+
+<span class="h">semantic_search("how is the model evaluated?", k=3)</span>
+qasper/1909.00694/04-experiments.md:31-58 [Experiments &gt; Results] (0.71)
+    We trained the models with the ACP corpus and evaluated …
+-- read a hit in full with read_lines(path, offset=start_line)
+
+<span class="h">read_lines("qasper/1909.00694/04-experiments.md", offset=31, limit=30)</span>
+qasper/1909.00694/04-experiments.md (lines 31-60 of 112)
+31	### Results
+32	Table 2 shows accuracy on …
+
+<span class="h">search_lines("accuracy.*0\\.\\d+", files_only=True)</span>
+qasper/1909.00694/04-experiments.md
+qasper/1909.00694/tables/table-2.md</pre>
+  <p>Because tags, aliases and descriptions are part of the rendered frontmatter, <code>search_lines("role:method")</code> finds every method section the QASPER loader tagged, with no special filter API.</p>
+
+  <h3>Also reachable over HTTP</h3>
+  <p>The same service functions back <code>GET /manifests/{id}/paths</code>, <code>/search</code>, <code>/read</code> and <code>/semantic</code>, so an external agent runtime can use the tools without importing Python. The underlying DCI functions accept more than the agent wrapper exposes: several AND-ed patterns, <code>paths</code> restriction and <code>context</code> lines for search. Widening the agent signatures is a one-line change in <code>agent_tools.py</code>. The tool docstrings there are what the model reads, so tune tool wording there.</p>
+
+  <h3>Evaluation</h3>
+  <p>QASPER papers are loaded as one folder per paper mirroring its outline (numbered section files, <code>figures/</code>, <code>tables/</code>, a <code>00-overview.md</code>), with <code>role:*</code> tags on sections. <code>tests/eval/test_qasper_llm.py</code> runs a LangGraph agent bound to these tools and scores Answer-F1. Setting <code>QASPER_SEMANTIC=1</code> adds <code>semantic_search</code>, so the eval can show whether the vector index improves answers over grep and read alone. That comparison has not been run yet.</p>
+</section>
+
+<footer>Generated from the code on branch <code>qasper</code> (commit ad52b56). Source of truth: <code>src/kb/</code> and CLAUDE.md.</footer>
+</main>
+</div>
+</body>
+</html>

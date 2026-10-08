@@ -5,7 +5,7 @@ from kb.ingest.folder import FolderPlan, IngestReport, ingest_folder, plan_folde
 from kb.ingest.processors.converters import LoaderProcessor
 from kb.ingest.git import GitError, ingest_git_repo
 from kb.ingest.plan import PlannedNode, materialize
-from kb.ingest.upload import UploadError, ingest_upload
+from kb.ingest.upload import UploadError, UploadLimits, UploadTooLarge, ingest_upload
 
 __all__ = [
     "GitError",
@@ -17,6 +17,8 @@ __all__ = [
     "materialize",
     "plan_folder",
     "UploadError",
+    "UploadLimits",
+    "UploadTooLarge",
     "ingest_upload",
     "ProcessedDocument",
     "Processor",
