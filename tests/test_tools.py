@@ -395,3 +395,13 @@ def test_api_error_mapping(corpus):
     assert client.get(f"/manifests/{uuid.uuid4()}/paths").status_code == 404
     assert client.get(f"/manifests/{corpus.alpha}/read", params={"path": str(corpus.other)}).status_code == 404
     assert client.get(f"/manifests/{corpus.alpha}/read", params={"path": "x", "offset": 0}).status_code == 422
+
+
+def test_dev_ui_sanitizes_rendered_markdown():
+    # #18: marked keeps raw HTML, so document content must go through DOMPurify before innerHTML
+    from fastapi.testclient import TestClient
+
+    from kb.api import app
+
+    html = TestClient(app).get("/ui/").text
+    assert "dompurify" in html and "DOMPurify.sanitize(marked.parse(md)" in html

@@ -69,6 +69,7 @@
 <div id="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 <script>
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -172,9 +173,15 @@ function frontmatter(n) {
   return `---\n${lines.join('\n')}\n---`;
 }
 
+// http(s)/mailto/tel/relative links plus db:, so internal db://files/<id> links survive sanitizing
+const SAFE_URI = /^(?:(?:https?|mailto|tel|db):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
+
 function renderBrowse(n) {
   const md = n.content ?? '';
-  const html = window.marked ? marked.parse(md) : `<pre>${esc(md)}</pre>`;
+  // sanitized: ingested docs may carry <img onerror> etc. (#18); no libs -> escaped text, never raw HTML
+  const html = window.marked && window.DOMPurify
+    ? DOMPurify.sanitize(marked.parse(md), { ALLOWED_URI_REGEXP: SAFE_URI })
+    : `<pre>${esc(md)}</pre>`;
   $('#right').innerHTML = `${viewTabs(n.id)}
     ${n.deleted_at ? `<div class="warn">deleted ${n.deleted_at}</div>` : ''}
     ${n.warnings.map(w => `<div class="warn">⚠ ${esc(w)}</div>`).join('')}
