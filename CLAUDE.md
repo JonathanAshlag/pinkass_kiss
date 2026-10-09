@@ -15,7 +15,7 @@ this project" below for what was deliberately adopted, adapted, or skipped.
    Owns the virtual filesystem: folders and files (two tables), parent-child hierarchy, generic metadata,
    timestamps, soft delete, and "manifests" (curated per-agent file lists). Exposes
    clean primitives (`get_node`, `list_children`, `create_file`, `move_node`,
-   `delete_node`, `get_content`, `query_metadata`, plus manifest operations). Doesn't
+   `delete_node`, `query_metadata`, plus manifest operations). Doesn't
    interpret frontmatter *values* (tags/status/etc. stay opaque) and doesn't import
    `kb.okf` — the two layers are fully independent.
 
@@ -293,8 +293,7 @@ moved into a file). Folder moves take a global transaction-level advisory lock
 (`pg_advisory_xact_lock`) before the cycle check, so two crossing moves can't both pass
 it (#17); it's held until commit, so don't move folders inside long transactions. Creating or moving into a **deleted** folder is a `FieldError` (422):
 the node would be active but unreachable. `delete_node` (always cascades: the
-`cascade=false` option was removed because it left active children under a deleted folder), `restore_node`, `get_content`
-(None for folders), `query_metadata` (filter by tags/status/`node_type`/kind/parent_id;
+`cascade=false` option was removed because it left active children under a deleted folder), `restore_node`, `query_metadata` (filter by tags/status/`node_type`/kind/parent_id;
 a status filter yields files only). `FieldError` is a `ValueError` subclass → API 422.
 The DAL stays policy-unaware.
 

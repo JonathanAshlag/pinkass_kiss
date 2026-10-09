@@ -65,7 +65,7 @@ def gc_chunks(*, grace: timedelta | None = None, dry_run: bool = False, store=No
     with rm.engine.connect() as conn:
         groups = conn.execute(
             text(
-                "SELECT DISTINCT r.group_id FROM upsertion_record r"
+                "SELECT r.group_id FROM upsertion_record r"
                 " WHERE r.namespace = :ns AND r.group_id IS NOT NULL"
                 " GROUP BY r.group_id HAVING max(r.updated_at) < :cutoff"
                 " AND NOT EXISTS (SELECT 1 FROM files f WHERE f.id::text = r.group_id)"

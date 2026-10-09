@@ -169,7 +169,6 @@ def split_documents(
     *,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-    context_prefix: bool = True,
 ) -> list[Document]:
     """Markdown-aware split of loader documents into annotated chunks (see module
     docstring). Whitespace-only documents produce no chunks."""
@@ -186,5 +185,5 @@ def split_documents(
         paths = heading_paths(doc.page_content)
         for chunk in splitter.split_documents([doc]):
             annotated = annotate_chunk(chunk, doc.page_content, paths)
-            out.append(_with_context(annotated) if context_prefix else annotated)
+            out.append(_with_context(annotated))
     return out

@@ -19,7 +19,7 @@ line numbers `read_lines` takes. It needs the index stack (and an indexed corpus
 `as_langchain()` only includes it when asked (`include_semantic=True`).
 
 `as_langchain()` wraps the tools for LangChain/LangGraph; it needs `langchain-core`,
-which is not a runtime dependency (it comes with the `test` extra).
+which the core `langchain` dependency installs.
 """
 
 import uuid
