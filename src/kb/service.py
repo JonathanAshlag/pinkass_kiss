@@ -652,12 +652,6 @@ def index_files(file_ids, *, store=None, session_factory=None):
     return indexer.index_files(file_ids, store=store, session_factory=session_factory)
 
 
-def unindex_files(file_ids, *, store=None) -> int:
-    from kb.semantic_index import indexer
-
-    return indexer.unindex_files(file_ids, store=store)
-
-
 def reindex_all(*, store=None, session_factory=None):
     from kb.semantic_index import indexer
 

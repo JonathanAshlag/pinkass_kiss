@@ -184,16 +184,10 @@ def health():
 
 
 # --------------------------------------------------------------------------
-# Committing writes (kb.service.commit: all or nothing, index and S3 included)
+# Committing writes: routes call service.commit *now* (all or nothing across the DB,
+# the semantic index and S3), so the response reflects committed state and an
+# IndexingError (503) means nothing was written; get_session's own commit is then a no-op.
 # --------------------------------------------------------------------------
-
-
-def _commit(session: Session) -> None:
-    """Commit the request's writes *now*, all or nothing across the DB, the semantic
-    index and S3 (kb.service.commit): the response then reflects committed state, and an
-    IndexingError (503) means nothing was written. get_session's own commit is then a
-    harmless no-op."""
-    service.commit(session)
 
 
 def _read(session: Session, node) -> NodeRead:
@@ -220,7 +214,7 @@ def create_node(
         node = service.create_folder(session, **payload)
     else:
         node = service.create_file(session, **payload)
-    _commit(session)
+    service.commit(session)
     return _read(session, node)
 
 
@@ -285,14 +279,14 @@ def update_node(
     session: Session = Depends(get_session),
 ):
     node = service.update_node(session, node_id, **body.model_dump(exclude_unset=True))
-    _commit(session)
+    service.commit(session)
     return _read(session, node)
 
 
 @app.post("/nodes/{node_id}/move", response_model=NodeRead)
 def move_node(node_id: uuid.UUID, body: MoveRequest, session: Session = Depends(get_session)):
     node = service.move_node(session, node_id, body.new_parent_id)
-    _commit(session)
+    service.commit(session)
     return _read(session, node)
 
 
@@ -301,14 +295,14 @@ def restore_node(
     node_id: uuid.UUID, session: Session = Depends(get_session)
 ):
     node = service.restore_node(session, node_id)
-    _commit(session)
+    service.commit(session)
     return _read(session, node)
 
 
 @app.delete("/nodes/{node_id}", status_code=204, response_class=Response)
 def delete_node(node_id: uuid.UUID, session: Session = Depends(get_session)):
     service.delete_node(session, node_id)
-    _commit(session)
+    service.commit(session)
 
 
 @app.get("/nodes/{node_id}/children", response_model=list[NodeSummary])
@@ -326,7 +320,7 @@ def list_children(
 @app.post("/manifests", response_model=ManifestRead, status_code=201)
 def create_manifest(body: ManifestCreate, session: Session = Depends(get_session)):
     manifest = service.create_manifest(session, body.name, body.description)
-    _commit(session)
+    service.commit(session)
     return manifest
 
 
@@ -357,7 +351,7 @@ def add_manifest_member(
     service.add_manifest_member(
         session, manifest_id, node_id=body.node_id, child_manifest_id=body.child_manifest_id
     )
-    _commit(session)
+    service.commit(session)
     return Response(status_code=201)
 
 
@@ -371,7 +365,7 @@ def remove_manifest_member(
     service.remove_manifest_member(
         session, manifest_id, node_id=node_id, child_manifest_id=child_manifest_id
     )
-    _commit(session)
+    service.commit(session)
 
 
 @app.get("/manifests/{manifest_id}/resolve", response_model=list[NodeSummary])
@@ -504,7 +498,7 @@ def ingest(
         tags=tags,
         limits=UploadLimits.from_settings(),
     )
-    _commit(session)
+    service.commit(session)
     return IngestReportRead(
         root_id=report.root_id,
         files_created=report.files_created,

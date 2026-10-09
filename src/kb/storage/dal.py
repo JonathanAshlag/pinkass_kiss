@@ -232,15 +232,6 @@ def restore_node(session: Session, node_id: uuid.UUID) -> Node:
     return node
 
 
-def get_content(session: Session, node_id: uuid.UUID) -> str | None:
-    """
-    Returns a file's text content (None for folders and missing nodes). Retained
-    originals (`blob_key`) are served by `kb.service.get_original`, not here.
-    """
-    node = get_node(session, node_id)
-    return node.content if isinstance(node, File) else None
-
-
 def query_metadata(
     session: Session,
     *,
