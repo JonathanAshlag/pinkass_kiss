@@ -76,7 +76,7 @@ src/kb/
     indexer.py        stage_documents / reconcile / index_files / unindex_files / reindex_all
   retrieval/          data going out to agents
     dci.py            direct corpus interaction: list_paths / search_lines / read_lines
-                      (see reference/paper.md)
+                      (see docs/reference/paper.md)
     semantic.py       semantic_search over semantic_index, scoped by manifest
     agent_tools.py    AgentTools(manifest_id): both of the above as agent tools
   api/                REST surface (`uvicorn kb.api:app`); imports kb.service
