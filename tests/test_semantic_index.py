@@ -8,6 +8,7 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import DeterministicFakeEmbedding
 
 from kb.semantic_index.chunking import chunk_text, heading_paths, split_documents
+from kb.settings import get_settings
 
 
 def section(n: int, words: int = 120, tag: str = "") -> str:
@@ -80,21 +81,19 @@ def test_blank_doc_has_no_chunks():
     assert split_documents([doc_of("  \n\n ")]) == []
 
 
-def test_openai_compatible_server_embeddings(monkeypatch):
+def test_openai_compatible_server_embeddings(override_settings):
     from langchain_openai import OpenAIEmbeddings
 
     from kb.semantic_index.vectorstore import _init_embeddings
 
-    monkeypatch.setenv("EMBEDDINGS_BASE_URL", "http://tei:8080/v1")
-    monkeypatch.delenv("EMBEDDINGS_API_KEY", raising=False)
-    monkeypatch.delenv("EMBEDDINGS_BATCH_SIZE", raising=False)
+    override_settings(embeddings_base_url="http://tei:8080/v1", embeddings_api_key=None, embeddings_batch_size=32)
     emb = _init_embeddings("openai:nomic-ai/nomic-embed-text-v1.5")
     assert isinstance(emb, OpenAIEmbeddings)
     assert (emb.model, emb.openai_api_base) == ("nomic-ai/nomic-embed-text-v1.5", "http://tei:8080/v1")
     assert emb.check_embedding_ctx_length is False  # no tiktoken token ids sent to a non-OpenAI model
-    assert emb.chunk_size == 32  # TEI's default --max-client-batch-size
+    assert emb.chunk_size == 32
 
-    monkeypatch.setenv("EMBEDDINGS_BATCH_SIZE", "128")
+    override_settings(embeddings_batch_size=128)
     assert _init_embeddings("openai:m").chunk_size == 128
 
 
@@ -118,9 +117,9 @@ class FailingEmbedding(DeterministicFakeEmbedding):
 @pytest.fixture(scope="module")
 def store(migrated_db):
     from conftest import TEST_URL
-    from kb.semantic_index.vectorstore import EMBEDDING_DIM, build_index_store, set_index_store
+    from kb.semantic_index.vectorstore import build_index_store, set_index_store
 
-    s = build_index_store(database_url=TEST_URL, embeddings=DeterministicFakeEmbedding(size=EMBEDDING_DIM))
+    s = build_index_store(database_url=TEST_URL, embeddings=DeterministicFakeEmbedding(size=get_settings().embedding_dim))
     set_index_store(s)
     yield s
     set_index_store(None)
@@ -129,9 +128,9 @@ def store(migrated_db):
 @pytest.fixture(scope="module")
 def failing_store(migrated_db):
     from conftest import TEST_URL
-    from kb.semantic_index.vectorstore import EMBEDDING_DIM, build_index_store
+    from kb.semantic_index.vectorstore import build_index_store
 
-    return build_index_store(database_url=TEST_URL, embeddings=FailingEmbedding(size=EMBEDDING_DIM))
+    return build_index_store(database_url=TEST_URL, embeddings=FailingEmbedding(size=get_settings().embedding_dim))
 
 
 @pytest.fixture

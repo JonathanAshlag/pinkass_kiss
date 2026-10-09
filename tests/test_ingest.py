@@ -298,10 +298,10 @@ def pid_registry():
     return registry
 
 
-def test_cpu_bound_files_convert_in_worker_processes_in_order(tmp_path, monkeypatch):
+def test_cpu_bound_files_convert_in_worker_processes_in_order(tmp_path, override_settings):
     import os
 
-    monkeypatch.setenv("KB_INGEST_WORKERS", "2")
+    override_settings(ingest_workers=2)
     for i in range(6):
         write(tmp_path / f"{i}.pid", "")
     write(tmp_path / "a.md", "# md")
@@ -316,10 +316,10 @@ def test_cpu_bound_files_convert_in_worker_processes_in_order(tmp_path, monkeypa
     assert plan.failed == [(tmp_path.resolve() / "x.boom", "RuntimeError: bad input")]
 
 
-def test_one_worker_converts_in_process(tmp_path, monkeypatch):
+def test_one_worker_converts_in_process(tmp_path, override_settings):
     import os
 
-    monkeypatch.setenv("KB_INGEST_WORKERS", "1")
+    override_settings(ingest_workers=1)
     for i in range(3):
         write(tmp_path / f"{i}.pid", "")
 
@@ -328,13 +328,13 @@ def test_one_worker_converts_in_process(tmp_path, monkeypatch):
     assert {int(n.content) for n in plan.nodes[1:]} == {os.getpid()}
 
 
-def test_unpicklable_processor_runs_in_process(tmp_path, monkeypatch):
+def test_unpicklable_processor_runs_in_process(tmp_path, override_settings):
     import os
 
     class Local(PidProcessor):  # a local class can't be pickled
         pass
 
-    monkeypatch.setenv("KB_INGEST_WORKERS", "2")
+    override_settings(ingest_workers=2)
     registry = ProcessorRegistry()
     registry.register(Local())
     for i in range(3):
@@ -345,8 +345,8 @@ def test_unpicklable_processor_runs_in_process(tmp_path, monkeypatch):
     assert {int(n.content) for n in plan.nodes[1:]} == {os.getpid()}
 
 
-def test_crashed_worker_fails_the_plan_and_the_pool_recovers(tmp_path, monkeypatch):
-    monkeypatch.setenv("KB_INGEST_WORKERS", "2")
+def test_crashed_worker_fails_the_plan_and_the_pool_recovers(tmp_path, override_settings):
+    override_settings(ingest_workers=2)
     crash = tmp_path / "crash"
     write(crash / "a.pid", "")
     write(crash / "b.die", "")
@@ -614,19 +614,11 @@ def test_upload_limits_within_caps(db_session):
     assert len(report.files_created) == 2
 
 
-def test_upload_limits_from_env(monkeypatch):
+def test_upload_limits_from_settings(override_settings):
     from kb.ingest import UploadLimits
 
-    for name in ("MAX_FILES", "MAX_FILE_BYTES", "MAX_TOTAL_BYTES"):
-        monkeypatch.delenv(f"KB_UPLOAD_{name}", raising=False)
-    assert UploadLimits.from_env() == UploadLimits(**UploadLimits.DEFAULTS)
-
-    monkeypatch.setenv("KB_UPLOAD_MAX_FILES", "7")
-    monkeypatch.setenv("KB_UPLOAD_MAX_FILE_BYTES", "0")  # 0 = no cap
-    monkeypatch.setenv("KB_UPLOAD_MAX_TOTAL_BYTES", "")  # empty = default
-    assert UploadLimits.from_env() == UploadLimits(
-        max_files=7, max_file_bytes=None, max_total_bytes=UploadLimits.DEFAULTS["max_total_bytes"]
-    )
+    override_settings(upload_max_files=7, upload_max_file_bytes=None, upload_max_total_bytes=9)
+    assert UploadLimits.from_settings() == UploadLimits(max_files=7, max_file_bytes=None, max_total_bytes=9)
 
 
 @pytest.fixture
@@ -739,10 +731,10 @@ def test_raw_original_endpoint(client, db_session, tmp_path, blob_store):
         blobs.reset_blob_store()
 
 
-def test_health(client, blob_store, monkeypatch):
+def test_health(client, blob_store, override_settings):
     from kb.storage import blobs
 
-    monkeypatch.delenv("BLOB_REQUIRED", raising=False)
+    override_settings(blob_required=False)
     try:
         blobs.set_blob_store(blob_store)
         res = client.get("/health")
@@ -758,7 +750,7 @@ def test_health(client, blob_store, monkeypatch):
         blobs.reset_blob_store()
 
 
-def test_startup_fails_when_required_store_is_broken(blob_store, monkeypatch):
+def test_startup_fails_when_required_store_is_broken(blob_store, override_settings):
     from fastapi.testclient import TestClient
 
     from kb.api import app
@@ -766,12 +758,12 @@ def test_startup_fails_when_required_store_is_broken(blob_store, monkeypatch):
 
     try:
         blobs.set_blob_store(blobs.BlobStore("no-such-bucket", client=blob_store.client))
-        monkeypatch.setenv("BLOB_REQUIRED", "1")
+        override_settings(blob_required=True)
         with pytest.raises(blobs.BlobStoreError):
             with TestClient(app):  # entering runs the lifespan startup check
                 pass
 
-        monkeypatch.delenv("BLOB_REQUIRED")
+        override_settings(blob_required=False)
         with TestClient(app) as c:  # not required: logged, startup continues
             assert c.get("/ingest/extensions").status_code == 200
     finally:
@@ -818,20 +810,19 @@ def test_ingest_endpoint_rejects_collisions_and_creates_nothing(client, db_sessi
     assert "n" not in children_by_title(db_session, None)
 
 
-def test_ingest_endpoint_limits(client, db_session, monkeypatch):
+def test_ingest_endpoint_limits(client, db_session, override_settings):
     files = [("files", ("a.md", b"# A")), ("files", ("b.md", b"# B"))]
     data = {"paths": ["n/a.md", "n/b.md"]}
 
-    monkeypatch.setenv("KB_UPLOAD_MAX_FILES", "1")
+    override_settings(upload_max_files=1)
     res = client.post("/ingest", files=files, data=data)
     assert res.status_code == 413 and "limit" in res.json()["detail"]
 
-    monkeypatch.setenv("KB_UPLOAD_MAX_FILES", "")
-    monkeypatch.setenv("KB_UPLOAD_MAX_FILE_BYTES", "2")
+    override_settings(upload_max_files=500, upload_max_file_bytes=2)
     assert client.post("/ingest", files=files, data=data).status_code == 413
     assert "n" not in children_by_title(db_session, None)
 
-    monkeypatch.setenv("KB_UPLOAD_MAX_FILE_BYTES", "")
+    override_settings(upload_max_file_bytes=100 * 1024**2)
     res = client.post("/ingest", files=files + [("files", (".env", b"x"))], data={"paths": [*data["paths"], "n/.env"]})
     assert res.status_code == 201, res.text
     assert res.json()["skipped"] == ["n/.env"]

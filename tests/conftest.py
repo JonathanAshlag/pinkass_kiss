@@ -142,3 +142,15 @@ def blob_store(monkeypatch):
         client = boto3.client("s3")
         client.create_bucket(Bucket="bkt")
         yield BlobStore("bkt", prefix="kb/", client=client)
+
+
+@pytest.fixture
+def override_settings():
+    """`override_settings(ingest_workers=1, ...)` swaps kb.settings for this test only."""
+    import dataclasses
+
+    from kb import settings
+
+    original = settings.get_settings()
+    yield lambda **changes: settings.set_settings(dataclasses.replace(settings.get_settings(), **changes))
+    settings.set_settings(original)

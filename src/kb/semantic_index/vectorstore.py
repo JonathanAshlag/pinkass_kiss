@@ -4,7 +4,7 @@ migration 0002, never by this module) plus a SQLRecordManager over `upsertion_re
 Nothing here connects at import time; `get_index_store()` builds lazily and caches.
 Does not import `kb.storage.dal` / `kb.service`.
 
-Env vars:
+Settings (kb.settings, from env vars):
 - `DATABASE_URL`      -- same `postgresql+psycopg://...` URL as the rest of the app. The
                          vector store uses it through an *async* SQLAlchemy engine
                          (psycopg3 async); the record manager through a sync one.
@@ -21,6 +21,7 @@ Env vars:
                          default `--max-client-batch-size`) caps inputs per request.
 - `EMBEDDING_DIM`     -- vector size, default 768. Must match `kb_chunks.embedding`
                          (the migration reads the same var when it creates the table).
+                         Read it as `get_settings().embedding_dim`.
 
 Verified facts (langchain-postgres 0.0.18, langchain-classic 1.0.8, langchain-core 1.6):
 
@@ -60,7 +61,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import threading
 import uuid
 from dataclasses import dataclass
@@ -70,10 +70,10 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.indexing import RecordManager
 from langchain_core.vectorstores import VectorStore
 
+from kb.settings import get_settings
+
 CHUNKS_TABLE = "kb_chunks"
 METADATA_COLUMNS = ["file_id", "heading", "start_line", "end_line"]
-EMBEDDING_DIM: int = int(os.environ.get("EMBEDDING_DIM", "768"))
-DEFAULT_EMBEDDINGS_MODEL = "ollama:nomic-embed-text"
 
 _CHUNK_ID_NAMESPACE = uuid.UUID("6f1d7c62-3a0e-4b8e-9a51-0b6c1f6a9e21")
 
@@ -97,27 +97,24 @@ class IndexStore:
     embeddings: Embeddings
 
 
-def _embeddings_model() -> str:
-    return os.environ.get("EMBEDDINGS_MODEL") or DEFAULT_EMBEDDINGS_MODEL
-
-
 def _init_embeddings(model: str) -> Embeddings:
+    settings = get_settings()
     if model == "fake":
         from langchain_core.embeddings import DeterministicFakeEmbedding
 
-        return DeterministicFakeEmbedding(size=EMBEDDING_DIM)
-    base_url = os.environ.get("EMBEDDINGS_BASE_URL", "").strip()
+        return DeterministicFakeEmbedding(size=settings.embedding_dim)
+    base_url = settings.embeddings_base_url
     if base_url and model.startswith("openai:"):
         from langchain_openai import OpenAIEmbeddings
 
         return OpenAIEmbeddings(
             model=model.removeprefix("openai:"),
             base_url=base_url,
-            api_key=os.environ.get("EMBEDDINGS_API_KEY") or "unused",
+            api_key=settings.embeddings_api_key or "unused",
             # Off: it pre-tokenizes with OpenAI's tiktoken and sends token ids, which is
             # wrong for any other model's tokenizer. The server tokenizes the text itself.
             check_embedding_ctx_length=False,
-            chunk_size=int(os.environ.get("EMBEDDINGS_BATCH_SIZE") or 32),
+            chunk_size=settings.embeddings_batch_size,
         )
     from langchain.embeddings import init_embeddings
 
@@ -155,7 +152,7 @@ def build_index_store(
         from kb.storage.db import get_database_url
 
         database_url = get_database_url()
-    model = _embeddings_model()
+    model = get_settings().embeddings_model
     if embeddings is None:
         embeddings = _init_embeddings(model)
     if namespace is None:
@@ -179,7 +176,7 @@ _lock = threading.Lock()
 
 
 def get_index_store() -> IndexStore:
-    """The process-wide IndexStore, built on first use from env config."""
+    """The process-wide IndexStore, built on first use from kb.settings."""
     global _store
     if _store is None:
         with _lock:

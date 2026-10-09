@@ -18,7 +18,6 @@ set it to match the pod's CPU/memory limits.
 
 import logging
 import multiprocessing
-import os
 import pickle
 import threading
 from concurrent.futures import Future, ProcessPoolExecutor
@@ -26,21 +25,16 @@ from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 from kb.ingest.processors.base import ProcessedDocument, Processor
+from kb.settings import get_settings
 
 log = logging.getLogger(__name__)
-
-DEFAULT_MAX_WORKERS = 4
 
 _pool: ProcessPoolExecutor | None = None
 _pool_lock = threading.Lock()
 
 
 def max_workers() -> int:
-    value = os.environ.get("KB_INGEST_WORKERS", "").strip()
-    if value:
-        return max(1, int(value))
-    cpus = getattr(os, "process_cpu_count", os.cpu_count)() or 1  # process_cpu_count: 3.13+
-    return min(DEFAULT_MAX_WORKERS, cpus)
+    return get_settings().ingest_workers
 
 
 def _get_pool() -> ProcessPoolExecutor:

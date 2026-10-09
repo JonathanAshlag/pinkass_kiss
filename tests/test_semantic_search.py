@@ -24,15 +24,16 @@ pytest.importorskip("langchain_postgres")
 
 from langchain_core.documents import Document  # noqa: E402
 from langchain_core.embeddings import DeterministicFakeEmbedding  # noqa: E402
+from kb.settings import get_settings  # noqa: E402
 
 
 @pytest.fixture(scope="module")
 def store(migrated_db):
-    from kb.semantic_index.vectorstore import EMBEDDING_DIM, build_index_store, set_index_store
+    from kb.semantic_index.vectorstore import build_index_store, set_index_store
 
     s = build_index_store(
         database_url=os.environ["TEST_DATABASE_URL"],
-        embeddings=DeterministicFakeEmbedding(size=EMBEDDING_DIM),
+        embeddings=DeterministicFakeEmbedding(size=get_settings().embedding_dim),
         namespace=f"kb_chunks/test-search-{uuid.uuid4().hex[:8]}",
     )
     set_index_store(s)

@@ -18,15 +18,13 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, text
 
+from kb.settings import get_settings
 from kb.storage.blobs import ORIGINALS_PREFIX, BlobStore
 from kb.storage.db import SessionLocal
 from kb.storage.models import File
 
 log = logging.getLogger(__name__)
 
-ORIGINALS_GRACE = timedelta(hours=24)
-# Chunks are embedded before their rows exist, so this must outlast the longest ingest (#21).
-CHUNKS_GRACE = timedelta(hours=24)
 
 
 @dataclass
@@ -37,11 +35,11 @@ class GcResult:
 
 
 def gc_originals(
-    store: BlobStore, *, grace: timedelta = ORIGINALS_GRACE, dry_run: bool = False, now: datetime | None = None
+    store: BlobStore, *, grace: timedelta | None = None, dry_run: bool = False, now: datetime | None = None
 ) -> list[str]:
     """Deletes `originals/...` objects older than `grace` that no `files` row (deleted
     ones included: restoring a file must find its original) references."""
-    cutoff = (now or datetime.now(timezone.utc)) - grace
+    cutoff = (now or datetime.now(timezone.utc)) - (get_settings().gc_grace if grace is None else grace)
     old = [key for key, modified in store.list_originals() if modified < cutoff]
     if not old:
         return []
@@ -53,7 +51,7 @@ def gc_originals(
     return orphans
 
 
-def gc_chunks(*, grace: timedelta = CHUNKS_GRACE, dry_run: bool = False, store=None) -> tuple[list[uuid.UUID], int]:
+def gc_chunks(*, grace: timedelta | None = None, dry_run: bool = False, store=None) -> tuple[list[uuid.UUID], int]:
     """Unindexes record-manager groups (files) last written more than `grace` ago that
     have no `files` row: chunks staged by a write that never committed. Returns (file
     ids, chunks removed). Soft-deleted files keep their chunks here (search excludes
@@ -63,7 +61,7 @@ def gc_chunks(*, grace: timedelta = CHUNKS_GRACE, dry_run: bool = False, store=N
 
     store = store or get_index_store()
     rm = store.record_manager
-    cutoff = rm.get_time() - grace.total_seconds()
+    cutoff = rm.get_time() - (get_settings().gc_grace if grace is None else grace).total_seconds()
     with rm.engine.connect() as conn:
         groups = conn.execute(
             text(

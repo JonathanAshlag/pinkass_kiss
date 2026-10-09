@@ -11,8 +11,8 @@ a failed write deletes them (kb.service), and `scripts/gc.py` sweeps what a cras
 
 Independent of the DB layers: never imports kb.service / kb.storage.dal.
 
-Production notes: the client gets short timeouts and standard retries (env-tunable, see
-`_store_from_env`); `check()` verifies bucket + permissions (`head_bucket`, which needs
+Production notes: the client gets short timeouts and standard retries (tunable via
+kb.settings); `check()` verifies bucket + permissions (`head_bucket`, which needs
 `s3:ListBucket` -- the same permission that makes a missing key a 404 rather than a 403);
 `BLOB_REQUIRED=1` turns "no store configured" / "check failed" into a startup error.
 Every S3 failure other than a missing key surfaces as `BlobStoreError`.
@@ -22,7 +22,6 @@ import base64
 import hashlib
 import logging
 import mimetypes
-import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,13 +30,9 @@ from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-log = logging.getLogger(__name__)
+from kb.settings import get_settings
 
-# Client defaults; env overrides in _store_from_env. Worst case per call is roughly
-# max_attempts * (connect + read) instead of botocore's 60 s + 60 s per attempt.
-CONNECT_TIMEOUT = 5.0
-READ_TIMEOUT = 30.0
-MAX_ATTEMPTS = 3
+log = logging.getLogger(__name__)
 
 # Only used when the platform's mimetypes table lacks an entry.
 _MIME_FALLBACK = {
@@ -105,7 +100,8 @@ class BlobStoreError(Exception):
 class BlobStore:
     """Originals in an S3 bucket. `prefix` namespaces every key (e.g. "kb/");
     `endpoint_url` points at an S3-compatible service. Pass `client` to reuse/inject a
-    boto3 S3 client (used as-is: the timeout/retry arguments only apply to one built here)."""
+    boto3 S3 client (used as-is: the timeout/retry arguments only apply to one built here;
+    unset, they come from kb.settings)."""
 
     def __init__(
         self,
@@ -114,19 +110,20 @@ class BlobStore:
         prefix: str = "",
         endpoint_url: str | None = None,
         client: Any = None,
-        connect_timeout: float = CONNECT_TIMEOUT,
-        read_timeout: float = READ_TIMEOUT,
-        max_attempts: int = MAX_ATTEMPTS,
+        connect_timeout: float | None = None,
+        read_timeout: float | None = None,
+        max_attempts: int | None = None,
     ) -> None:
         if client is None:
             import boto3
             from botocore.config import Config
 
+            settings = get_settings()
             config = Config(
-                connect_timeout=connect_timeout,
-                read_timeout=read_timeout,
+                connect_timeout=connect_timeout or settings.blob_connect_timeout,
+                read_timeout=read_timeout or settings.blob_read_timeout,
                 # total_max_attempts counts the first try; botocore's max_attempts doesn't
-                retries={"mode": "standard", "total_max_attempts": max_attempts},
+                retries={"mode": "standard", "total_max_attempts": max_attempts or settings.blob_max_attempts},
             )
             client = boto3.client("s3", endpoint_url=endpoint_url, config=config)
         self.client = client
@@ -211,7 +208,7 @@ def _describe(exc: Exception) -> str:
 
 
 # --------------------------------------------------------------------------
-# The process-wide store (from env), overridable for tests
+# The process-wide store (from kb.settings), overridable for tests
 # --------------------------------------------------------------------------
 
 _UNSET: Any = object()
@@ -220,20 +217,13 @@ _store: BlobStore | None = _UNSET
 
 def blob_required() -> bool:
     """`BLOB_REQUIRED=1`: a missing or failing store is an error, not a warning (prod)."""
-    return os.environ.get("BLOB_REQUIRED", "").strip().lower() in ("1", "true", "yes")
+    return get_settings().blob_required
 
 
-def _store_from_env() -> BlobStore | None:
-    bucket = os.environ.get("BLOB_BUCKET")
-    if bucket:
-        return BlobStore(
-            bucket,
-            prefix=os.environ.get("BLOB_PREFIX", ""),
-            endpoint_url=os.environ.get("BLOB_ENDPOINT_URL") or None,
-            connect_timeout=float(os.environ.get("BLOB_CONNECT_TIMEOUT") or CONNECT_TIMEOUT),
-            read_timeout=float(os.environ.get("BLOB_READ_TIMEOUT") or READ_TIMEOUT),
-            max_attempts=int(os.environ.get("BLOB_MAX_ATTEMPTS") or MAX_ATTEMPTS),
-        )
+def _store_from_settings() -> BlobStore | None:
+    settings = get_settings()
+    if settings.blob_bucket:
+        return BlobStore(settings.blob_bucket, prefix=settings.blob_prefix, endpoint_url=settings.blob_endpoint_url)
     if blob_required():
         raise BlobStoreError("BLOB_REQUIRED is set but BLOB_BUCKET is not")
     log.warning("no BLOB_BUCKET set: original uploaded files are not retained")
@@ -241,12 +231,12 @@ def _store_from_env() -> BlobStore | None:
 
 
 def get_blob_store() -> BlobStore | None:
-    """The configured store, built once from env: `BLOB_BUCKET` (+ optional
+    """The configured store, built once from kb.settings: `BLOB_BUCKET` (+ optional
     `BLOB_ENDPOINT_URL`, `BLOB_PREFIX`, timeouts); None (originals aren't retained) if
     unset. Raises BlobStoreError if unset while `BLOB_REQUIRED` is."""
     global _store
     if _store is _UNSET:
-        _store = _store_from_env()
+        _store = _store_from_settings()
     return _store
 
 
@@ -257,7 +247,7 @@ def set_blob_store(store: BlobStore | None) -> None:
 
 
 def reset_blob_store() -> None:
-    """Forget the cached store, so the next `get_blob_store()` re-reads env."""
+    """Forget the cached store, so the next `get_blob_store()` re-reads the settings."""
     global _store
     _store = _UNSET
 
