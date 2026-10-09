@@ -696,8 +696,13 @@ def test_upload_pdf_keeps_original(db_session, tmp_path, blob_store):
     assert blob_store.get_original(node.blob_key).read() == data
 
 
-def test_raw_original_endpoint(client, db_session, tmp_path, blob_store):
+def test_raw_original_endpoint(client, db_session, tmp_path, blob_store, monkeypatch):
     from kb.storage import blobs
+
+    # The route closes its session before streaming (#36); here the session is shared with the
+    # test, so count the call instead of letting it roll back the test's data.
+    closed = []
+    monkeypatch.setattr(db_session, "close", lambda: closed.append(1))
 
     pdf = make_pdf(tmp_path / "papers" / "report.pdf")
     (tmp_path / "papers" / "notes.md").write_text("# Notes\n")
@@ -711,6 +716,7 @@ def test_raw_original_endpoint(client, db_session, tmp_path, blob_store):
         assert res.status_code == 200 and res.content == pdf.read_bytes()
         assert res.headers["content-type"] == "application/pdf"
         assert 'filename="report.pdf"' in res.headers["content-disposition"]
+        assert closed
         assert client.get(f"/nodes/{pdf_id}").json()["blob_mime_type"] == "application/pdf"
 
         # A non-Latin name (Latin-1-only headers used to make this a 500, #16).

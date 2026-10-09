@@ -262,6 +262,7 @@ def get_node(node_id: uuid.UUID, session: Session = Depends(get_session)):
 def get_node_raw(node_id: uuid.UUID, session: Session = Depends(get_session)):
     """The retained original (e.g. the uploaded PDF), 404 if the node has none."""
     original = service.get_original(session, node_id)
+    session.close()  # the download can take minutes; don't hold the pooled connection meanwhile (#36)
     if original is None:
         raise HTTPException(404, f"node {node_id} has no retained original")
     body, mime, filename = original
@@ -291,6 +292,7 @@ def update_node(
 @app.post("/nodes/{node_id}/move", response_model=NodeRead)
 def move_node(node_id: uuid.UUID, body: MoveRequest, session: Session = Depends(get_session)):
     node = service.move_node(session, node_id, body.new_parent_id)
+    _commit(session)
     return _read(session, node)
 
 
@@ -323,7 +325,9 @@ def list_children(
 
 @app.post("/manifests", response_model=ManifestRead, status_code=201)
 def create_manifest(body: ManifestCreate, session: Session = Depends(get_session)):
-    return service.create_manifest(session, body.name, body.description)
+    manifest = service.create_manifest(session, body.name, body.description)
+    _commit(session)
+    return manifest
 
 
 @app.get("/manifests", response_model=list[ManifestRead])
@@ -353,6 +357,7 @@ def add_manifest_member(
     service.add_manifest_member(
         session, manifest_id, node_id=body.node_id, child_manifest_id=body.child_manifest_id
     )
+    _commit(session)
     return Response(status_code=201)
 
 
@@ -366,6 +371,7 @@ def remove_manifest_member(
     service.remove_manifest_member(
         session, manifest_id, node_id=node_id, child_manifest_id=child_manifest_id
     )
+    _commit(session)
 
 
 @app.get("/manifests/{manifest_id}/resolve", response_model=list[NodeSummary])
