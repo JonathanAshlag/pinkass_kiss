@@ -516,6 +516,8 @@ def remove_manifest_member(
     node_id: uuid.UUID | None = None,
     child_manifest_id: uuid.UUID | None = None,
 ) -> None:
+    if (node_id is None) == (child_manifest_id is None):  # else the DAL query has no filter and deletes every member (#31)
+        raise FieldError("give exactly one of node_id / child_manifest_id")
     dal.remove_manifest_member(
         session, manifest_id, child_manifest_id=child_manifest_id, **_member_target(session, node_id)
     )

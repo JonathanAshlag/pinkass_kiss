@@ -267,3 +267,39 @@ def test_api_create_in_a_deleted_folder_is_422(client):
     assert client.delete(f"/nodes/{root['id']}").status_code == 204
     body = {"parent_id": root["id"], "title": "x", "content": "x"}
     assert client.post("/nodes", json=body).status_code == 422
+
+
+def test_remove_manifest_member_needs_exactly_one_target(client):
+    """#31: no params used to delete every member."""
+    folder = client.post("/nodes", json={"type": "folder", "title": name("api")}).json()
+    m = client.post("/manifests", json={"name": name("m")}).json()
+    assert client.post(f"/manifests/{m['id']}/members", json={"node_id": folder["id"]}).status_code == 201
+
+    url = f"/manifests/{m['id']}/members"
+    assert client.delete(url).status_code == 422
+    assert client.delete(url, params={"node_id": folder["id"], "child_manifest_id": m["id"]}).status_code == 422
+    assert len(client.get(url).json()) == 1
+    assert client.delete(url, params={"node_id": folder["id"]}).status_code == 204
+    assert client.get(url).json() == []
+
+
+def test_move_and_manifest_routes_commit_before_responding(client, monkeypatch):
+    """#34: a failing commit must not be hidden behind a 2xx."""
+    from kb import service
+
+    folder = client.post("/nodes", json={"type": "folder", "title": name("api")}).json()
+    dest = client.post("/nodes", json={"type": "folder", "title": name("dest")}).json()
+    m = client.post("/manifests", json={"name": name("m")}).json()
+
+    def boom(session):
+        raise service.IndexingError("boom")
+
+    monkeypatch.setattr(service, "commit", boom)
+    calls = [
+        lambda: client.post(f"/nodes/{folder['id']}/move", json={"new_parent_id": dest["id"]}),
+        lambda: client.post("/manifests", json={"name": name("m2")}),
+        lambda: client.post(f"/manifests/{m['id']}/members", json={"node_id": folder["id"]}),
+        lambda: client.delete(f"/manifests/{m['id']}/members", params={"node_id": folder["id"]}),
+    ]
+    for call in calls:
+        assert call().status_code == 503
