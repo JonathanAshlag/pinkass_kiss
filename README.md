@@ -113,5 +113,5 @@ src/kb/        the package (storage, okf, service, ingest, semantic_index, retri
 migrations/    Alembic migrations
 scripts/       ingest_folder.py, ingest_git.py, reindex.py, gc.py, seed_db.py, eval/load_qasper.py
 tests/         unit/integration suites; eval/ holds the QASPER suites and fixtures
-reference/     background paper on direct corpus interaction
+docs/reference/  background paper on direct corpus interaction
 ```

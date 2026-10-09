@@ -593,7 +593,7 @@ footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--line);
 <!-- ===================================================== 04 -->
 <section id="agents">
   <div class="sec-head"><span class="sec-num">04</span><h2>Agentic retrieval tools</h2></div>
-  <p>Agents don't get a retriever that picks passages for them. They explore the corpus the way a developer explores a repo, with bounded line-oriented primitives (direct corpus interaction, see <code>reference/paper.md</code>). <code>AgentTools(manifest_id)</code> exposes them as plain-text tools, and <code>as_langchain()</code> wraps them for LangChain or LangGraph.</p>
+  <p>Agents don't get a retriever that picks passages for them. They explore the corpus the way a developer explores a repo, with bounded line-oriented primitives (direct corpus interaction, see <code>docs/reference/paper.md</code>). <code>AgentTools(manifest_id)</code> exposes them as plain-text tools, and <code>as_langchain()</code> wraps them for LangChain or LangGraph.</p>
 
   <div class="tbl-wrap"><table>
     <thead><tr><th>Tool</th><th>Like</th><th>Signature (agent-facing)</th><th>Output</th></tr></thead>

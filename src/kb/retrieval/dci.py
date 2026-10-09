@@ -2,8 +2,8 @@
 Direct-corpus-interaction (DCI) tools: ls/grep/read-style access to the KB for agents.
 
 Instead of a retriever, an agent explores the corpus itself with three bounded,
-line-oriented primitives -- see reference/paper.md (direct corpus interaction) and
-reference/project-dci-analysis.md for the reasoning:
+line-oriented primitives -- see docs/reference/paper.md (direct corpus interaction) and
+docs/reference/project-dci-analysis.md for the reasoning:
 
 - `list_paths`   -- `ls` / `find`: enumerate nodes as paths
 - `search_lines` -- `grep -n` / `rg`: regex search, one hit per matching line
