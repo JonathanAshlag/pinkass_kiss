@@ -397,6 +397,23 @@ def test_search_pattern_table(session, corpus, pattern, ignore_case, expected):
     assert (out != "(no matches)") == expected
 
 
+def test_search_hebrew(session, corpus):
+    from kb import service
+    from kb.storage import dal
+
+    folder = dal.create_folder(session, parent_id=None, title="עברית")
+    dal.create_file(session, parent_id=folder.id, title="בדיקה", content="שורה ראשונה\nשלום עולם, 123\nסוף")
+    m = service.create_manifest(session, f"he-{uuid.uuid4().hex[:8]}")
+    service.add_manifest_member(session, m.id, node_id=folder.id)
+
+    hit = service.search_lines(session, m.id, r"\yעולם\y").text
+    assert hit.endswith(":5:שלום עולם, 123") or ":שלום עולם, 123" in hit
+    assert "עברית/בדיקה:" in hit  # Hebrew titles in paths
+    assert ":" in service.search_lines(session, m.id, r"^[א-ת]+ [א-ת]+").text
+    assert ":" in service.search_lines(session, m.id, r"^\w+ \w+, \d{3}$").text
+    assert service.search_lines(session, m.id, "עולם", paths=["עברית"], files_only=True).text == "עברית/בדיקה"
+
+
 def test_search_backspace_escape_is_rejected(session, corpus):
     from kb import service
 
