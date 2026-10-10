@@ -103,6 +103,10 @@ class AgentTools:
         def search_lines(pattern: str, ignore_case: bool = True, files_only: bool = False) -> str:
             """Regex search over all documents (like `grep -n`). Output: path:line:text.
 
+            Each line is matched on its own, with POSIX extended regex syntax (like
+            `grep -E`): `\\y` is the word boundary (`\\b` is rejected), and
+            there are no named groups or inline `(?i)`; use `ignore_case`.
+
             Use `files_only=True` to get just the matching paths, then `read_lines` them.
             """
             return self.search_lines(pattern, ignore_case, files_only)

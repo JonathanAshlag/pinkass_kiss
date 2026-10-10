@@ -167,7 +167,7 @@ attribute (`"file"` / `"folder"`), which the API exposes as `type`.
 | `generated` | nullable JSONB **object** (not array) — OKF's `{by, at}` provenance field, added alongside `verified`. `NULL` = no provenance recorded |
 | `stale_after` | nullable `timestamptz` — an absolute instant, not a relative TTL, matching OKF's semantics exactly; `kb.okf.is_stale(node)` compares it against now |
 | `status` (enum `draft`\|`stable`\|`deprecated`) | lifecycle field |
-| `content` | markdown body, NOT NULL. **Deferred** in the ORM (not in `SELECT files.*`-style loads; read lazily on access): bulk readers that need the text add `.options(undefer(File.content))` (`search_lines` in batches of `dci._CONTENT_BATCH`, `FileNodeLoader`, pre-commit staging). Reading it on a detached `File` raises `DetachedInstanceError` |
+| `content` | markdown body, NOT NULL. **Deferred** in the ORM (not in `SELECT files.*`-style loads; read lazily on access): bulk readers that need the text add `.options(undefer(File.content))` (`FileNodeLoader`, pre-commit staging; `search_lines` never loads it, Postgres reads it). Reading it on a detached `File` raises `DetachedInstanceError` |
 | `deleted_at` | soft delete, NULL = active |
 | `blob_key`, `blob_size_bytes`, `blob_mime_type`, `blob_checksum` | the retained original of a converted file (PDF, ...): per-file key `originals/<file id>` in the `kb.storage.blobs` store (no dedupe, by choice: undo can delete it without asking who else uses it), checksum `sha256:<hex>`. NULL for markdown nodes or when no blob store is configured |
 | `created_at`, `updated_at` | `updated_at` kept current by a DB trigger (`trg_files_set_updated_at` → `set_updated_at()`), not the ORM |
@@ -598,6 +598,22 @@ object), and settled after it:
   `options` on the app engine (`storage/db.py`), so a stuck write fails and is undone.
 - Ingest requests now include embedding time: raise the OpenShift router timeout
   (`deploy/openshift/route-timeout.yaml`). Upload limit defaults were left as they were.
+
+## `search_lines` regex runs in Postgres (`dci.py`)
+
+One SQL query per call: the targets' rendered frontmatter is passed in (`unnest` of ids +
+frontmatter), joined to `files.content`, split into numbered lines (`string_to_table`), and
+matched per line with `~`/`~*` (all patterns on one line). Context lines come from a window
+function; rows are ordered by path rank and streamed, stopping once `max_chars` is exceeded.
+Only hit/context lines leave Postgres, and no user regex runs in Python (#27, #32).
+
+- **Dialect is POSIX ARE, not Python `re`** (user's choice; the tool description says so).
+  `\b`/`\B` are rejected (`PatternError`) because in ARE they are a backspace and would
+  silently match nothing; use `\y`/`\Y`. No named groups or mid-pattern `(?i)` (Postgres errors, surfaced as
+  `PatternError` -> 422 / `error:` for agents).
+- Runs in a savepoint with `statement_timeout` = `dci._SEARCH_TIMEOUT_MS` (5 s) set locally and restored;
+  57014 -> `PatternError("pattern too slow")`, 2201B/54001 -> `invalid pattern`.
+- `\w`, `\d`, `~*` case folding follow the database's ctype: needs a UTF-8 locale DB (not `C`). Needs PG14+ (`string_to_table`).
 
 ## Agent tools (`src/kb/retrieval/agent_tools.py`)
 
