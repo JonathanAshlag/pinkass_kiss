@@ -359,18 +359,100 @@ def test_list_paths_loads_no_file_text(session, corpus, content_selects):
     assert content_selects == []
 
 
-def test_search_loads_file_text_in_batches(session, corpus, content_selects, monkeypatch):
+def test_search_loads_no_file_text_into_python(session, corpus):
+    from sqlalchemy import inspect
+
+    from kb import service
+    from kb.storage.models import File
+
+    assert "needle" in service.search_lines(session, corpus.all, "needle").text
+    assert all("content" in inspect(f).unloaded for f in session.identity_map.values() if isinstance(f, File))
+
+
+# --------------------------------------------------------------------------
+# the regex runs in Postgres (#27, #32)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "pattern, ignore_case, expected",
+    [
+        (r"^a deep", False, True),  # ^ anchors per line
+        (r"needle$", False, True),
+        (r"\yneedle\y", False, True),
+        (r"\yeedle", False, False),
+        (r"needle(?= in beta)", False, True),
+        (r"(?<=a )deep", False, True),
+        (r"NEEDLE", True, True),
+        (r"NEEDLE", False, True),  # notes.md has "NEEDLE shouting"
+        (r"n\wedle", False, True),
+        (r"ne{2}dle|zzz", False, True),
+        (r"\d{20}", False, False),
+    ],
+)
+def test_search_pattern_table(session, corpus, pattern, ignore_case, expected):
+    from kb import service
+
+    out = service.search_lines(session, corpus.all, pattern, ignore_case=ignore_case).text
+    assert (out != "(no matches)") == expected
+
+
+def test_search_hebrew(session, corpus):
+    from kb import service
+    from kb.storage import dal
+
+    folder = dal.create_folder(session, parent_id=None, title="עברית")
+    dal.create_file(session, parent_id=folder.id, title="בדיקה", content="שורה ראשונה\nשלום עולם, 123\nסוף")
+    m = service.create_manifest(session, f"he-{uuid.uuid4().hex[:8]}")
+    service.add_manifest_member(session, m.id, node_id=folder.id)
+
+    hit = service.search_lines(session, m.id, r"\yעולם\y").text
+    assert hit.endswith(":5:שלום עולם, 123") or ":שלום עולם, 123" in hit
+    assert "עברית/בדיקה:" in hit  # Hebrew titles in paths
+    assert ":" in service.search_lines(session, m.id, r"^[א-ת]+ [א-ת]+").text
+    assert ":" in service.search_lines(session, m.id, r"^\w+ \w+, \d{3}$").text
+    assert service.search_lines(session, m.id, "עולם", paths=["עברית"], files_only=True).text == "עברית/בדיקה"
+
+
+def test_search_backspace_escape_is_rejected(session, corpus):
+    from kb import service
+
+    for p in (r"\bneedle", r"x\B", r"[\b]"):
+        with pytest.raises(service.PatternError, match="word boundary"):
+            service.search_lines(session, corpus.all, p)
+    service.search_lines(session, corpus.all, r"\\bneedle")  # an escaped backslash is fine
+
+
+def test_search_context_across_files_and_gaps(session, corpus):
+    from kb import service
+
+    out = service.search_lines(session, corpus.all, "needle", ignore_case=True, context=1).text
+    assert out.count("--") >= 2 and not out.startswith("--") and not out.endswith("--")
+
+
+def test_runaway_search_is_cut_off_and_the_session_survives(session, corpus, monkeypatch):
     from kb import service
     from kb.retrieval import dci
+    from kb.storage import dal
 
-    expected = service.search_lines(session, corpus.all, "needle", ignore_case=True).text
-    assert len(content_selects) == 1  # 5 files, one batch
+    folder = dal.create_folder(session, parent_id=None, title="big")
+    dal.create_file(session, parent_id=folder.id, title="big.md", content="a" * 20_000_000)
+    manifest = service.create_manifest(session, f"big-{uuid.uuid4().hex[:8]}")
+    service.add_manifest_member(session, manifest.id, node_id=folder.id)
 
-    session.expire_all()
-    content_selects.clear()
-    monkeypatch.setattr(dci, "_CONTENT_BATCH", 2)
-    assert service.search_lines(session, corpus.all, "needle", ignore_case=True).text == expected
-    assert len(content_selects) > 1  # several small batches, same output
+    monkeypatch.setattr(dci, "_SEARCH_TIMEOUT_MS", 1)
+    with pytest.raises(service.PatternError, match="too slow"):
+        service.search_lines(session, manifest.id, r"(a*)*\1b")
+    monkeypatch.undo()
+    assert service.search_lines(session, manifest.id, "^id:", files_only=True).text  # still usable
+    assert session.execute(text("SHOW statement_timeout")).scalar_one() != "1ms"
+
+
+def test_too_complex_pattern_is_a_pattern_error(session, corpus):
+    from kb import service
+
+    with pytest.raises(service.PatternError, match="too complex"):
+        service.search_lines(session, corpus.all, r"((a{200}){200}){200}")
 
 
 # --------------------------------------------------------------------------

@@ -26,25 +26,25 @@ down. Since titles aren't unique among siblings, colliding titles get a `~<first
 hex of id>` suffix. Every tool that takes a path also accepts a raw node uuid.
 """
 
-import re
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session, undefer
+from sqlalchemy import exc, text
+from sqlalchemy.orm import Session
 
-from kb.okf import render_virtual_file
+from kb.okf import render_frontmatter, render_virtual_file
 from kb.storage import dal
 from kb.storage.models import File, Folder, Node
 
 DEFAULT_MAX_CHARS = 20_000
 MAX_CHARS_LIMIT = 50_000
 DEFAULT_READ_LIMIT = 200
-_CONTENT_BATCH = 500  # files whose text search_lines holds at once
+_SEARCH_TIMEOUT_MS = 5_000  # statement_timeout for one search_lines query (a runaway regex)
+_FETCH_ROWS = 1_000  # rows pulled from Postgres at a time while streaming hits
 
 
 class PatternError(Exception):
-    """Raised when a search pattern isn't a valid (Python `re`) regular expression."""
+    """Raised when a search pattern isn't a valid (Postgres ARE) regular expression, or is too slow."""
 
 
 @dataclass
@@ -132,21 +132,32 @@ def _title_segment(title: str) -> str:
     return title.replace("/", "-").strip() or "untitled"
 
 
-def _load_content(session: Session, nodes: list[Node]) -> None:
-    """One query filling in the (deferred) `content` of the files among `nodes`."""
-    ids = [n.id for n in nodes if isinstance(n, File)]
-    if ids:
-        session.scalars(select(File).where(File.id.in_(ids)).options(undefer(File.content))).all()
+def _check_max_chars(max_chars: int) -> None:
+    if not 1 <= max_chars <= MAX_CHARS_LIMIT:
+        raise ValueError(f"max_chars must be between 1 and {MAX_CHARS_LIMIT}")
+
+
+def _check_dialect(pattern: str) -> None:
+    """`\\b` is valid ARE but means backspace there, so it would silently match nothing."""
+    i = 0
+    while i < len(pattern):
+        if pattern[i] == "\\":
+            if pattern[i + 1 : i + 2] in ("b", "B"):
+                raise PatternError(
+                    "invalid pattern: `\\b`/`\\B` is a backspace in this regex syntax; "
+                    "use `\\y` for a word boundary and `\\Y` for its negation"
+                )
+            i += 1
+        i += 1
 
 
 def _bounded(lines: list[str], max_chars: int, hint: str) -> ToolOutput:
     """Joins `lines`, cutting at a line boundary so the whole output fits `max_chars`."""
-    if not 1 <= max_chars <= MAX_CHARS_LIMIT:
-        raise ValueError(f"max_chars must be between 1 and {MAX_CHARS_LIMIT}")
+    _check_max_chars(max_chars)
 
-    text = "\n".join(lines)
-    if len(text) <= max_chars:
-        return ToolOutput(text, truncated=False)
+    joined = "\n".join(lines)
+    if len(joined) <= max_chars:
+        return ToolOutput(joined, truncated=False)
 
     notice = f"[truncated at {max_chars} chars -- {hint}]"
     budget = max_chars - len(notice) - 1
@@ -231,13 +242,16 @@ def search_lines(
     max_chars: int = DEFAULT_MAX_CHARS,
 ) -> ToolOutput:
     """
-    `grep -n` over the virtual files in a manifest (Python `re` syntax). With several
-    `patterns`, a line must match *all* of them -- the equivalent of `grep a | grep b`.
-    `paths` (paths or uuids) restricts the search to those nodes; a folder path covers
-    its in-scope subtree.
+    `grep -n` over the virtual files in a manifest. The regex runs in Postgres (POSIX
+    ARE syntax: like Python's, but `\\y` is the word boundary -- `\\b` is rejected --
+    and there are no named groups or mid-pattern `(?i)`; use `ignore_case`). Each line
+    is matched on its own. With several `patterns`, a line must match *all* of them --
+    the equivalent of `grep a | grep b`. `paths` (paths or uuids) restricts the search
+    to those nodes; a folder path covers its in-scope subtree.
 
     Output lines are `<path>:<line>:<text>` for hits and `<path>-<line>-<text>` for
     `context` lines (groups separated by `--`), or just matching paths if `files_only`.
+    A pattern that takes longer than `_SEARCH_TIMEOUT_MS` raises `PatternError`.
     """
     if isinstance(patterns, str):
         patterns = [patterns]
@@ -245,11 +259,9 @@ def search_lines(
         raise PatternError("at least one pattern is required")
     if context < 0:
         raise ValueError("context must be >= 0")
-    flags = re.IGNORECASE if ignore_case else 0
-    try:
-        compiled = [re.compile(p, flags) for p in patterns]
-    except re.error as exc:
-        raise PatternError(f"invalid pattern: {exc}") from exc
+    _check_max_chars(max_chars)
+    for p in patterns:
+        _check_dialect(p)
 
     scope = _Scope(session, manifest_id)
     if paths is None:
@@ -261,44 +273,83 @@ def search_lines(
             prefix = scope.path(root) + "/"
             targets.append(root)
             targets.extend(n for n in scope.nodes.values() if scope.path(n).startswith(prefix))
+    ordered = sorted({n.id: n for n in targets}.values(), key=scope.path)
+    if not ordered:
+        return _bounded(["(no matches)"], max_chars, "")
+
+    # Postgres sees each target's virtual file as `frontmatter || content` (frontmatter is
+    # rendered, not stored, so it is passed in), split into numbered lines.
+    op = "~*" if ignore_case else "~"
+    hit = " AND ".join(f"l.line {op} :p{i}" for i in range(len(patterns)))
+    params: dict = {f"p{i}": p for i, p in enumerate(patterns)}
+    params |= {
+        "ids": [n.id for n in ordered],
+        "fms": [render_frontmatter(n) for n in ordered],
+        "cap": max_chars,
+    }
+    base = f"""
+        WITH t AS (
+            SELECT * FROM unnest(CAST(:ids AS uuid[]), CAST(:fms AS text[]))
+            WITH ORDINALITY AS t(id, fm, rank)
+        ), l AS (
+            SELECT t.rank, x.n, left(x.line, :cap) AS line
+            FROM t LEFT JOIN files f ON f.id = t.id
+            CROSS JOIN LATERAL string_to_table(t.fm || coalesce(f.content, ''), E'\\n')
+                WITH ORDINALITY AS x(line, n)
+        )"""
+    if files_only:
+        sql = f"{base} SELECT rank FROM l WHERE {hit} GROUP BY rank ORDER BY rank"
+    elif context:
+        c = min(context, 1_000_000)
+        sql = f"""{base}, h AS (SELECT l.rank, l.n, l.line, ({hit}) AS hit FROM l),
+            w AS (SELECT *, max(hit::int) OVER (PARTITION BY rank ORDER BY n
+                  ROWS BETWEEN {c} PRECEDING AND {c} FOLLOWING) AS near FROM h)
+            SELECT rank, n, line, hit FROM w WHERE near = 1 ORDER BY rank, n"""
+    else:
+        sql = f"{base} SELECT l.rank, l.n, l.line, true FROM l WHERE {hit} ORDER BY l.rank, l.n"
 
     out: list[str] = []
-    seen: set[uuid.UUID] = set()
-    ordered = sorted(targets, key=scope.path)
-    for i, node in enumerate(ordered):
-        if i % _CONTENT_BATCH == 0:
-            _load_content(session, ordered[i : i + _CONTENT_BATCH])
-        if node.id in seen:
-            continue
-        seen.add(node.id)
+    size = 0
+    try:
+        with session.begin_nested():  # a failed statement aborts only the savepoint
+            previous = session.execute(text("SHOW statement_timeout")).scalar_one()
+            session.execute(
+                text("SELECT set_config('statement_timeout', :ms, true)"), {"ms": str(_SEARCH_TIMEOUT_MS)}
+            )
+            # An empty result never compiles the regex, so check it up front.
+            session.execute(
+                text("SELECT " + " AND ".join(f"'' {op} :p{i}" for i in range(len(patterns)))),
+                {k: v for k, v in params.items() if k.startswith("p")},
+            )
+            result = session.execute(text(sql), params, execution_options={"yield_per": _FETCH_ROWS})
+            cur_rank, last_n = None, 0
+            for row in result:
+                rank = row[0]
+                path = scope.path(ordered[rank - 1])
+                if files_only:
+                    new = [path]
+                else:
+                    _, n, line, is_hit = row
+                    new = []
+                    if context and cur_rank is not None and (rank != cur_rank or n > last_n + 1):
+                        new.append("--")
+                    sep = ":" if is_hit else "-"
+                    new.append(f"{path}{sep}{n}{sep}{line}")
+                    cur_rank, last_n = rank, n
+                out.extend(new)
+                size += sum(len(x) + 1 for x in new)
+                if size > max_chars:  # _bounded cuts it; no need to read the rest
+                    break
+            result.close()
+            session.execute(text("SELECT set_config('statement_timeout', :v, true)"), {"v": previous})
+    except exc.DBAPIError as e:
+        state = getattr(e.orig, "sqlstate", None) or ""
+        if state == "57014":
+            raise PatternError("pattern too slow") from e
+        if state.startswith("22") or state == "54001" or isinstance(e, exc.DataError):
+            raise PatternError(f"invalid pattern: {str(e.orig).splitlines()[0]}") from e
+        raise
 
-        lines = render_virtual_file(node).split("\n")
-        if isinstance(node, File):
-            session.expire(node, ["content"])  # keep peak memory at one batch, not the manifest
-        hits = [i for i, line in enumerate(lines) if all(rx.search(line) for rx in compiled)]
-        if not hits:
-            continue
-
-        path = scope.path(node)
-        if files_only:
-            out.append(path)
-            continue
-
-        hit_set = set(hits)
-        last = -1
-        for i in hits:
-            start, end = max(i - context, 0), min(i + context, len(lines) - 1)
-            if context and last >= 0 and start > last + 1:
-                out.append("--")
-            for j in range(max(start, last + 1), end + 1):
-                sep = ":" if j in hit_set else "-"
-                out.append(f"{path}{sep}{j + 1}{sep}{lines[j]}")
-            last = max(last, end)
-        if context:
-            out.append("--")
-
-    if out and out[-1] == "--":
-        out.pop()
     return _bounded(
         out or ["(no matches)"],
         max_chars,
