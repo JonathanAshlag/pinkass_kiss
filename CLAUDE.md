@@ -501,7 +501,7 @@ standard retries, 3 attempts total (`BLOB_CONNECT_TIMEOUT`/`BLOB_READ_TIMEOUT`/
 `s3:ListBucket` S3 answers a missing key that way, so the IAM policy must grant
 `ListBucket` (plus `GetObject`/`PutObject`/`DeleteObject` on the prefix; see `.env.example`).
 `BlobStore.check()` = `head_bucket` with readable hints; `check_blob_store()` runs it
-from the API `lifespan` at startup and from `GET /health` (`{db, blob_store}`, 200/503;
+from the API `lifespan` at startup and from `GET /health` (readiness only: `deploy/openshift/probes.yaml` uses a TCP check for liveness, so an S3 blip can't restart pods) (`{db, blob_store}`, 200/503;
 "not configured" counts as healthy). `BLOB_REQUIRED=1` (prod) makes a missing
 `BLOB_BUCKET` or a failed check abort startup; unset, a failed check is only logged.
 Lifespan only runs when `TestClient` is used as a context manager.

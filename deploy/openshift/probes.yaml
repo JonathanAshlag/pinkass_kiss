@@ -1,0 +1,27 @@
+# Health probes for the API (merge into the Deployment, or apply as a patch:
+# oc patch deployment/kb-api --patch-file deploy/openshift/probes.yaml).
+#
+# GET /health checks Postgres and calls S3 head_bucket on every request, and answers 503
+# if either fails. That is what *readiness* should look at: a pod that can't reach its
+# dependencies stops getting traffic, but keeps running (and keeps its in-flight ingests).
+# Never point *liveness* at /health: a short S3 or DB outage would then restart every pod
+# at once, turning a dependency hiccup into an API outage. Liveness only proves the
+# process is up, so it is a plain TCP check.
+spec:
+  template:
+    spec:
+      containers:
+        - name: kb-api  # must match the container name in the Deployment
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000  # must match the container port (uvicorn's default)
+            periodSeconds: 10
+            timeoutSeconds: 5  # /health can wait out the 5 s S3 connect timeout
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 8000  # must match the container port
+            initialDelaySeconds: 30  # startup runs the blob-store check
+            periodSeconds: 10
+            failureThreshold: 3
