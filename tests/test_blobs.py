@@ -18,14 +18,14 @@ DIGEST = hashlib.sha256(PDF).hexdigest()
 def pdf(tmp_path):
     path = tmp_path / "report.pdf"
     path.write_bytes(PDF)
-    return Original.of(path)
+    return Original.from_path(path)
 
 
 def test_original_describes_the_file(pdf):
     assert (pdf.mime, pdf.size, pdf.sha256) == ("application/pdf", len(PDF), DIGEST)
     fid = uuid.uuid4()
     assert original_key(fid) == f"originals/{fid}"
-    assert pdf.columns(original_key(fid)) == {
+    assert pdf.to_file_columns(original_key(fid)) == {
         "blob_key": f"originals/{fid}",
         "blob_size_bytes": len(PDF),
         "blob_mime_type": "application/pdf",
@@ -79,7 +79,7 @@ def test_other_s3_errors_raise_blob_store_error(blob_store):
     with pytest.raises(BlobStoreError, match="NoSuchBucket"):
         store.get_original("sha256/x")
     with pytest.raises(BlobStoreError, match="NoSuchBucket"):
-        store.put_original("originals/x", Original.of(__file__))
+        store.put_original("originals/x", Original.from_path(__file__))
     with pytest.raises(BlobStoreError, match="NoSuchBucket"):
         store.delete_originals(["originals/x"])
 
@@ -104,7 +104,7 @@ def test_check(blob_store):
 
 def test_original_defaults_mime(tmp_path):
     (tmp_path / "noext").write_bytes(b"x")
-    assert Original.of(tmp_path / "noext").mime == "application/octet-stream"
+    assert Original.from_path(tmp_path / "noext").mime == "application/octet-stream"
 
 
 def test_guess_mime():

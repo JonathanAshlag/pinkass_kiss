@@ -2,7 +2,7 @@ from datetime import timedelta
 
 import pytest
 
-from kb.settings import describe, load_settings
+from kb.settings import describe_settings, load_settings
 
 URL = "postgresql+psycopg://u:secret@db:5432/kb"
 
@@ -41,7 +41,7 @@ def test_bad_value_names_the_variable():
 
 def test_describe_masks_secrets():
     env = {"DATABASE_URL": URL, "EMBEDDINGS_API_KEY": "sk-123"}
-    text = "\n".join(describe(load_settings(env), env))
+    text = "\n".join(describe_settings(load_settings(env), env))
     assert "secret" not in text and "sk-123" not in text
     assert "u:***@db:5432/kb" in text
     assert "EMBEDDINGS_API_KEY" in text and "(env)" in text and "(default)" in text

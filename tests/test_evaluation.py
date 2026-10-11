@@ -10,7 +10,7 @@ import pytest
 
 from kb.evaluation.question import ClosedQuestion, OpenQuestion
 from kb.evaluation.quiz import LLMJudge, Quiz, parse_verdict
-from kb.evaluation.report import ItemResult, QuizReport, RunStats, Stats, classify, is_abstain
+from kb.evaluation.report import ItemResult, QuizReport, RunStats, Stats, classify_outcome, is_abstain
 
 
 class StubLLM:
@@ -147,7 +147,7 @@ def test_grade_closed_questions_without_a_judge():
 
 
 # --------------------------------------------------------------------------
-# classify / Quiz.report / QuizReport
+# classify_outcome / Quiz.report / QuizReport
 # --------------------------------------------------------------------------
 
 
@@ -164,7 +164,7 @@ def test_grade_closed_questions_without_a_judge():
     ],
 )
 def test_classify(answerable, abstained, correct, failed, outcome):
-    assert classify(answerable, abstained, correct, failed) == outcome
+    assert classify_outcome(answerable, abstained, correct, failed) == outcome
 
 
 def report_for(refs, answers, replies, stats=None):

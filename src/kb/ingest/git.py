@@ -20,7 +20,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy.orm import Session
 
-from kb.ingest.folder import DEFAULT_BLOB_STORE, IngestReport, ingest_folder
+from kb.ingest.folder import USE_ENV_BLOB_STORE, IngestReport, ingest_folder
 from kb.ingest.processors.base import ProcessorRegistry
 
 # Transports git may use; notably excludes `ext::`, which runs arbitrary commands.
@@ -31,7 +31,7 @@ class GitError(ValueError):
     """Cloning failed (bad URL/ref, no network, ...). A ValueError, so the API maps it to 422."""
 
 
-def _git(*args: str, cwd: Path | None = None) -> str:
+def _run_git(*args: str, cwd: Path | None = None) -> str:
     env = {**os.environ, "GIT_ALLOW_PROTOCOL": _ALLOWED_PROTOCOLS, "GIT_TERMINAL_PROMPT": "0"}
     try:
         result = subprocess.run(
@@ -70,7 +70,7 @@ def ingest_git_repo(
     parent_id: uuid.UUID | None = None,
     registry: ProcessorRegistry | None = None,
     tags: list[str] | None = None,
-    blob_store=DEFAULT_BLOB_STORE,
+    blob_store=USE_ENV_BLOB_STORE,
 ) -> IngestReport:
     """Clone `url` (anything `git clone` accepts: https/ssh URL or a local path) at `ref`
     (a branch or tag; default: the remote's HEAD) and ingest its working tree under
@@ -81,8 +81,8 @@ def ingest_git_repo(
     with tempfile.TemporaryDirectory(prefix="kb-git-") as tmp:
         dest = Path(tmp) / _repo_name(url)
         branch = ["--branch", ref] if ref else []
-        _git("clone", "--depth", "1", *branch, "--", url, str(dest))
-        commit = _git("rev-parse", "HEAD", cwd=dest)
+        _run_git("clone", "--depth", "1", *branch, "--", url, str(dest))
+        commit = _run_git("rev-parse", "HEAD", cwd=dest)
         public = _public_url(url)
 
         def resource_for(path: Path) -> str:

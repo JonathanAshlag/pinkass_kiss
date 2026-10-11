@@ -27,12 +27,12 @@ from typing import BinaryIO
 from sqlalchemy.orm import Session
 
 from kb.ingest.processors.base import ProcessorRegistry
-from kb.ingest.folder import DEFAULT_BLOB_STORE, IngestFailed, IngestReport, ingest_folder
+from kb.ingest.folder import USE_ENV_BLOB_STORE, IngestFailed, IngestReport, ingest_folder
 from kb.settings import get_settings
 from kb.storage.blobs import BlobStore
 
 UPLOAD_SCHEME = "upload:"
-CHUNK_BYTES = 1024 * 1024
+UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 class UploadError(ValueError):
@@ -84,9 +84,9 @@ def _check_collisions(paths: list[PurePosixPath]) -> None:
                 raise UploadError(f"{other.as_posix()!r} is both a file and a directory")
 
 
-def _write(target: Path, data: bytes | BinaryIO, path: PurePosixPath, limits: UploadLimits, total: int) -> int:
+def _write_upload(target: Path, data: bytes | BinaryIO, path: PurePosixPath, limits: UploadLimits, total: int) -> int:
     """Streams `data` to `target`, enforcing the byte caps as it goes; returns its size."""
-    chunks = (data,) if isinstance(data, (bytes, bytearray)) else iter(lambda: data.read(CHUNK_BYTES), b"")
+    chunks = (data,) if isinstance(data, (bytes, bytearray)) else iter(lambda: data.read(UPLOAD_CHUNK_BYTES), b"")
     size = 0
     with target.open("wb") as out:
         for chunk in chunks:
@@ -106,7 +106,7 @@ def ingest_upload(
     parent_id: uuid.UUID | None = None,
     registry: ProcessorRegistry | None = None,
     tags: list[str] | None = None,
-    blob_store: BlobStore | None = DEFAULT_BLOB_STORE,
+    blob_store: BlobStore | None = USE_ENV_BLOB_STORE,
     limits: UploadLimits | None = None,
 ) -> IngestReport:
     """Either a folder or loose files. Paths must be relative and use `/`.
@@ -157,7 +157,7 @@ def ingest_upload(
                 continue
             target = base.joinpath(*path.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
-            total += _write(target, data, path, limits, total)
+            total += _write_upload(target, data, path, limits, total)
 
         try:
             report = ingest_folder(

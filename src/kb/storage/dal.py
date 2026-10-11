@@ -30,7 +30,7 @@ class TreeCycleError(ValueError):
 
 # Serializes folder moves: two concurrent moves (A under B, B under A) would each pass the
 # cycle check. Held until commit, so never move a folder inside a long transaction.
-_FOLDER_MOVE_LOCK = 4242
+_FOLDER_MOVE_ADVISORY_LOCK_ID = 4242
 
 
 class FieldError(ValueError):
@@ -44,7 +44,7 @@ class FieldError(ValueError):
 # --------------------------------------------------------------------------
 
 
-def _active(node, include_deleted: bool):
+def _filter_active(node, include_deleted: bool):
     if node is None or (not include_deleted and node.deleted_at is not None):
         return None
     return node
@@ -52,17 +52,17 @@ def _active(node, include_deleted: bool):
 
 def get_node(session: Session, node_id: uuid.UUID, *, include_deleted: bool = False) -> Node | None:
     node = session.get(File, node_id) or session.get(Folder, node_id)
-    return _active(node, include_deleted)
+    return _filter_active(node, include_deleted)
 
 
 def get_file(session: Session, file_id: uuid.UUID, *, include_deleted: bool = False) -> File | None:
-    return _active(session.get(File, file_id), include_deleted)
+    return _filter_active(session.get(File, file_id), include_deleted)
 
 
 def get_folder(
     session: Session, folder_id: uuid.UUID, *, include_deleted: bool = False
 ) -> Folder | None:
-    return _active(session.get(Folder, folder_id), include_deleted)
+    return _filter_active(session.get(Folder, folder_id), include_deleted)
 
 
 def list_ancestors(session: Session, node: Node) -> list[Folder]:
@@ -98,7 +98,7 @@ def list_children(
     return children
 
 
-def _descendant_folder_ids(node_id: uuid.UUID):
+def _descendant_folder_ids_cte(node_id: uuid.UUID):
     """Recursive CTE of the ids of every folder transitively under `node_id`."""
     base = select(Folder.id).where(Folder.parent_id == node_id).cte("descendants", recursive=True)
     child = aliased(Folder)
@@ -112,10 +112,10 @@ def list_descendants(
     folders, then files. A file has none."""
     if session.get(Folder, node_id) is None:
         return []
-    folder_ids = select(_descendant_folder_ids(node_id).c.id)
+    folder_ids = select(_descendant_folder_ids_cte(node_id).c.id)
     folders = select(Folder).where(Folder.id.in_(folder_ids))
     files = select(File).where(
-        or_(File.parent_id == node_id, File.parent_id.in_(select(_descendant_folder_ids(node_id).c.id)))
+        or_(File.parent_id == node_id, File.parent_id.in_(select(_descendant_folder_ids_cte(node_id).c.id)))
     )
     if not include_deleted:
         folders = folders.where(Folder.deleted_at.is_(None))
@@ -193,7 +193,7 @@ def move_node(session: Session, node_id: uuid.UUID, new_parent_id: uuid.UUID | N
     else:
         _require_folder(session, new_parent_id)
         if isinstance(node, Folder):
-            session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _FOLDER_MOVE_LOCK})
+            session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _FOLDER_MOVE_ADVISORY_LOCK_ID})
             descendant_ids = {d.id for d in list_descendants(session, node_id, include_deleted=True)}
             if new_parent_id in descendant_ids:
                 raise TreeCycleError("cannot move a folder under its own descendant")
@@ -232,7 +232,7 @@ def restore_node(session: Session, node_id: uuid.UUID) -> Node:
     return node
 
 
-def query_metadata(
+def find_nodes(
     session: Session,
     *,
     tags: list[str] | None = None,

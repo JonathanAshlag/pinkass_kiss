@@ -251,7 +251,7 @@ def _ratio(num: float, den: float) -> float:
     return num / den if den else 0.0
 
 
-def classify(answerable: bool, abstained: bool, correct: bool, failed: bool = False) -> Outcome:
+def classify_outcome(answerable: bool, abstained: bool, correct: bool, failed: bool = False) -> Outcome:
     if failed:
         return "ERR"
     if answerable:

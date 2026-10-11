@@ -23,7 +23,7 @@ Read-time validation: a hit is returned only if its chunk text is still at its l
 the file's current virtual file. Writes stage new chunks *before* they commit (see
 kb.service) and drop stale ones *after*, so for a moment an edited file can have chunks
 of uncommitted or replaced content; those never reach the caller. To keep `k` hits
-when some are dropped, `OVERFETCH` x `k` rows are fetched.
+when some are dropped, `OVERFETCH_FACTOR` x `k` rows are fetched.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from kb.storage.models import File
 from kb.retrieval.dci import _Scope
 
 SNIPPET_CHARS = 240
-OVERFETCH = 2
+OVERFETCH_FACTOR = 2
 
 
 @dataclass
@@ -87,14 +87,14 @@ def semantic_search(
     if not in_scope or not query.strip():
         return []
 
-    from kb.semantic_index.chunking import chunk_text  # strips the "<title> > <heading>" context prefix
+    from kb.semantic_index.chunking import strip_context_prefix  # strips the "<title> > <heading>" context prefix
 
     if store is None:
         from kb.semantic_index.vectorstore import get_index_store
 
         store = get_index_store()
     results = store.vector_store.similarity_search_with_score(
-        query, k=k * OVERFETCH, filter={"file_id": {"$in": [str(i) for i in in_scope]}}
+        query, k=k * OVERFETCH_FACTOR, filter={"file_id": {"$in": [str(i) for i in in_scope]}}
     )
 
     lines: dict[uuid.UUID, list[str]] = {}  # rendered once per hit file
@@ -103,7 +103,7 @@ def semantic_search(
         if node.id not in lines:
             lines[node.id] = okf.render_virtual_file(node).split("\n")
         start, end = int(doc.metadata["start_line"]), int(doc.metadata["end_line"])
-        return chunk_text(doc) in "\n".join(lines[node.id][start - 1 : end])
+        return strip_context_prefix(doc) in "\n".join(lines[node.id][start - 1 : end])
 
     hits: list[SearchHit] = []
     for doc, distance in results:
@@ -122,7 +122,7 @@ def semantic_search(
                 heading=meta.get("heading"),
                 start_line=int(meta["start_line"]),
                 end_line=int(meta["end_line"]),
-                snippet=_snippet(chunk_text(doc)),
+                snippet=_snippet(strip_context_prefix(doc)),
                 score=1.0 - float(distance),
             )
         )

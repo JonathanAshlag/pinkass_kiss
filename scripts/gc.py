@@ -23,11 +23,11 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true", help="list what would be deleted, delete nothing")
     args = p.parse_args()
 
-    from kb.maintenance import collect
+    from kb.maintenance import collect_garbage
     from kb.storage.blobs import get_blob_store
 
     store = get_blob_store()
-    result = collect(store, dry_run=args.dry_run)
+    result = collect_garbage(store, dry_run=args.dry_run)
     verb = "would delete" if args.dry_run else "deleted"
     if store is None:
         print("originals: no blob store configured, skipped")

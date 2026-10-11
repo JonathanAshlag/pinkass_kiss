@@ -38,9 +38,9 @@ from kb.storage.models import File, Folder, Node
 
 DEFAULT_MAX_CHARS = 20_000
 MAX_CHARS_LIMIT = 50_000
-DEFAULT_READ_LIMIT = 200
+DEFAULT_READ_LINE_COUNT = 200
 _SEARCH_TIMEOUT_MS = 5_000  # statement_timeout for one search_lines query (a runaway regex)
-_FETCH_ROWS = 1_000  # rows pulled from Postgres at a time while streaming hits
+_FETCH_BATCH_SIZE = 1_000  # rows pulled from Postgres at a time while streaming hits
 
 
 class PatternError(Exception):
@@ -78,7 +78,7 @@ class _Scope:
     def path(self, node: Node) -> str:
         return self._paths[node.id]
 
-    def lookup(self, path_or_id: str) -> Node:
+    def resolve_path(self, path_or_id: str) -> Node:
         """A node in scope by path or uuid; ValueError if it isn't in this manifest."""
         key = path_or_id.strip().strip("/")
         node = self.by_path.get(key)
@@ -151,7 +151,7 @@ def _check_dialect(pattern: str) -> None:
         i += 1
 
 
-def _bounded(lines: list[str], max_chars: int, hint: str) -> ToolOutput:
+def _truncate_to_max_chars(lines: list[str], max_chars: int, hint: str) -> ToolOutput:
     """Joins `lines`, cutting at a line boundary so the whole output fits `max_chars`."""
     _check_max_chars(max_chars)
 
@@ -202,7 +202,7 @@ def list_paths(
     if under is None:
         frontier = [n for n in scope.nodes.values() if n.parent_id not in scope.nodes]
     else:
-        root = scope.lookup(under)
+        root = scope.resolve_path(under)
         frontier = [n for n in scope.nodes.values() if n.parent_id == root.id]
 
     listed: list[Node] = []
@@ -223,7 +223,7 @@ def list_paths(
             line += f"  {node.description}"
         lines.append(line)
 
-    return _bounded(
+    return _truncate_to_max_chars(
         lines or ["(no entries)"],
         max_chars,
         "list a narrower subtree with `under`, or drop `recursive`",
@@ -269,13 +269,13 @@ def search_lines(
     else:
         targets = []
         for p in paths:
-            root = scope.lookup(p)
+            root = scope.resolve_path(p)
             prefix = scope.path(root) + "/"
             targets.append(root)
             targets.extend(n for n in scope.nodes.values() if scope.path(n).startswith(prefix))
     ordered = sorted({n.id: n for n in targets}.values(), key=scope.path)
     if not ordered:
-        return _bounded(["(no matches)"], max_chars, "")
+        return _truncate_to_max_chars(["(no matches)"], max_chars, "")
 
     # Postgres sees each target's virtual file as `frontmatter || content` (frontmatter is
     # rendered, not stored, so it is passed in), split into numbered lines.
@@ -321,7 +321,7 @@ def search_lines(
                 text("SELECT " + " AND ".join(f"'' {op} :p{i}" for i in range(len(patterns)))),
                 {k: v for k, v in params.items() if k.startswith("p")},
             )
-            result = session.execute(text(sql), params, execution_options={"yield_per": _FETCH_ROWS})
+            result = session.execute(text(sql), params, execution_options={"yield_per": _FETCH_BATCH_SIZE})
             cur_rank, last_n = None, 0
             for row in result:
                 rank = row[0]
@@ -338,7 +338,7 @@ def search_lines(
                     cur_rank, last_n = rank, n
                 out.extend(new)
                 size += sum(len(x) + 1 for x in new)
-                if size > max_chars:  # _bounded cuts it; no need to read the rest
+                if size > max_chars:  # _truncate_to_max_chars cuts it; no need to read the rest
                     break
             result.close()
             session.execute(text("SELECT set_config('statement_timeout', :v, true)"), {"v": previous})
@@ -350,7 +350,7 @@ def search_lines(
             raise PatternError(f"invalid pattern: {str(e.orig).splitlines()[0]}") from e
         raise
 
-    return _bounded(
+    return _truncate_to_max_chars(
         out or ["(no matches)"],
         max_chars,
         "add a pattern, restrict `paths`, or use `files_only` first",
@@ -363,7 +363,7 @@ def read_lines(
     path: str,
     *,
     offset: int = 1,
-    limit: int = DEFAULT_READ_LIMIT,
+    limit: int = DEFAULT_READ_LINE_COUNT,
     max_chars: int = DEFAULT_MAX_CHARS,
 ) -> ToolOutput:
     """
@@ -378,16 +378,16 @@ def read_lines(
         raise ValueError("limit must be >= 1")
 
     scope = _Scope(session, manifest_id)
-    node = scope.lookup(path)
+    node = scope.resolve_path(path)
     lines = render_virtual_file(node).split("\n")
 
     end = min(offset + limit - 1, len(lines))
     if offset > len(lines):
         header = f"{scope.path(node)} (offset {offset} is past the end -- {len(lines)} lines)"
-        return _bounded([header], max_chars, "")
+        return _truncate_to_max_chars([header], max_chars, "")
 
     header = f"{scope.path(node)} (lines {offset}-{end} of {len(lines)})"
     body = [f"{n}\t{lines[n - 1]}" for n in range(offset, end + 1)]
-    return _bounded(
+    return _truncate_to_max_chars(
         [header, *body], max_chars, "read a smaller range with `offset`/`limit`"
     )

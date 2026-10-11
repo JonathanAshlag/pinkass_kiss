@@ -12,7 +12,7 @@ Originals: for files whose processor sets `retain_original` (converted formats s
 PDF), the plan records the source file (`PlannedNode.original`, hashed while planning).
 `ingest_folder` uploads them to the blob store (kb.storage.blobs, default: the configured
 one; None keeps none) under `originals/<file id>` and sets the `blob_*` columns. Indexing
-and uploads happen in `kb.service.stage`, before the transaction creates any row; the
+and uploads happen in `kb.service.stage_before_commit`, before the transaction creates any row; the
 commit makes them reachable, a rollback undoes them.
 """
 
@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from kb import service
 from kb.storage.blobs import BlobStore, Original, get_blob_store, original_key
-from kb.ingest.convert import convert_all
+from kb.ingest.convert import convert_documents
 from kb.ingest.processors.base import Processor, ProcessorRegistry, default_registry
 from kb.ingest.plan import PlannedNode, materialize, transient_files
 from kb.storage.models import Folder
@@ -52,7 +52,7 @@ class IngestFailed(ValueError):
 
 
 # "Use the configured blob store" (vs. an explicit None = retain nothing).
-DEFAULT_BLOB_STORE: Any = object()
+USE_ENV_BLOB_STORE: Any = object()
 
 
 @dataclass
@@ -111,14 +111,14 @@ def plan_folder(
                 found.append((entry, processor))
 
     walk(root)
-    for (entry, processor), doc in zip(found, convert_all(found)):
+    for (entry, processor), doc in zip(found, convert_documents(found)):
         if isinstance(doc, str):
             plan.failed.append((entry, doc))
             continue
         original = None
         if getattr(processor, "retain_original", False):
             try:
-                original = Original.of(entry)
+                original = Original.from_path(entry)
             except OSError as exc:
                 plan.failed.append((entry, f"reading original: {type(exc).__name__}: {exc}"))
                 continue
@@ -149,18 +149,18 @@ def ingest_folder(
     tags: list[str] | None = None,
     root_title: str | None = None,
     resource_for: Callable[[Path], str] | None = None,
-    blob_store: BlobStore | None = DEFAULT_BLOB_STORE,
+    blob_store: BlobStore | None = USE_ENV_BLOB_STORE,
     root_is_parent: bool = False,
 ) -> IngestReport:
     """`plan_folder` + `materialize` under `parent_id` (an existing folder, or None for
     the KB root), all or nothing: raises `IngestFailed` (listing every file that failed
-    to convert) before writing anything, and `kb.service.stage` indexes the files and
+    to convert) before writing anything, and `kb.service.stage_before_commit` indexes the files and
     uploads their originals before any row is created (IndexingError / BlobStoreError,
     undone, if that fails). `blob_store` defaults to `kb.storage.blobs.get_blob_store()`;
     pass None to keep no originals. `root_is_parent`: put `root`'s contents straight
     into `parent_id` instead of a new folder for `root` (then `root_id` is `parent_id`).
     See `plan_folder` for the other arguments."""
-    if blob_store is DEFAULT_BLOB_STORE:
+    if blob_store is USE_ENV_BLOB_STORE:
         blob_store = get_blob_store()
     if parent_id is not None and service.get_folder(session, parent_id) is None:
         raise ValueError(f"no such folder: {parent_id}")  # before any embedding/upload
@@ -177,9 +177,9 @@ def ingest_folder(
     for node in plan.nodes:
         if node.original is not None and blob_store is not None:
             key = original_key(node.id)
-            node.fields.update(node.original.columns(key))
+            node.fields.update(node.original.to_file_columns(key))
             originals.append((blob_store, key, node.original))
-    service.stage(session, files=transient_files(plan.nodes), originals=originals)
+    service.stage_before_commit(session, files=transient_files(plan.nodes), originals=originals)
     created = materialize(
         session,
         plan.nodes,

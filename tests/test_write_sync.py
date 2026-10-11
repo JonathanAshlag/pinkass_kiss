@@ -146,7 +146,7 @@ def test_created_then_edited_in_one_transaction_leaves_no_stale_chunks(db):
 
     d = doc(db, folder(db).id, content=section(1))
     db.flush()
-    service.stage(db, files=[d])  # e.g. an ingest staged it ...
+    service.stage_before_commit(db, files=[d])  # e.g. an ingest staged it ...
     service.update_node(db, d.id, content=section(2))  # ... then it changed before the commit
     service.commit(db)
     texts = [r.content for r in chunks_of(d.id)]
@@ -323,13 +323,13 @@ def planned_ids_from(monkeypatch):
     from kb import service
 
     seen: list[uuid.UUID] = []
-    real = service.stage
+    real = service.stage_before_commit
 
     def spy(session, *, files=(), originals=()):
         seen.extend(f.id for f in files)
         return real(session, files=files, originals=originals)
 
-    monkeypatch.setattr(service, "stage", spy)
+    monkeypatch.setattr(service, "stage_before_commit", spy)
     return seen
 
 
@@ -440,7 +440,7 @@ def test_ingest_bad_file_does_nothing_at_all(db, papers, blob_store, monkeypatch
 
     write(papers / "broken.pdf", b"not a pdf")
     calls = []
-    monkeypatch.setattr("kb.service.stage", lambda *a, **kw: calls.append(1))
+    monkeypatch.setattr("kb.service.stage_before_commit", lambda *a, **kw: calls.append(1))
     with pytest.raises(IngestFailed) as exc:
         ingest_folder(db, papers, blob_store=blob_store)
     assert [p.name for p, _ in exc.value.failures] == ["broken.pdf"]
@@ -459,13 +459,13 @@ def test_gc_originals(db, blob_store, tmp_path):
     from kb.maintenance import gc_originals
     from kb.storage.blobs import Original, original_key
 
-    pdf = Original.of(make_pdf(tmp_path / "x.pdf"))
+    pdf = Original.from_path(make_pdf(tmp_path / "x.pdf"))
     orphan, kept, deleted_row = original_key(uuid.uuid4()), None, None
     blob_store.put_original(orphan, pdf)
     f = folder(db)
     for attr in ("kept", "deleted_row"):
         fid = uuid.uuid4()
-        service.create_file(db, parent_id=f.id, title=attr, content="x", id=fid, **pdf.columns(original_key(fid)))
+        service.create_file(db, parent_id=f.id, title=attr, content="x", id=fid, **pdf.to_file_columns(original_key(fid)))
         blob_store.put_original(original_key(fid), pdf)
         if attr == "deleted_row":
             service.delete_node(db, fid)  # soft-deleted: restore must still find its original
@@ -485,7 +485,7 @@ def test_gc_chunks(db, store):  # noqa: F811
 
     d = doc(db, folder(db).id)
     db.flush()
-    service.stage(db, files=[d])
+    service.stage_before_commit(db, files=[d])
     db.expunge_all()
     db.info.clear()  # a "crash": the transaction's end never settles the staging
     db.close()

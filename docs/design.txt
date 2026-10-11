@@ -251,7 +251,7 @@ footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--line);
       <div class="stack-row">
         <div class="stack-label">chokepoint</div>
         <div class="boxes">
-          <div class="box accent"><b>kb.service</b><span>policy.check on every mutation · touched-id tracking · commit() → index sync · get_warnings</span></div>
+          <div class="box accent"><b>kb.service</b><span>policy.check on every mutation · touched-id tracking · commit() → index sync · collect_advisory_warnings</span></div>
         </div>
       </div>
       <div class="stack-row">
@@ -341,7 +341,7 @@ footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--line);
         <h4>Index (after the response)</h4>
         <div class="where">semantic_index.indexer.index_files <span class="tag async">background</span></div>
         <ul>
-          <li><code>FileNodeLoader</code> reads each active file in its own session.</li>
+          <li><code>FileLoader</code> reads each active file in its own session.</li>
           <li>The markdown body is split with <code>RecursiveCharacterTextSplitter</code> (markdown, 1500 chars / 200 overlap). Each chunk gets its heading path and virtual-file line range.</li>
           <li>The text is embedded as <code>"&lt;title&gt; &gt; &lt;heading&gt;"</code> + chunk via Ollama <code>nomic-embed-text</code> (768d) and stored in <code>kb_chunks</code>.</li>
         </ul>
@@ -482,7 +482,7 @@ footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--line);
         <text x="95" y="94" text-anchor="middle" style="fill: var(--muted); font-size:12px">restore · materialize</text>
 
         <rect x="230" y="30" width="170" height="74" rx="8" style="fill: var(--surface); stroke: var(--line)"/>
-        <text x="315" y="58" text-anchor="middle" style="fill: var(--fg); font-weight:600">_touch(ids)</text>
+        <text x="315" y="58" text-anchor="middle" style="fill: var(--fg); font-weight:600">_mark_touched(ids)</text>
         <text x="315" y="78" text-anchor="middle" style="fill: var(--muted); font-size:12px">session.info set</text>
         <text x="315" y="94" text-anchor="middle" style="fill: var(--muted); font-size:12px">+ cascade descendants</text>
 
