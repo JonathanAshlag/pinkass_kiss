@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KB System Design</title>
+<style>
+:root {
+  --bg: #fbfaf8;
+  --surface: #ffffff;
+  --surface-2: #f3f1ed;
+  --text: #1d1c1a;
+  --muted: #6a675f;
+  --border: #e3e0d9;
+  --accent: #2f5d9f;
+  --accent-soft: #e6eef9;
+  --ok: #2c7a4b;
+  --ok-soft: #e4f3ea;
+  --warn: #9a6a12;
+  --warn-soft: #fbf1dc;
+  --bad: #a83a32;
+  --bad-soft: #f9e4e2;
+  --code-bg: #f1efea;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #151514; --surface: #1d1d1b; --surface-2: #252522; --text: #ecebe7; --muted: #a29f97;
+    --border: #34332f; --accent: #8db4ef; --accent-soft: #1f2c40; --ok: #79c99a; --ok-soft: #1c2e23;
+    --warn: #e2b55c; --warn-soft: #33291a; --bad: #ec8c84; --bad-soft: #3a2220; --code-bg: #262623;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #151514; --surface: #1d1d1b; --surface-2: #252522; --text: #ecebe7; --muted: #a29f97;
+  --border: #34332f; --accent: #8db4ef; --accent-soft: #1f2c40; --ok: #79c99a; --ok-soft: #1c2e23;
+  --warn: #e2b55c; --warn-soft: #33291a; --bad: #ec8c84; --bad-soft: #3a2220; --code-bg: #262623;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 var(--sans);
+}
+.wrap { max-width: 920px; margin: 0 auto; padding: 40px 16px 80px; }
+header { margin-bottom: 28px; }
+h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+.lede { color: var(--muted); font-size: 1.08rem; margin: 0; }
+nav.toc {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px 18px; margin: 24px 0 8px; font-size: 0.95rem;
+}
+nav.toc ol { margin: 4px 0 0; padding-left: 20px; columns: 2; column-gap: 32px; }
+nav.toc a { color: var(--accent); text-decoration: none; }
+nav.toc a:hover { text-decoration: underline; }
+h2 {
+  font-size: 1.4rem; margin: 48px 0 12px; padding-top: 12px; border-top: 1px solid var(--border);
+}
+h3 { font-size: 1.08rem; margin: 26px 0 8px; }
+p, li { max-width: 72ch; }
+code {
+  font-family: var(--mono); font-size: 0.88em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+pre {
+  font-family: var(--mono); font-size: 0.85rem; line-height: 1.5; background: var(--code-bg);
+  border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; overflow-x: auto;
+}
+pre code { background: none; padding: 0; }
+.table-wrap { overflow-x: auto; margin: 12px 0 16px; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; background: var(--surface); }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { background: var(--surface-2); font-weight: 600; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.callout {
+  border-left: 4px solid var(--accent); background: var(--accent-soft); padding: 12px 16px;
+  border-radius: 0 8px 8px 0; margin: 16px 0;
+}
+.callout.ok { border-color: var(--ok); background: var(--ok-soft); }
+.callout.warn { border-color: var(--warn); background: var(--warn-soft); }
+.callout p { margin: 0; }
+.callout p + p { margin-top: 8px; }
+
+/* Pipeline diagram */
+.flow { display: flex; flex-direction: column; gap: 0; margin: 20px 0; }
+.stage {
+  display: grid; grid-template-columns: 44px 1fr; gap: 14px; align-items: start;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.stage .n {
+  width: 34px; height: 34px; border-radius: 50%; background: var(--surface-2); color: var(--muted);
+  display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.95rem;
+}
+.stage.commit { border: 2px solid var(--ok); background: var(--ok-soft); }
+.stage.commit .n { background: var(--ok); color: var(--surface); }
+.stage h4 { margin: 4px 0 2px; font-size: 1rem; }
+.stage p { margin: 0; color: var(--muted); font-size: 0.93rem; }
+.stage .where { font-family: var(--mono); font-size: 0.78rem; color: var(--accent); margin-top: 4px; }
+.arrow { text-align: center; color: var(--muted); font-size: 1.1rem; line-height: 1; padding: 4px 0; }
+.tag {
+  display: inline-block; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase;
+  padding: 1px 7px; border-radius: 999px; margin-left: 6px; vertical-align: 2px;
+}
+.tag.db { background: var(--accent-soft); color: var(--accent); }
+.tag.vec { background: var(--warn-soft); color: var(--warn); }
+.tag.s3 { background: var(--bad-soft); color: var(--bad); }
+.tag.cpu { background: var(--surface-2); color: var(--muted); }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 16px 0; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.card .big { font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.card .lbl { color: var(--muted); font-size: 0.88rem; }
+.bar { height: 10px; border-radius: 5px; background: var(--surface-2); overflow: hidden; margin-top: 6px; }
+.bar span { display: block; height: 100%; background: var(--accent); }
+footer { margin-top: 56px; color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--border); padding-top: 16px; }
+@media (max-width: 640px) {
+  h1 { font-size: 1.6rem; }
+  nav.toc ol { columns: 1; }
+  .stage { grid-template-columns: 34px 1fr; gap: 10px; }
+}
+
+.diagram{margin:20px 0;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px}
+.diagram svg{width:100%;height:auto;display:block;font-family:var(--sans)}
+.diagram figcaption{color:var(--muted);font-size:.85rem;text-align:center;margin-top:4px}
+figure.diagram{margin-left:0;margin-right:0}
+.bx{fill:var(--surface-2);stroke:var(--border);stroke-width:1.5}
+.bx.db{fill:var(--accent-soft);stroke:var(--accent)}
+.bx.vec{fill:var(--warn-soft);stroke:var(--warn)}
+.bx.s3{fill:var(--bad-soft);stroke:var(--bad)}
+.bx.ok{fill:var(--ok-soft);stroke:var(--ok);stroke-width:2.5}
+.bx.lane{fill:none;stroke:var(--accent);stroke-dasharray:6 4}
+.t{fill:var(--text);font-size:14px;font-weight:600}
+.m{fill:var(--muted);font-size:12px}
+.mono{font-family:var(--mono);font-size:12px;fill:var(--accent)}
+.ln{stroke:var(--muted);stroke-width:1.8;fill:none;marker-end:url(#ar)}
+.ln.ok{stroke:var(--ok)} .ln.bad{stroke:var(--bad)} .ln.dash{stroke-dasharray:5 4}
+.ar{fill:var(--muted)}
+.lbl{fill:var(--text);font-size:12px;font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>KB System Design</h1>
+  <p class="lede">A lean knowledge base that stores documents and serves the right context to agents. Two halves: how data gets <b>in</b> (file upload) and how agents read it <b>out</b>.</p>
+  <nav class="toc"><strong>Contents</strong>
+    <ol>
+      <li><a href="#overview">Big picture</a></li>
+      <li><a href="#classes">Main classes and modules</a></li>
+      <li><a href="#ing">Part 1: Ingestion</a></li>
+      <li><a href="#three">The three destinations</a></li>
+      <li><a href="#flow">Upload flow</a></li>
+      <li><a href="#atomic">All or nothing</a></li>
+      <li><a href="#improve">Efficiency improvements</a></li>
+      <li><a href="#capacity">Scaling capacity</a></li>
+      <li><a href="#agent">Part 2: Agent consumption</a></li>
+      <li><a href="#tools">The tools and their output</a></li>
+      <li><a href="#regex">search_lines: regex in Postgres</a></li>
+      <li><a href="#extra">Other notable details</a></li>
+    </ol>
+  </nav>
+</header>
+
+<h2 id="overview">Big picture</h2>
+<p>Documents live in a virtual filesystem (folders and files) stored in Postgres. Each file is Markdown plus metadata (title, tags, status, sources...), inspired by Google's Open Knowledge Format. Data comes <b>in</b> through ingestion, lives in <b>storage</b> with a <b>derived semantic index</b> beside it, and goes <b>out</b> through one service layer to the REST API and to agents.</p>
+<figure class="diagram"><svg viewBox="0 0 900 380" role="img"><defs><marker id="ar1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ar"/></marker></defs><rect class="bx " x="20" y="100" width="150" height="70" rx="9"/><text class="t" x="95.0" y="131.0" text-anchor="middle">Ingestion</text><text class="m" x="95.0" y="148.0" text-anchor="middle">upload, convert, plan</text><rect class="bx db" x="250" y="100" width="170" height="70" rx="9"/><text class="t" x="335.0" y="131.0" text-anchor="middle">kb.service</text><text class="m" x="335.0" y="148.0" text-anchor="middle">policy + commit protocol</text><rect class="bx " x="520" y="30" width="170" height="60" rx="9"/><text class="t" x="605.0" y="56.0" text-anchor="middle">REST API</text><text class="m" x="605.0" y="73.0" text-anchor="middle">kb.api, /ui</text><rect class="bx " x="520" y="180" width="190" height="60" rx="9"/><text class="t" x="615.0" y="206.0" text-anchor="middle">Agent tools</text><text class="m" x="615.0" y="223.0" text-anchor="middle">retrieval: DCI + semantic</text><rect class="bx db" x="130" y="300" width="170" height="60" rx="9"/><text class="t" x="215.0" y="326.0" text-anchor="middle">Postgres</text><text class="m" x="215.0" y="343.0" text-anchor="middle">folders, files, manifests</text><rect class="bx vec" x="360" y="300" width="170" height="60" rx="9"/><text class="t" x="445.0" y="326.0" text-anchor="middle">pgvector</text><text class="m" x="445.0" y="343.0" text-anchor="middle">kb_chunks (derived)</text><rect class="bx s3" x="590" y="300" width="150" height="60" rx="9"/><text class="t" x="665.0" y="326.0" text-anchor="middle">S3</text><text class="m" x="665.0" y="343.0" text-anchor="middle">raw originals</text><path marker-end="url(#ar1)" class="ln " d="M170,135H250"/><path marker-end="url(#ar1)" class="ln " d="M420,120L520,70"/><path marker-end="url(#ar1)" class="ln " d="M420,150L520,200"/><path marker-end="url(#ar1)" class="ln " d="M300,170L230,300"/><path marker-end="url(#ar1)" class="ln dash" d="M335,170L430,300"/><path marker-end="url(#ar1)" class="ln dash" d="M370,170L620,300"/><text class="lbl" x="100" y="92" text-anchor="middle">data IN</text><text class="lbl" x="610" y="22" text-anchor="middle">data OUT</text><text class="m" x="860" y="335" text-anchor="end">dashed = derived or side store</text></svg><figcaption>Data comes in, is stored in three places, and goes out only through the service.</figcaption></figure>
+
+<h2 id="classes">Main classes and modules</h2>
+<div class="table-wrap"><table>
+<tr><th>Class / module</th><th>Role</th></tr>
+<tr><td><code>Folder</code>, <code>File</code></td><td>SQLAlchemy models (two tables). Folders organise; files hold knowledge (<code>content</code>, tags, status, sources, blob_* columns pointing at the S3 original).</td></tr>
+<tr><td><code>Manifest</code>, <code>ManifestMember</code></td><td>A named, curated list of files/folders/other manifests. It is the <b>scope</b> an agent sees: a folder member means its whole subtree, resolved at read time.</td></tr>
+<tr><td><code>storage.dal</code></td><td>The primitives: <code>create_file</code>, <code>move_node</code>, <code>delete_node</code>, <code>find_nodes</code>, <code>resolve_manifest</code>... Takes an explicit <code>Session</code>, policy-unaware.</td></tr>
+<tr><td><code>policy.check</code></td><td>Folder kinds (skeleton / manual / auto_updated) and the agent lock. Raises <code>PermissionDenied</code> (HTTP 403).</td></tr>
+<tr><td><code>service</code></td><td>Thin passthrough over the DAL plus permission checks, advisory warnings, and the commit protocol (<code>commit</code>, <code>stage_before_commit</code>).</td></tr>
+<tr><td><code>Processor</code> / <code>MarkdownProcessor</code> / <code>LoaderProcessor</code></td><td>Turn a source file into Markdown. Markdown and text pass through; PDF uses PyMuPDF4LLM; DOCX/PPTX/XLSX/HTML use Docling. Adding a format means adding one processor.</td></tr>
+<tr><td><code>FolderPlan</code>, <code>PlannedNode</code>, <code>materialize</code></td><td>A plan is the whole subtree to create, computed without touching the DB. <code>materialize</code> is the single place a plan becomes nodes.</td></tr>
+<tr><td><code>BlobStore</code></td><td>Thin boto3 wrapper for the original files in S3.</td></tr>
+<tr><td><code>indexer</code> (<code>stage_documents</code>, <code>reconcile</code>, <code>index_files</code>)</td><td>Keeps <code>kb_chunks</code> in step with <code>files</code>, using LangChain's indexing API and record manager.</td></tr>
+<tr><td><code>FileLoader</code> / chunking</td><td>File to chunks (1500 chars, 200 overlap), annotated with heading path and line numbers.</td></tr>
+<tr><td><code>dci</code> (<code>list_paths</code>, <code>search_lines</code>, <code>read_lines</code>)</td><td>Direct corpus interaction: grep-like tools over the virtual files.</td></tr>
+<tr><td><code>AgentTools</code></td><td>Wraps the retrieval functions for one manifest as text-in/text-out agent tools.</td></tr>
+<tr><td><code>kb.api.app</code></td><td>FastAPI wrapper, no business logic: shapes requests and maps exceptions to HTTP codes.</td></tr>
+</table></div>
+
+<h2 id="ing"><span style="color:var(--accent)">Part 1:</span> Ingestion (file upload)</h2>
+<p><code>POST /ingest</code> takes a multipart upload (<code>files[]</code> with parallel <code>paths[]</code>), mirrors the folder tree into the KB, converts each file to Markdown, indexes it, and keeps the original. The caller either gets everything or nothing.</p>
+
+<h2 id="three">The three places a file must reach</h2>
+<div class="cards">
+  <div class="card"><div class="lbl">Postgres <span class="tag db">files</span></div><p>The <b>canonical</b> record: a <code>files</code> row with the converted Markdown <code>content</code>, metadata, and <code>blob_key</code> / checksum of the original. Its commit is the one commit point.</p></div>
+  <div class="card"><div class="lbl">pgvector <span class="tag vec">kb_chunks</span></div><p>The <b>derived</b> semantic index: embeddings of 1500-char chunks of the body, with heading and line range per chunk. A record manager tracks what is indexed.</p></div>
+  <div class="card"><div class="lbl">S3 <span class="tag s3">originals/&lt;file id&gt;</span></div><p>The <b>raw original</b> (the PDF, DOCX...) so it can be downloaded later via <code>GET /nodes/{id}/raw</code>. Not kept for plain Markdown.</p></div>
+</div>
+<p>Postgres is the source of truth. The other two can be rebuilt or are only reachable through a committed row. The catch: pgvector's store and S3 cannot join a Postgres transaction.</p>
+
+<h2 id="flow">Upload flow</h2>
+<figure class="diagram"><svg viewBox="0 0 900 345" role="img"><defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ar"/></marker></defs><rect class="bx " x="20" y="130" width="110" height="60" rx="9"/><text class="t" x="75.0" y="156.0" text-anchor="middle">Client</text><text class="m" x="75.0" y="173.0" text-anchor="middle">multipart upload</text><rect class="bx " x="170" y="130" width="150" height="60" rx="9"/><text class="t" x="245.0" y="156.0" text-anchor="middle">Plan + convert</text><text class="m" x="245.0" y="173.0" text-anchor="middle">process pool (CPU)</text><rect class="bx vec" x="470" y="20" width="200" height="60" rx="9"/><text class="t" x="570.0" y="46.0" text-anchor="middle">pgvector</text><text class="m" x="570.0" y="63.0" text-anchor="middle">embed + stage chunks</text><rect class="bx ok" x="470" y="130" width="200" height="60" rx="9"/><text class="t" x="570.0" y="156.0" text-anchor="middle">Postgres</text><text class="m" x="570.0" y="173.0" text-anchor="middle">insert rows + COMMIT</text><rect class="bx s3" x="470" y="240" width="200" height="60" rx="9"/><text class="t" x="570.0" y="266.0" text-anchor="middle">S3</text><text class="m" x="570.0" y="283.0" text-anchor="middle">upload original</text><rect class="bx " x="740" y="130" width="140" height="60" rx="9"/><text class="t" x="810.0" y="156.0" text-anchor="middle">Settle</text><text class="m" x="810.0" y="173.0" text-anchor="middle">clean up leftovers</text><path marker-end="url(#ar2)" class="ln " d="M130,160H170"/><path marker-end="url(#ar2)" class="ln " d="M320,150L470,60"/><path marker-end="url(#ar2)" class="ln ok" d="M320,160H470"/><path marker-end="url(#ar2)" class="ln " d="M320,170L470,260"/><path marker-end="url(#ar2)" class="ln " d="M670,160H740"/><text class="lbl" x="385" y="78" text-anchor="middle">1 before commit</text><text class="lbl" x="395" y="152" text-anchor="middle">2 the commit point</text><text class="lbl" x="385" y="262" text-anchor="middle">1 before commit</text><text class="m" x="445" y="330" text-anchor="middle">Staged data is invisible until step 2: search only sees committed file ids, and only committed rows point at S3 keys.</text></svg><figcaption>The three destinations: staged first, made real by one Postgres commit.</figcaption></figure>
+<div class="flow">
+  <div class="stage"><div class="n">1</div><div><h4>Receive and validate</h4><p>Stream files (1 MiB chunks) into a temp dir mirroring the tree. Check paths (relative, no <code>..</code>, no case-insensitive duplicates) and size limits (413 if exceeded).</p><div class="where">ingest/upload.py: ingest_upload</div></div></div>
+  <div class="arrow">↓</div>
+  <div class="stage"><div class="n">2</div><div><h4>Plan and convert <span class="tag cpu">cpu</span></h4><p>Walk the tree, run each file through its processor, build a <code>FolderPlan</code>. Heavy conversions run in a shared process pool. If any file fails, nothing happens (<code>IngestFailed</code>, 422, lists every failure).</p><div class="where">ingest/folder.py, ingest/convert.py</div></div></div>
+  <div class="arrow">↓</div>
+  <div class="stage"><div class="n">3</div><div><h4>Stage before commit <span class="tag vec">pgvector</span> <span class="tag s3">s3</span></h4><p>Embed all chunks and add them to pgvector; upload originals to S3 in parallel. Nothing in Postgres yet, so nothing can see these.</p><div class="where">service.stage_before_commit</div></div></div>
+  <div class="arrow">↓</div>
+  <div class="stage"><div class="n">4</div><div><h4>Materialize rows <span class="tag db">postgres</span></h4><p>Create folder and file rows through the service (permission checks apply).</p><div class="where">ingest/plan.py: materialize</div></div></div>
+  <div class="arrow">↓</div>
+  <div class="stage commit"><div class="n">5</div><div><h4>Commit <span class="tag db">the commit point</span></h4><p>A <code>before_commit</code> hook re-checks the index (already-staged chunks are skipped, never re-embedded). The DB commit is when the upload becomes real.</p><div class="where">service.commit</div></div></div>
+  <div class="arrow">↓</div>
+  <div class="stage"><div class="n">6</div><div><h4>Settle</h4><p>After the transaction ends: on commit, clean stale chunks; on rollback, remove staged chunks and uploaded originals that no committed row references.</p><div class="where">after_transaction_end hook, indexer.reconcile</div></div></div>
+</div>
+
+<h2 id="atomic">The all-or-nothing mechanism</h2>
+<div class="callout ok"><p>A write lands in Postgres, pgvector and S3 together, or leaves no reachable trace in any of them.</p></div>
+<figure class="diagram"><svg viewBox="0 0 900 355" role="img"><defs><marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ar"/></marker></defs><rect class="bx " x="20" y="120" width="150" height="70" rx="9"/><text class="t" x="95.0" y="151.0" text-anchor="middle">Stage</text><text class="m" x="95.0" y="168.0" text-anchor="middle">chunks + originals</text><path class="bx ok" d="M290,100L370,155L290,210L210,155z"/><text class="t" x="290" y="160" text-anchor="middle">COMMIT</text><rect class="bx ok" x="520" y="30" width="330" height="80" rx="9"/><text class="t" x="685.0" y="66.0" text-anchor="middle">Committed</text><text class="m" x="685.0" y="83.0" text-anchor="middle">row is real; drop stale chunks of edited files</text><rect class="bx s3" x="520" y="200" width="330" height="80" rx="9"/><text class="t" x="685.0" y="236.0" text-anchor="middle">Rolled back / failed / unknown</text><text class="m" x="685.0" y="253.0" text-anchor="middle">remove staged chunks + orphan originals</text><path marker-end="url(#ar3)" class="ln " d="M170,155H210"/><path marker-end="url(#ar3)" class="ln ok" d="M345,125L520,70"/><path marker-end="url(#ar3)" class="ln bad" d="M345,185L520,240"/><text class="lbl" x="430" y="72" text-anchor="middle">yes</text><text class="lbl" x="420" y="250" text-anchor="middle">no</text><text class="m" x="435" y="320" text-anchor="middle">Settle compares what was staged with what is committed (state-based), so a lost connection mid-COMMIT still ends correct.</text><text class="m" x="435" y="340" text-anchor="middle">Process killed in between: scripts/gc.py removes leftovers older than 24 h.</text></svg><figcaption>One commit point; everything else is staged before it and settled after it.</figcaption></figure>
+<p>A true distributed transaction is impossible here (LangChain's <code>PGVectorStore</code> and <code>SQLRecordManager</code> commit on their own connections; S3 has no transactions). So we use <b>one commit point and stage-then-settle</b>:</p>
+<ol>
+  <li><b>Stage before the commit.</b> Chunks go into pgvector and originals into S3 first. They are invisible: search only returns chunks whose <code>file_id</code> belongs to a committed row, and only a committed row points at an S3 key.</li>
+  <li><b>Commit in Postgres.</b> This is the only moment that matters.</li>
+  <li><b>Settle after.</b> A state-based cleanup compares what was staged to what is committed. Committed: drop stale chunks of edited/deleted files. Rolled back: drop the staged chunks and orphan originals.</li>
+</ol>
+<p>Because settling looks at the actual state rather than "did the commit succeed", it is correct even when the connection dies mid-COMMIT and the outcome is unknown. Failures at any stage (embedding server down, S3 error, DB lock timeout) undo what was staged and return an error (indexing failure is 503, nothing written; S3 failure 502).</p>
+<p><b>Crash backstop:</b> if the process is killed between staging and settling, <code>scripts/gc.py</code> deletes originals and chunk groups older than 24 h that have no <code>files</code> row. Correctness never depends on it. Read-time validation also drops any hit whose chunk no longer matches the file's current text.</p>
+
+<h2 id="improve">Efficiency improvements made to the flow</h2>
+<ul>
+  <li><b>Parallel conversion.</b> PDF/Docling work runs in a shared process pool (default min(4, CPUs)); a dead worker fails only its pending files and the pool is rebuilt. Measured: 3.4 pages/s with 1 worker, 7.7 with 4.</li>
+  <li><b>Embed once.</b> Chunks are staged before the commit and the commit-time hook finds them already recorded, so nothing is embedded twice. Unchanged chunks of an edited file are skipped as well (incremental cleanup).</li>
+  <li><b>Batched staging.</b> Add-only indexing across files in batches of 128, and 32 inputs per embeddings request. This works well with batching servers (TEI/vLLM).</li>
+  <li><b>One batch per file when re-indexing.</b> A file split over several batches had its later chunks deleted and re-embedded on every run; one batch per file fixed that.</li>
+  <li><b>Parallel, streamed S3 uploads</b> (8 threads, SHA-256 checked by S3, never read whole into memory), with timeouts and retries.</li>
+  <li><b>Plan first, write later.</b> Conversion and validation happen before any network or DB write, so a bad file fails fast and cheaply.</li>
+  <li><b>Retag does not re-embed.</b> Only the body is embedded, not the frontmatter.</li>
+  <li><b>Deferred <code>File.content</code></b> in the ORM, so listing and agent tools stop loading every file's text.</li>
+  <li><b>OpenAI-compatible embeddings</b> (TEI, vLLM) so production can use a GPU server instead of a single-request Ollama.</li>
+</ul>
+
+<h2 id="capacity">Increasing capacity with the current setup</h2>
+<figure class="diagram"><svg viewBox="0 0 900 330" role="img"><defs><marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ar"/></marker></defs><rect class="bx " x="20" y="60" width="230" height="80" rx="9"/><text class="t" x="135.0" y="96.0" text-anchor="middle">Convert</text><text class="m" x="135.0" y="113.0" text-anchor="middle">API pod CPU (process pool)</text><rect class="bx vec" x="340" y="60" width="230" height="80" rx="9"/><text class="t" x="455.0" y="96.0" text-anchor="middle">Embed</text><text class="m" x="455.0" y="113.0" text-anchor="middle">embedding server</text><rect class="bx db" x="660" y="60" width="220" height="80" rx="9"/><text class="t" x="770.0" y="96.0" text-anchor="middle">Write chunks</text><text class="m" x="770.0" y="113.0" text-anchor="middle">Postgres CPU (HNSW)</text><path marker-end="url(#ar4)" class="ln " d="M250,100H340"/><path marker-end="url(#ar4)" class="ln " d="M570,100H660"/><text class="lbl" x="135" y="172" text-anchor="middle">lever</text><text class="m" x="135" y="192" text-anchor="middle">KB_INGEST_WORKERS ≈ cores / 1.6</text><text class="m" x="135" y="210" text-anchor="middle">more API replicas</text><text class="lbl" x="455" y="172" text-anchor="middle">lever</text><text class="m" x="455" y="192" text-anchor="middle">GPU server (TEI / vLLM)</text><text class="m" x="455" y="210" text-anchor="middle">batches concurrent uploads</text><text class="lbl" x="770" y="172" text-anchor="middle">lever</text><text class="m" x="770" y="192" text-anchor="middle">more Postgres CPU</text><text class="m" x="770" y="210" text-anchor="middle">lower HNSW cost, split writes</text><rect class="bx ok" x="190" y="250" width="520" height="60" rx="9"/><text class="t" x="450.0" y="276.0" text-anchor="middle">Async ingest job + status route</text><text class="m" x="450.0" y="293.0" text-anchor="middle">removes the router timeout; a queue meters load on the shared services</text><path marker-end="url(#ar4)" class="ln dash" d="M450,240V225"/></svg><figcaption>Three steps run in sequence; the slowest shared one sets the pace.</figcaption></figure>
+<p>An upload is synchronous inside one HTTP request, and its steps run one after another, so throughput is set by the slowest shared resource: conversion CPU in the API pod, the embedding server, or pgvector write speed on Postgres (about 2 min per 4,500 chunks, mostly HNSW maintenance). The cheap wins are to run embeddings on a GPU server (TEI/vLLM) which batches concurrent requests, set <code>KB_INGEST_WORKERS</code> to about pod cores ÷ 1.6, scale API replicas (each has its own pool, DB pool size and conversion workers) and give Postgres more CPU. The structural next step is moving big uploads into an async ingest job with a status route (still all or nothing), which removes the router timeout and lets a queue throttle work to what the shared services can take.</p>
+
+<h2 id="agent"><span style="color:var(--accent)">Part 2:</span> Agent consumption</h2>
+<p>An agent gets <code>AgentTools(manifest_id)</code>. The manifest is its <b>scope</b>: the agent only sees files inside it, and paths are shown relative to that scope. Each call opens its own session. Errors come back as an <code>error: ...</code> string so the model can recover instead of crashing the run. Output is capped (<code>max_chars</code>) with a <code>[truncated ...]</code> hint on how to narrow the call.</p>
+<p>The idea (from the DCI paper in <code>docs/reference</code>) is to let agents navigate the corpus like a developer navigates a repo: <code>ls</code>, <code>grep</code>, <code>sed</code>. Agents never see a "virtual file" differently from what is stored: it is the YAML-ish frontmatter (one <code>key: JSON</code> per set field) followed by the Markdown body, and every tool counts lines on that same text.</p>
+
+<figure class="diagram"><svg viewBox="0 0 900 270" role="img"><defs><marker id="ar5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ar"/></marker></defs><rect class="bx " x="20" y="100" width="120" height="60" rx="9"/><text class="t" x="80.0" y="126.0" text-anchor="middle">Agent</text><text class="m" x="80.0" y="143.0" text-anchor="middle">LLM loop</text><rect class="bx db" x="210" y="100" width="170" height="60" rx="9"/><text class="t" x="295.0" y="126.0" text-anchor="middle">AgentTools</text><text class="m" x="295.0" y="143.0" text-anchor="middle">scoped to one manifest</text><rect class="bx " x="470" y="10" width="200" height="50" rx="9"/><text class="t" x="570.0" y="31.0" text-anchor="middle">list_paths</text><text class="m" x="570.0" y="48.0" text-anchor="middle">ls</text><rect class="bx " x="470" y="75" width="200" height="50" rx="9"/><text class="t" x="570.0" y="96.0" text-anchor="middle">search_lines</text><text class="m" x="570.0" y="113.0" text-anchor="middle">grep -n</text><rect class="bx " x="470" y="140" width="200" height="50" rx="9"/><text class="t" x="570.0" y="161.0" text-anchor="middle">read_lines</text><text class="m" x="570.0" y="178.0" text-anchor="middle">sed -n</text><rect class="bx vec" x="470" y="205" width="200" height="50" rx="9"/><text class="t" x="570.0" y="226.0" text-anchor="middle">semantic_search</text><text class="m" x="570.0" y="243.0" text-anchor="middle">by meaning (optional)</text><rect class="bx db" x="740" y="60" width="140" height="70" rx="9"/><text class="t" x="810.0" y="91.0" text-anchor="middle">Postgres</text><text class="m" x="810.0" y="108.0" text-anchor="middle">files.content</text><rect class="bx vec" x="740" y="175" width="140" height="70" rx="9"/><text class="t" x="810.0" y="206.0" text-anchor="middle">pgvector</text><text class="m" x="810.0" y="223.0" text-anchor="middle">kb_chunks</text><path marker-end="url(#ar5)" class="ln " d="M140,130H210"/><path marker-end="url(#ar5)" class="ln " d="M380,130L470,35"/><path marker-end="url(#ar5)" class="ln " d="M380,130L470,100"/><path marker-end="url(#ar5)" class="ln " d="M380,130L470,165"/><path marker-end="url(#ar5)" class="ln " d="M380,130L470,230"/><path marker-end="url(#ar5)" class="ln " d="M670,35L740,85"/><path marker-end="url(#ar5)" class="ln " d="M670,100H740"/><path marker-end="url(#ar5)" class="ln " d="M670,165L740,115"/><path marker-end="url(#ar5)" class="ln " d="M670,230L740,215"/><text class="m" x="295" y="190" text-anchor="middle">text in, text out</text><text class="m" x="295" y="208" text-anchor="middle">errors returned as "error: ..."</text></svg><figcaption>The agent only sees files inside its manifest.</figcaption></figure>
+<h2 id="tools">The tools and what they return</h2>
+<h3>1. <code>list_paths(under=None, recursive=False)</code> like <code>ls</code> / <code>find</code></h3>
+<p>Top-level of the manifest, or the children of <code>under</code>. One line per node: folders end with <code>/</code>; files show status; description when set.</p>
+<pre><code>papers/qasper-1234/  Neural MT for low-resource languages
+papers/qasper-1234/00-overview.md  [stable]  Title, abstract and outline
+papers/qasper-1234/01-introduction.md  [stable]
+papers/qasper-1234/metadata.md  [stable]</code></pre>
+
+<h3>2. <code>search_lines(pattern, ignore_case=True, files_only=False)</code> like <code>grep -n</code></h3>
+<p>Regex per line over all files in scope. Hits are <code>path:line:text</code>; with context, neighbouring lines use <code>-</code> and groups are separated by <code>--</code>. <code>files_only</code> returns just the matching paths, a cheap first step. Several patterns on one line means all must match (<code>grep a | grep b</code>).</p>
+<pre><code>papers/qasper-1234/04-results.md:12:BLEU improved from 21.3 to 24.8 on the test set
+papers/qasper-1234/05-conclusion.md:3:We report BLEU gains on all language pairs</code></pre>
+<p>No hits: <code>(no matches)</code>. Bad regex: <code>error: invalid pattern: ...</code>.</p>
+
+<h3>3. <code>read_lines(path, offset=1, limit=50)</code> like <code>sed -n</code></h3>
+<p>One file, a line range, each line prefixed by its number and a tab, under a header with the range and total. Line numbers are the same as in <code>search_lines</code> output, so a hit is expanded with <code>offset=hit-k</code>.</p>
+<pre><code>papers/qasper-1234/04-results.md (lines 10-13 of 87)
+10	### Main results
+11
+12	BLEU improved from 21.3 to 24.8 on the test set
+13	...</code></pre>
+
+<h3>4. <code>semantic_search(query, k=5)</code> optional, by meaning</h3>
+<p>For conceptual questions where the exact words are unknown. Embeds the query, searches pgvector, filtered to files in the manifest (<code>file_id IN ...</code>). Each hit is a chunk: <code>path:start-end [heading] (similarity)</code> plus a snippet. The line range plugs straight into <code>read_lines</code>.</p>
+<pre><code>papers/qasper-1234/03-method.md:40-71 [Method > Data] (0.82)
+    We train on 1.2M sentence pairs collected from ...
+-- read a hit in full with read_lines(path, offset=start_line)</code></pre>
+<p>If the embeddings backend is down the tool says so and suggests <code>search_lines</code>.</p>
+
+<h2 id="regex">search_lines: the regex runs in Postgres</h2>
+<figure class="diagram"><svg viewBox="0 0 900 305" role="img"><defs><marker id="ar6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" class="ar"/></marker></defs><rect class="bx lane" x="270" y="20" width="440" height="150" rx="12"/><text class="lbl" x="490" y="42" text-anchor="middle">inside Postgres</text><rect class="bx " x="20" y="60" width="200" height="70" rx="9"/><text class="t" x="120.0" y="91.0" text-anchor="middle">Python</text><text class="m" x="120.0" y="108.0" text-anchor="middle">resolve scope, render frontmatter</text><rect class="bx db" x="290" y="60" width="130" height="70" rx="9"/><text class="t" x="355.0" y="91.0" text-anchor="middle">unnest</text><text class="m" x="355.0" y="108.0" text-anchor="middle">ids + frontmatter</text><rect class="bx db" x="440" y="60" width="110" height="70" rx="9"/><text class="t" x="495.0" y="91.0" text-anchor="middle">join</text><text class="m" x="495.0" y="108.0" text-anchor="middle">files.content</text><rect class="bx db" x="570" y="60" width="120" height="70" rx="9"/><text class="t" x="630.0" y="91.0" text-anchor="middle">split lines</text><text class="m" x="630.0" y="108.0" text-anchor="middle">string_to_table</text><rect class="bx " x="750" y="60" width="130" height="70" rx="9"/><text class="t" x="815.0" y="91.0" text-anchor="middle">Python</text><text class="m" x="815.0" y="108.0" text-anchor="middle">format output</text><path marker-end="url(#ar6)" class="ln " d="M220,95H290"/><path marker-end="url(#ar6)" class="ln " d="M420,95H440"/><path marker-end="url(#ar6)" class="ln " d="M550,95H570"/><path marker-end="url(#ar6)" class="ln " d="M710,95H750"/><rect class="bx vec" x="290" y="200" width="190" height="60" rx="9"/><text class="t" x="385.0" y="226.0" text-anchor="middle">match ~ / ~*</text><text class="m" x="385.0" y="243.0" text-anchor="middle">all patterns per line</text><rect class="bx vec" x="500" y="200" width="190" height="60" rx="9"/><text class="t" x="595.0" y="226.0" text-anchor="middle">window fn</text><text class="m" x="595.0" y="243.0" text-anchor="middle">context lines ±n</text><path marker-end="url(#ar6)" class="ln " d="M630,130V165H385V200"/><path marker-end="url(#ar6)" class="ln " d="M480,230H500"/><path marker-end="url(#ar6)" class="ln " d="M690,230H815V130"/><text class="m" x="450" y="290" text-anchor="middle">Only hit and context lines return; rows stream in path order and stop at max_chars. 5 s statement_timeout in a savepoint.</text></svg><figcaption>One SQL query per search_lines call.</figcaption></figure>
+<p>Earlier, search loaded every file's text into Python and ran <code>re</code> on it. Now it is <b>one SQL query per call</b> and no user regex ever runs in the Python process.</p>
+<h3>Why, and the trade-offs</h3>
+<ul>
+  <li><b>Data stays put.</b> Only matches cross the wire, not the whole corpus; the bigger the corpus the bigger the win.</li>
+  <li><b>Safety.</b> The query runs in a savepoint with a local <code>statement_timeout</code> of 5 s (then restored). Timeout (57014) becomes <code>pattern too slow</code>; bad syntax becomes <code>invalid pattern</code>. A runaway regex can't hang the API process.</li>
+  <li><b>Dialect is POSIX ARE, not Python <code>re</code>.</b> The word boundary is <code>\y</code> (<code>\b</code> is a backspace in ARE and would silently match nothing, so it is rejected). No named groups, no mid-pattern <code>(?i)</code>; use <code>ignore_case</code>. The tool description tells the model.</li>
+  <li>Case folding and <code>\w</code> follow the database locale, so the DB must be UTF-8 (not <code>C</code>); Hebrew text is covered by a test. Needs PG 14+.</li>
+</ul>
+
+<h2 id="extra">Other notable details</h2>
+<ul>
+  <li><b>Permissions.</b> Skeleton folders can't be renamed/moved/deleted, auto-updated ones are fully locked, and <code>agent_locked</code> blocks agent writes. Agents have no write tools yet.</li>
+  <li><b>No version history, soft delete only.</b> Deleting a folder soft-deletes its subtree; restore is per node. These were deliberate choices.</li>
+  <li><b>Folders hold no content.</b> Text describing a folder goes in a child file.</li>
+  <li><b>Advisory OKF checks never block writes</b>: broken <code>db://files/&lt;id&gt;</code> links, frontmatter shape, unresolved footnotes, staleness. They show up as <code>warnings</code> on single-node responses.</li>
+  <li><b>Title is the filename stem</b> for every ingested file (no heading parsing); code and config files are intentionally not ingested.</li>
+  <li><b>Evaluation.</b> A LangGraph agent over these tools is graded by an LLM judge on a 20-paper QASPER fixture, to measure whether tools and semantic search earn their place.</li>
+  <li><b>Settings</b> live in one place (<code>kb.settings</code>); <code>python -m kb.settings</code> prints the effective values.</li>
+  <li><b>Known gaps:</b> authn (the actor is just "human" or "agent"), synchronous big uploads, no purge of originals for deleted files, no per-file converter timeout.</li>
+</ul>
+
+<footer>Details: <code>CLAUDE.md</code> and <a href="ingestion-pipeline.html">ingestion-pipeline.html</a> (all-or-nothing flow, failure matrix and benchmarks).</footer>
+</div>
+</body>
+</html>
