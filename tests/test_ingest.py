@@ -278,7 +278,7 @@ class PidProcessor:
     """Records which process converted the file; `.boom` files raise, `.die` kills the worker."""
 
     name = "pid"
-    extensions = frozenset({".pid", ".boom", ".die"})
+    extensions = frozenset({".pid", ".boom", ".die", ".hang"})
     cpu_bound = True
 
     def process(self, path):
@@ -288,6 +288,10 @@ class PidProcessor:
             raise RuntimeError("bad input")
         if path.suffix == ".die":
             os._exit(1)
+        if path.suffix == ".hang":
+            import time
+
+            time.sleep(60)
         return ProcessedDocument(title=path.stem, content=f"{os.getpid()}\n")
 
 
@@ -355,6 +359,37 @@ def test_crashed_worker_fails_the_plan_and_the_pool_recovers(tmp_path, override_
 
     assert "b.die" in {p.name for p, _ in plan.failed}
     assert all("crashed" in error for _, error in plan.failed)
+
+    ok = tmp_path / "ok"
+    write(ok / "a.pid", "")
+    write(ok / "b.pid", "")
+    plan = plan_folder(ok, registry=pid_registry())
+    assert not plan.failed and len(plan.nodes) == 3
+
+
+def test_single_cpu_bound_file_converts_in_a_worker(tmp_path, override_settings):
+    import os
+
+    override_settings(ingest_workers=2)
+    write(tmp_path / "a.pid", "")
+
+    plan = plan_folder(tmp_path, registry=pid_registry())
+
+    assert int(plan.nodes[1].content) != os.getpid()
+
+
+def test_hung_conversion_times_out_and_the_pool_recovers(tmp_path, override_settings):
+    import time
+
+    override_settings(ingest_workers=2, convert_timeout=1.0)
+    hang = tmp_path / "hang"
+    write(hang / "a.hang", "")
+
+    start = time.monotonic()
+    plan = plan_folder(hang, registry=pid_registry())
+
+    assert time.monotonic() - start < 30
+    assert [error for _, error in plan.failed] == ["conversion timed out after 1s"]
 
     ok = tmp_path / "ok"
     write(ok / "a.pid", "")

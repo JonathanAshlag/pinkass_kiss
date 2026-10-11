@@ -453,10 +453,17 @@ It filters hidden and unsupported files client-side, so those are never uploaded
 **Parallel conversion** (`ingest/convert.py`): `plan_folder` walks first, then
 `convert_documents` runs the processors. Ones with `cpu_bound = True` (`LoaderProcessor`) go to a
 process pool (spawn context, created on first use, kept for the process's life and shared by
-requests) when there are 2+ such files; markdown/text and unpicklable processors (lambda
+requests) whenever `KB_INGEST_WORKERS` ≥ 2, even for a single file (#33: isolates segfaults
+and makes hangs killable); markdown/text and unpicklable processors (lambda
 factories, local classes) run in-process. Built-in loader factories are module-level
 functions for that reason. A dead worker (segfault/OOM) fails every file still pending on
-the pool ("converter process crashed") and the pool is recreated next call. Size:
+the pool ("converter process crashed") and the pool is recreated next call. Each pooled
+file gets `KB_CONVERT_TIMEOUT` seconds (default 300, `0` = none; counted from when the request
+starts waiting on it); on timeout the pool's workers are **killed** (private `_processes`,
+`shutdown` alone can't stop a hung worker), so concurrent requests' conversions on it fail
+too. Keep it below the router timeout (10m). Worker start-up cost is small: PyMuPDF4LLM loads
+~15 MB of ONNX layout models once per process (<1 s, cached at module level); Docling's
+office/HTML formats use `SimplePipeline` with no models (`docling-slim`, no torch). Size:
 `KB_INGEST_WORKERS` (default min(4, CPUs), `1` = no pool; set it to the pod's CPU limit).
 Measured on an M2 Pro (8 × 20-page PDFs): 1 worker 3.4 pages/s, 2 → 5.6, 4 → 7.7, 8 → 5.5;
 one PyMuPDF4LLM conversion already uses ~1.6 cores, so expect roughly
@@ -465,8 +472,8 @@ one PyMuPDF4LLM conversion already uses ~1.6 cores, so expect roughly
 **Non-markdown formats** (`ingest/processors/converters.py`): `LoaderProcessor(name, extensions,
 loader_factory)` runs any LangChain `BaseLoader` as a `Processor` (docs joined, title =
 stem, empty text → failed). Built-ins: `PyMuPDF4LLMLoader(mode="single")`
-for `.pdf`; `DoclingLoader(export_type=MARKDOWN)` for `.docx .pptx .xlsx .csv .html .htm` (it pulls
-in torch). Both are core dependencies with no fallbacks; images aren't ingested. Plain text
+for `.pdf`; `DoclingLoader(export_type=MARKDOWN)` for `.docx .pptx .xlsx .csv .html .htm` (`docling-slim`
+parsers only: no torch, no models). Both are core dependencies with no fallbacks; images aren't ingested. Plain text
 (`.txt .text .rst .log`) uses `text.py`. **Code/config files (`.py`, `.json`, ...) are not
 ingested** (user's choice: out of scope, invites misuse); don't re-add without asking. Git
 repos use `ingest/git.py` (`ingest_git_repo`).

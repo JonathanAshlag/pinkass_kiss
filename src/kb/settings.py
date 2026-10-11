@@ -34,6 +34,10 @@ def _optional_limit(raw: str) -> int | None:
     return int(raw) or None  # 0 = no cap
 
 
+def _optional_seconds(raw: str) -> float | None:
+    return float(raw) or None  # 0 = no limit
+
+
 def _workers(raw: str) -> int:
     return max(1, int(raw))
 
@@ -91,6 +95,8 @@ class Settings:
 
     # --- Ingest (kb.ingest) ---
     ingest_workers: int = _env_field("KB_INGEST_WORKERS", _default_workers(), _workers)  # 1 = no pool
+    # Per file; a conversion still running after this fails and its worker is killed.
+    convert_timeout: float | None = _env_field("KB_CONVERT_TIMEOUT", 300.0, _optional_seconds)
     # 0 = no cap. Starlette refuses forms with >1000 files with a bare 400: stay under ~990.
     upload_max_files: int | None = _env_field("KB_UPLOAD_MAX_FILES", 500, _optional_limit)
     upload_max_file_bytes: int | None = _env_field("KB_UPLOAD_MAX_FILE_BYTES", 100 * 1024**2, _optional_limit)

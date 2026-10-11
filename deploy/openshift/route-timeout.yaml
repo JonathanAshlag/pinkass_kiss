@@ -6,7 +6,8 @@
 # converting + embedding it. The OpenShift router's default of 30 s cuts such requests
 # off (the client sees a 504 while the server finishes the write, or rolls it back if
 # the connection drop reaches it first). Raise it to cover the biggest upload you allow
-# (KB_UPLOAD_* limits, see upload-scratch.yaml) at your embeddings server's throughput.
+# (KB_UPLOAD_* limits, see upload-scratch.yaml) at your embeddings server's throughput,
+# and keep it above KB_CONVERT_TIMEOUT so a hung file fails with a 422, not a 504.
 metadata:
   annotations:
     haproxy.router.openshift.io/timeout: 10m
