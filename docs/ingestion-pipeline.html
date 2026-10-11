@@ -345,7 +345,7 @@ Metal GPU, against local Postgres 17 + pgvector 0.8.</p>
 <div class="table-wrap"><table>
   <tr><th>Step</th><th>Speed</th><th>Scales with</th><th>Notes</th></tr>
   <tr><td>PDF → markdown (PyMuPDF4LLM)</td><td class="num">3.4 pages/s per conversion</td><td>CPU cores</td><td>Each conversion already uses ~1.6 cores (native threads). Process pool across files.</td></tr>
-  <tr><td>DOCX / PPTX / HTML (Docling)</td><td>not benchmarked</td><td>CPU cores</td><td>Heavier; each worker loads Docling's models (hundreds of MB).</td></tr>
+  <tr><td>DOCX / PPTX / HTML (Docling)</td><td>not benchmarked</td><td>CPU cores</td><td>No ML models: Docling's simple pipeline (docling-slim, no torch).</td></tr>
   <tr><td>Embedding (Ollama, nomic, 768d)</td><td class="num">25 chunks/s</td><td>GPU</td><td>Batch size 1, 32 or 128 made no difference: Ollama runs one request at a time.</td></tr>
   <tr><td>Embedding (TEI 1.9 on Metal, same model)</td><td class="num">~4 chunks/s</td><td>GPU</td><td>Identical vectors to Ollama (cosine 1.0), but TEI's Mac GPU backend is slow; fp16 doesn't help. TEI is built for NVIDIA GPUs, where it batches.</td></tr>
   <tr><td>Chunk insert (PGVectorStore)</td><td class="num">~24 ms/chunk</td><td>Postgres CPU</td><td>About half is HNSW index maintenance (~11 ms/row, vs 0.1 ms without the index). The rest is LangChain's insert path.</td></tr>
