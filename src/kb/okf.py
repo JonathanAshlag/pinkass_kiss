@@ -19,14 +19,14 @@ from sqlalchemy.orm import Session
 
 from kb.storage.models import File, Folder, Node
 
-_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+_MARKDOWN_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 _INTERNAL_LINK_PREFIX = "db://files/"
-_FOOTNOTE_REF_RE = re.compile(r"\[\^([^\]]+)\](?!:)")
+_FOOTNOTE_REFERENCE_RE = re.compile(r"\[\^([^\]]+)\](?!:)")
 
 
 def extract_links(content: str) -> list[str]:
     """Every markdown link target in `content`, in order of appearance."""
-    return _LINK_RE.findall(content or "")
+    return _MARKDOWN_LINK_RE.findall(content or "")
 
 
 def find_broken_links(session: Session, node_id: uuid.UUID) -> list[str]:
@@ -67,7 +67,7 @@ def find_broken_links(session: Session, node_id: uuid.UUID) -> list[str]:
 # --------------------------------------------------------------------------
 
 
-def _is_valid_actor(by: str) -> bool:
+def _is_valid_actor_format(by: str) -> bool:
     """OKF's actor convention: `<producer>/<version>`, `human:<id>`, `process:<id>`."""
     return by.startswith("human:") or by.startswith("process:") or "/" in by
 
@@ -79,7 +79,7 @@ def _validate_actor_entry(prefix: str, entry, problems: list[str]) -> None:
     by = entry.get("by")
     if not by:
         problems.append(f"{prefix} missing required 'by'")
-    elif not _is_valid_actor(by):
+    elif not _is_valid_actor_format(by):
         problems.append(
             f"{prefix}.by {by!r} doesn't match the "
             "human:<id>/process:<id>/<producer>/<version> convention"
@@ -117,7 +117,7 @@ def extract_footnote_refs(content: str) -> list[str]:
     Every in-body footnote reference label (`[^label]`) in `content`, in
     order of appearance -- excludes footnote *definitions* (`[^label]: ...`).
     """
-    return _FOOTNOTE_REF_RE.findall(content or "")
+    return _FOOTNOTE_REFERENCE_RE.findall(content or "")
 
 
 def find_unresolved_footnotes(node: File) -> list[str]:

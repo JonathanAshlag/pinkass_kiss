@@ -28,7 +28,7 @@ class PlannedNode:
     # Other columns of `files` / `folders` (kind, aliases, description, tags, sources, ...).
     fields: dict[str, Any] = field(default_factory=dict)
     # The node's id, chosen up front (None: the DB picks one). Lets a write index a file
-    # and upload its original before the row exists (see kb.service.stage).
+    # and upload its original before the row exists (see kb.service.stage_before_commit).
     id: uuid.UUID | None = None
     original: Original | None = None  # the source file to keep in the blob store, if any
 
@@ -39,7 +39,7 @@ class PlannedNode:
 
 def transient_files(plan: list[PlannedNode]) -> list[File]:
     """The plan's files as unsaved `File`s, exactly as `materialize` will create them
-    (same id, title, content and fields), for `kb.service.stage`. Every file needs an
+    (same id, title, content and fields), for `kb.service.stage_before_commit`. Every file needs an
     `id`."""
     out = []
     for node in plan:

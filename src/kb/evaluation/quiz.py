@@ -7,7 +7,7 @@ import warnings
 from typing import List, Optional, Union
 from pydantic import BaseModel
 from kb.evaluation.question import OpenQuestion, ClosedQuestion
-from kb.evaluation.report import ABSTAIN, ItemResult, QuizReport, RunStats, classify, is_abstain
+from kb.evaluation.report import ABSTAIN, ItemResult, QuizReport, RunStats, classify_outcome, is_abstain
 
 JUDGE_PROMPT = (
     "You are grading an answer to a question against a reference answer. The answer is "
@@ -180,7 +180,7 @@ class Quiz(BaseModel):
                     reference=reference,
                     answer=answer,
                     correct=correct,
-                    outcome=classify(answerable, abstained, correct, failed),
+                    outcome=classify_outcome(answerable, abstained, correct, failed),
                     question_index=index,
                     repetition=repetition,
                     case_id=case_id,

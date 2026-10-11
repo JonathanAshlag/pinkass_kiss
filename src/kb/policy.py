@@ -47,7 +47,7 @@ class PermissionDenied(Exception):
     (which the API maps to 404)."""
 
 
-_STRUCTURE = {Action.RENAME, Action.MOVE, Action.DELETE}
+_STRUCTURAL_ACTIONS = {Action.RENAME, Action.MOVE, Action.DELETE}
 
 
 def check(actor: Actor, action: Action, node: Node, ancestors: Sequence[Folder] = ()) -> None:
@@ -69,7 +69,7 @@ def check(actor: Actor, action: Action, node: Node, ancestors: Sequence[Folder] 
     if isinstance(node, Folder):
         if node.kind == "auto_updated":
             deny("it is auto-updated")
-        if node.kind == "skeleton" and action in _STRUCTURE:
+        if node.kind == "skeleton" and action in _STRUCTURAL_ACTIONS:
             deny("it is a skeleton folder (change its kind to manual first)")
     elif isinstance(node, File):
         if action == Action.CREATE_INSIDE:
@@ -80,7 +80,7 @@ def check(actor: Actor, action: Action, node: Node, ancestors: Sequence[Folder] 
             deny(f"its folder {ancestors[0].title!r} is auto-updated")
 
 
-def allowed(actor: Actor, action: Action, node: Node, ancestors: Sequence[Folder] = ()) -> bool:
+def is_allowed(actor: Actor, action: Action, node: Node, ancestors: Sequence[Folder] = ()) -> bool:
     try:
         check(actor, action, node, ancestors)
     except PermissionDenied:

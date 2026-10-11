@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 
 @dataclass
-class GcResult:
+class GarbageCollectionResult:
     originals: list[str] = field(default_factory=list)  # keys deleted (or that would be)
     chunk_files: list[uuid.UUID] = field(default_factory=list)  # file ids unindexed
     chunks: int = 0
@@ -56,7 +56,7 @@ def gc_chunks(*, grace: timedelta | None = None, dry_run: bool = False, store=No
     have no `files` row: chunks staged by a write that never committed. Returns (file
     ids, chunks removed). Soft-deleted files keep their chunks here (search excludes
     them; the post-commit cleanup or reindex drops them)."""
-    from kb.semantic_index.indexer import _unindex
+    from kb.semantic_index.indexer import _delete_chunks
     from kb.semantic_index.vectorstore import get_index_store
 
     store = store or get_index_store()
@@ -75,12 +75,12 @@ def gc_chunks(*, grace: timedelta | None = None, dry_run: bool = False, store=No
     ids = [uuid.UUID(g) for g in groups]
     if dry_run or not ids:
         return ids, 0
-    return ids, _unindex(store, ids)
+    return ids, _delete_chunks(store, ids)
 
 
-def collect(store: BlobStore | None, *, dry_run: bool = False) -> GcResult:
+def collect_garbage(store: BlobStore | None, *, dry_run: bool = False) -> GarbageCollectionResult:
     """Both sweeps (originals only when a blob store is configured)."""
-    result = GcResult()
+    result = GarbageCollectionResult()
     if store is not None:
         result.originals = gc_originals(store, dry_run=dry_run)
     result.chunk_files, result.chunks = gc_chunks(dry_run=dry_run)

@@ -74,7 +74,7 @@ class Original:
     sha256: str  # hex
 
     @classmethod
-    def of(cls, path: Path, mime: str | None = None) -> "Original":
+    def from_path(cls, path: Path, mime: str | None = None) -> "Original":
         digest, size = hashlib.sha256(), 0
         with Path(path).open("rb") as f:
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
@@ -82,7 +82,7 @@ class Original:
                 size += len(chunk)
         return cls(Path(path), mime or guess_mime(Path(path).name), size, digest.hexdigest())
 
-    def columns(self, key: str) -> dict[str, Any]:
+    def to_file_columns(self, key: str) -> dict[str, Any]:
         """The `files.blob_*` columns for this original stored under `key`."""
         return {
             "blob_key": key,
@@ -143,7 +143,7 @@ class BlobStore:
                     ChecksumSHA256=base64.b64encode(bytes.fromhex(original.sha256)).decode(),
                 )
         except (ClientError, BotoCoreError, OSError) as exc:
-            raise BlobStoreError(f"storing {key} in s3://{self.bucket}: {_describe(exc)}") from exc
+            raise BlobStoreError(f"storing {key} in s3://{self.bucket}: {_describe_error(exc)}") from exc
 
     def delete_originals(self, keys: list[str]) -> None:
         """Deletes these keys (missing ones are fine), 1000 per request."""
@@ -152,7 +152,7 @@ class BlobStore:
             try:
                 resp = self.client.delete_objects(Bucket=self.bucket, Delete={"Objects": batch, "Quiet": True})
             except (ClientError, BotoCoreError) as exc:
-                raise BlobStoreError(f"deleting from s3://{self.bucket}: {_describe(exc)}") from exc
+                raise BlobStoreError(f"deleting from s3://{self.bucket}: {_describe_error(exc)}") from exc
             if resp.get("Errors"):
                 first = resp["Errors"][0]
                 raise BlobStoreError(f"deleting {first.get('Key')} from s3://{self.bucket}: {first.get('Code')}")
@@ -166,7 +166,7 @@ class BlobStore:
             ):
                 out.extend((o["Key"][len(self.prefix) :], o["LastModified"]) for o in page.get("Contents", []))
         except (ClientError, BotoCoreError) as exc:
-            raise BlobStoreError(f"listing s3://{self.bucket}: {_describe(exc)}") from exc
+            raise BlobStoreError(f"listing s3://{self.bucket}: {_describe_error(exc)}") from exc
         return out
 
     def get_original(self, key: str) -> Any | None:
@@ -180,7 +180,7 @@ class BlobStore:
         except self.client.exceptions.NoSuchKey:
             return None
         except (ClientError, BotoCoreError) as exc:
-            raise BlobStoreError(f"reading {key} from s3://{self.bucket}: {_describe(exc)}") from exc
+            raise BlobStoreError(f"reading {key} from s3://{self.bucket}: {_describe_error(exc)}") from exc
 
     def check(self) -> None:
         """Raises BlobStoreError unless the bucket exists and is reachable with
@@ -193,7 +193,7 @@ class BlobStore:
                 "403": "access denied (the credentials need s3:ListBucket on the bucket)",
                 "301": "bucket is in another region (set AWS_DEFAULT_REGION)",
                 "400": "bad request (often a wrong region or endpoint)",
-            }.get(_error_code(exc) or "", _describe(exc))
+            }.get(_error_code(exc) or "", _describe_error(exc))
             raise BlobStoreError(f"s3://{self.bucket}: {hint}") from exc
 
 
@@ -203,7 +203,7 @@ def _error_code(exc: Exception) -> str | None:
     return None
 
 
-def _describe(exc: Exception) -> str:
+def _describe_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 

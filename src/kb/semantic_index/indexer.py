@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from langchain_core.indexing import index
 from sqlalchemy import text
 
-from kb.semantic_index.chunking import FileNodeLoader, split_documents
+from kb.semantic_index.chunking import FileLoader, split_documents
 from kb.semantic_index.vectorstore import IndexStore, chunk_key_encoder, get_index_store
 from kb.settings import get_settings
 
@@ -54,14 +54,14 @@ class IndexResult:
         self.num_deleted += stats.get("num_deleted", 0)
 
 
-def _loader(file_ids, session_factory) -> FileNodeLoader:
+def _file_loader(file_ids, session_factory) -> FileLoader:
     if session_factory is None:
-        return FileNodeLoader(file_ids)
-    return FileNodeLoader(file_ids, session_factory=session_factory)
+        return FileLoader(file_ids)
+    return FileLoader(file_ids, session_factory=session_factory)
 
 
 def stage_documents(docs, *, store: IndexStore | None = None) -> IndexResult:
-    """Add-only indexing of loader-shaped documents (`chunking.node_document`): embeds
+    """Add-only indexing of loader-shaped documents (`chunking.file_to_document`): embeds
     and inserts every chunk the record manager doesn't have yet, deletes nothing.
     Chunks that already exist (unchanged content, or staged earlier in the same write)
     are skipped, never re-embedded. Raises on any failure: the caller aborts the write
@@ -79,19 +79,19 @@ def stage_documents(docs, *, store: IndexStore | None = None) -> IndexResult:
             cleanup=None,
             source_id_key="file_id",  # still recorded as the group_id, for reconcile/unindex
             key_encoder=chunk_key_encoder,
-            # No cleanup, so no one-batch-per-file rule (see _index_one): batches span files.
+            # No cleanup, so no one-batch-per-file rule (see _index_file): batches span files.
             batch_size=get_settings().stage_batch_size,
         )
     )
     return result
 
 
-def _index_one(store: IndexStore, file_id: uuid.UUID, docs, result: IndexResult) -> None:
+def _index_file(store: IndexStore, file_id: uuid.UUID, docs, result: IndexResult) -> None:
     """(Re)index one file's loader docs, recording a failure instead of raising."""
     try:
         chunks = split_documents(docs)
         if not chunks:  # whitespace-only content: nothing to index, drop what's there
-            result.num_deleted += _unindex(store, [file_id])
+            result.num_deleted += _delete_chunks(store, [file_id])
             return
         result._add(
             index(
@@ -112,7 +112,7 @@ def _index_one(store: IndexStore, file_id: uuid.UUID, docs, result: IndexResult)
         result.failed.append((file_id, f"{type(exc).__name__}: {exc}"))
 
 
-def _unindex(store: IndexStore, file_ids: list[uuid.UUID]) -> int:
+def _delete_chunks(store: IndexStore, file_ids: list[uuid.UUID]) -> int:
     if not file_ids:
         return 0
     rm = store.record_manager
@@ -165,7 +165,7 @@ def index_files(
     store = store or get_index_store()
 
     try:
-        docs = list(_loader(ids, session_factory).lazy_load())
+        docs = list(_file_loader(ids, session_factory).lazy_load())
     except Exception as exc:  # noqa: BLE001
         log.exception("loading files for indexing failed")
         result.failed.extend((fid, f"{type(exc).__name__}: {exc}") for fid in ids)
@@ -177,13 +177,13 @@ def index_files(
 
     gone = [fid for fid in ids if fid not in by_id]
     try:
-        result.num_deleted += _unindex(store, gone)
+        result.num_deleted += _delete_chunks(store, gone)
     except Exception as exc:  # noqa: BLE001
         log.exception("unindexing files failed")
         result.failed.extend((fid, f"{type(exc).__name__}: {exc}") for fid in gone)
 
     for fid, file_docs in by_id.items():
-        _index_one(store, fid, file_docs, result)
+        _index_file(store, fid, file_docs, result)
     return result
 
 
@@ -211,7 +211,7 @@ def unindex_files(file_ids: Iterable[uuid.UUID], *, store: IndexStore | None = N
     ids = list(dict.fromkeys(uuid.UUID(str(i)) for i in file_ids))
     if not ids:
         return 0
-    return _unindex(store or get_index_store(), ids)
+    return _delete_chunks(store or get_index_store(), ids)
 
 
 def reindex_all(*, store: IndexStore | None = None, session_factory=None) -> IndexResult:
@@ -231,10 +231,10 @@ def reindex_all(*, store: IndexStore | None = None, session_factory=None) -> Ind
     started = rm.get_time()
 
     by_id: dict[uuid.UUID, list] = {}
-    for doc in _loader(None, session_factory).lazy_load():
+    for doc in _file_loader(None, session_factory).lazy_load():
         by_id.setdefault(uuid.UUID(doc.metadata["file_id"]), []).append(doc)
     for fid, file_docs in by_id.items():
-        _index_one(store, fid, file_docs, result)
+        _index_file(store, fid, file_docs, result)
 
     keep = set(rm.list_keys(group_ids=[str(fid) for fid, _ in result.failed])) if result.failed else set()
     stale = [k for k in rm.list_keys(before=started) if k not in keep]

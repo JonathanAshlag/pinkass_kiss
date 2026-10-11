@@ -7,7 +7,7 @@ import pytest
 from langchain_core.documents import Document
 from langchain_core.embeddings import DeterministicFakeEmbedding
 
-from kb.semantic_index.chunking import chunk_text, heading_paths, split_documents
+from kb.semantic_index.chunking import strip_context_prefix, heading_paths, split_documents
 from kb.settings import get_settings
 
 
@@ -34,7 +34,7 @@ def test_chunk_line_ranges_cover_chunk_text():
         assert set(c.metadata) == {"file_id", "title", "heading", "start_line", "end_line"}
         s, e = c.metadata["start_line"], c.metadata["end_line"]
         assert 1 <= s <= e <= len(lines)
-        assert chunk_text(c) in "\n".join(lines[s - 1 : e])
+        assert strip_context_prefix(c) in "\n".join(lines[s - 1 : e])
         assert c.page_content.startswith("T > ")
 
 
@@ -74,7 +74,7 @@ def test_no_heading_doc():
     assert len(chunks) == 1
     assert chunks[0].metadata["heading"] is None
     assert chunks[0].page_content == "Notes\n\njust some text\nmore"
-    assert chunk_text(chunks[0]) == "just some text\nmore"
+    assert strip_context_prefix(chunks[0]) == "just some text\nmore"
 
 
 def test_blank_doc_has_no_chunks():
@@ -84,17 +84,17 @@ def test_blank_doc_has_no_chunks():
 def test_openai_compatible_server_embeddings(override_settings):
     from langchain_openai import OpenAIEmbeddings
 
-    from kb.semantic_index.vectorstore import _init_embeddings
+    from kb.semantic_index.vectorstore import _build_embeddings
 
     override_settings(embeddings_base_url="http://tei:8080/v1", embeddings_api_key=None, embeddings_batch_size=32)
-    emb = _init_embeddings("openai:nomic-ai/nomic-embed-text-v1.5")
+    emb = _build_embeddings("openai:nomic-ai/nomic-embed-text-v1.5")
     assert isinstance(emb, OpenAIEmbeddings)
     assert (emb.model, emb.openai_api_base) == ("nomic-ai/nomic-embed-text-v1.5", "http://tei:8080/v1")
     assert emb.check_embedding_ctx_length is False  # no tiktoken token ids sent to a non-OpenAI model
     assert emb.chunk_size == 32
 
     override_settings(embeddings_batch_size=128)
-    assert _init_embeddings("openai:m").chunk_size == 128
+    assert _build_embeddings("openai:m").chunk_size == 128
 
 
 # --------------------------------------------------------------------------
@@ -197,7 +197,7 @@ def test_reindex_unchanged_is_all_skipped(db, store):
 def test_reindex_unchanged_large_file_is_all_skipped(db, store):
     # > index()'s default batch_size (100): a file split across batches used to have its
     # later chunks dropped by the first batch's incremental cleanup and re-embedded
-    # (reindex_all goes through the same per-file _index_one)
+    # (reindex_all goes through the same per-file _index_file)
     from kb.semantic_index.indexer import index_files
 
     fid = make(db, content="".join(section(i) for i in range(80)))
@@ -318,7 +318,7 @@ def test_unindex_files_returns_count(db, store):
 
 def test_line_ranges_round_trip_through_read_lines(db, store):
     from kb import service
-    from kb.semantic_index.chunking import chunk_text
+    from kb.semantic_index.chunking import strip_context_prefix
     from kb.semantic_index.indexer import index_files
 
     content = "# Paper\n\nintro\n\n" + "".join(section(i, words=100) for i in range(6))
@@ -334,4 +334,4 @@ def test_line_ranges_round_trip_through_read_lines(db, store):
         out = service.read_lines(db, m.id, str(fid), offset=r.start_line, limit=r.end_line - r.start_line + 1)
         body = "\n".join(line.split("\t", 1)[1] for line in out.text.split("\n")[1:])
         doc = Document(page_content=r.content, metadata={"title": r.title, "heading": r.heading})
-        assert chunk_text(doc) in body
+        assert strip_context_prefix(doc) in body

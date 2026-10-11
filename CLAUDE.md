@@ -15,7 +15,7 @@ this project" below for what was deliberately adopted, adapted, or skipped.
    Owns the virtual filesystem: folders and files (two tables), parent-child hierarchy, generic metadata,
    timestamps, soft delete, and "manifests" (curated per-agent file lists). Exposes
    clean primitives (`get_node`, `list_children`, `create_file`, `move_node`,
-   `delete_node`, `query_metadata`, plus manifest operations). Doesn't
+   `delete_node`, `find_nodes`, plus manifest operations). Doesn't
    interpret frontmatter *values* (tags/status/etc. stay opaque) and doesn't import
    `kb.okf` — the two layers are fully independent.
 
@@ -27,7 +27,7 @@ this project" below for what was deliberately adopted, adapted, or skipped.
    (`is_stale`).
 
 3. **KB service / CRUD API** — **built.** `src/kb/service.py`: a thin passthrough
-   chokepoint over the DAL (plus two real pieces of logic: `get_warnings`, and the
+   chokepoint over the DAL (plus two real pieces of logic: `collect_advisory_warnings`, and the
    `kb.policy` permission check on every mutation) that every
    consumer — REST API, agents, ingestion jobs — goes through instead of calling
    `kb.storage.dal` directly. `src/kb/api/app.py`: a FastAPI REST surface over it. Still
@@ -65,14 +65,14 @@ src/kb/
     folder.py         plan_folder / ingest_folder
     upload.py         ingest_upload (multipart uploads -> temp dir -> ingest_folder)
     plan.py           PlannedNode + materialize (the one place a plan becomes nodes)
-    convert.py        convert_all: runs processors, cpu_bound ones in a shared process pool
+    convert.py        convert_documents: runs processors, cpu_bound ones in a shared process pool
     processors/
       base.py         Processor protocol, ProcessedDocument, registry
       markdown.py     MarkdownProcessor
       converters.py   LoaderProcessor: PDF/DOCX/... -> markdown via LangChain loaders
   semantic_index/     layer 4, build side: derived pgvector index; never imports kb.service
     vectorstore.py    LangChain wiring: PGVectorStore, record manager, embeddings
-    chunking.py       files -> chunks (FileNodeLoader, splitter, line/heading annotator)
+    chunking.py       files -> chunks (FileLoader, splitter, line/heading annotator)
     indexer.py        stage_documents / reconcile / index_files / unindex_files / reindex_all
   retrieval/          data going out to agents
     dci.py            direct corpus interaction: list_paths / search_lines / read_lines
@@ -167,7 +167,7 @@ attribute (`"file"` / `"folder"`), which the API exposes as `type`.
 | `generated` | nullable JSONB **object** (not array) — OKF's `{by, at}` provenance field, added alongside `verified`. `NULL` = no provenance recorded |
 | `stale_after` | nullable `timestamptz` — an absolute instant, not a relative TTL, matching OKF's semantics exactly; `kb.okf.is_stale(node)` compares it against now |
 | `status` (enum `draft`\|`stable`\|`deprecated`) | lifecycle field |
-| `content` | markdown body, NOT NULL. **Deferred** in the ORM (not in `SELECT files.*`-style loads; read lazily on access): bulk readers that need the text add `.options(undefer(File.content))` (`FileNodeLoader`, pre-commit staging; `search_lines` never loads it, Postgres reads it). Reading it on a detached `File` raises `DetachedInstanceError` |
+| `content` | markdown body, NOT NULL. **Deferred** in the ORM (not in `SELECT files.*`-style loads; read lazily on access): bulk readers that need the text add `.options(undefer(File.content))` (`FileLoader`, pre-commit staging; `search_lines` never loads it, Postgres reads it). Reading it on a detached `File` raises `DetachedInstanceError` |
 | `deleted_at` | soft delete, NULL = active |
 | `blob_key`, `blob_size_bytes`, `blob_mime_type`, `blob_checksum` | the retained original of a converted file (PDF, ...): per-file key `originals/<file id>` in the `kb.storage.blobs` store (no dedupe, by choice: undo can delete it without asking who else uses it), checksum `sha256:<hex>`. NULL for markdown nodes or when no blob store is configured |
 | `created_at`, `updated_at` | `updated_at` kept current by a DB trigger (`trg_files_set_updated_at` → `set_updated_at()`), not the ORM |
@@ -293,7 +293,7 @@ moved into a file). Folder moves take a global transaction-level advisory lock
 (`pg_advisory_xact_lock`) before the cycle check, so two crossing moves can't both pass
 it (#17); it's held until commit, so don't move folders inside long transactions. Creating or moving into a **deleted** folder is a `FieldError` (422):
 the node would be active but unreachable. `delete_node` (always cascades: the
-`cascade=false` option was removed because it left active children under a deleted folder), `restore_node`, `query_metadata` (filter by tags/status/`node_type`/kind/parent_id;
+`cascade=false` option was removed because it left active children under a deleted folder), `restore_node`, `find_nodes` (filter by tags/status/`node_type`/kind/parent_id;
 a status filter yields files only). `FieldError` is a `ValueError` subclass → API 422.
 The DAL stays policy-unaware.
 
@@ -342,7 +342,7 @@ explicit-`Session`-argument style, same exceptions (`TreeCycleError`,
 `ManifestCycleError`, `FieldError`, plain `ValueError` for "no such node/manifest") plus
 `PermissionDenied`. Mutations take `actor="human"` and run the policy check first (see
 "Permissions"); manifest member functions take `node_id` instead of `file_id`/`folder_id`.
-`get_warnings(session, node)` composes all four `kb.okf` advisory checks into a single
+`collect_advisory_warnings(session, node)` composes all four `kb.okf` advisory checks into a single
 `list[str]` report for a file (`[]` for a folder).
 
 `api/app.py` is a thin FastAPI wrapper: no business logic, just request/response shaping
@@ -359,7 +359,7 @@ field — both 422 at the Pydantic layer), `GET/PATCH/DELETE /nodes/{id}`,
 `kind`), and the `/manifests` equivalents
 (`POST/GET /manifests`, `GET /manifests/{id}`, `POST/DELETE /manifests/{id}/members`,
 `GET /manifests/{id}/resolve`), and `GET /ingest/extensions` / `POST /ingest` (folder upload). Single-resource responses (`NodeRead`) include a
-`warnings` field from `get_warnings` and the file-only fields (None on folders); list
+`warnings` field from `collect_advisory_warnings` and the file-only fields (None on folders); list
 responses (`NodeSummary`: `id, type, parent_id, kind, agent_locked, title, description,
 tags, status`) omit `content` and `warnings` to avoid running the advisory checks on
 every row of a listing.
@@ -396,7 +396,7 @@ fields, id, original)`s (the root plus one per
 file, addressed by `/`-joined path; every file gets its `id` up front and, for
 `retain_original` processors, an `Original(path, mime, size, sha256)`) and the
 skipped/failed lists. `ingest_folder` then sets the `blob_*` columns, calls
-`service.stage(files=transient_files(plan), originals=...)` (embed + upload, before the
+`service.stage_before_commit(files=transient_files(plan), originals=...)` (embed + upload, before the
 transaction creates any row) and `materialize`s. Then
 **`materialize(session, plan, *, parent_id, folder_fields)`** (`ingest/plan.py`) is the one place
 a plan becomes nodes. Ancestors the plan doesn't list are *implied* and created as plain
@@ -451,7 +451,7 @@ or a plain multi-file picker for loose files).
 It filters hidden and unsupported files client-side, so those are never uploaded.
 
 **Parallel conversion** (`ingest/convert.py`): `plan_folder` walks first, then
-`convert_all` runs the processors. Ones with `cpu_bound = True` (`LoaderProcessor`) go to a
+`convert_documents` runs the processors. Ones with `cpu_bound = True` (`LoaderProcessor`) go to a
 process pool (spawn context, created on first use, kept for the process's life and shared by
 requests) when there are 2+ such files; markdown/text and unpicklable processors (lambda
 factories, local classes) run in-process. Built-in loader factories are module-level
@@ -480,7 +480,7 @@ LangChain `ByteStore`, no local-dir backend; for offline dev point `BLOB_ENDPOIN
 at MinIO). Store from env: `BLOB_BUCKET` (+`BLOB_ENDPOINT_URL`, `BLOB_PREFIX`); unset →
 none (originals not kept). Tests use the moto-backed `blob_store` fixture
 (`tests/conftest.py`) and `set_blob_store`. `ingest_folder`/`ingest_upload` default to
-the env store (`blob_store=None` keeps none). Uploads happen in `service.stage`, before
+the env store (`blob_store=None` keeps none). Uploads happen in `service.stage_before_commit`, before
 the transaction (so `ingest_upload`'s temp dir can be gone by commit time); a blob error
 fails the whole write and deletes what was uploaded. `GET /nodes/{id}/raw` downloads it
 (404 if none), streamed from S3 (never read whole), with an RFC 6266 `filename*=` for
@@ -519,14 +519,14 @@ Built from LangChain parts; only KB-specific glue is hand-written.
   `DeterministicFakeEmbedding`. Searches run with `hnsw.iterative_scan=relaxed_order`
   so narrow `$in` filters still return k hits. `chunk_key_encoder` makes uuid chunk ids
   (the default sha1 one warns; sha256 hex doesn't fit the uuid column).
-- **Chunking** (`semantic_index/chunking.py`): `FileNodeLoader` yields one Document per active **file**
-  (built by `node_document(file)`, which also works on uncommitted/transient `File`s)
+- **Chunking** (`semantic_index/chunking.py`): `FileLoader` yields one Document per active **file**
+  (built by `file_to_document(file)`, which also works on uncommitted/transient `File`s)
   (folders have no content and are never indexed; `kb_chunks.file_id` → `files`). Only the markdown **body** is embedded, not frontmatter
   (so retags re-embed nothing), but `start_line`/`end_line` are lines of the
   virtual file (`kb.okf.body_line_offset`), so `read_lines(path, offset=start_line)` returns the
   chunk. `RecursiveCharacterTextSplitter.from_language(MARKDOWN)`, 1500 chars / 200
   overlap. `heading` = heading path at the chunk start ("Methods > Data"). Embedded text
-  is prefixed with `"<title> > <heading>"`; `chunk_text(doc)` strips it.
+  is prefixed with `"<title> > <heading>"`; `strip_context_prefix(doc)` strips it.
 - **Sync** (`semantic_index/indexer.py`): `index_files(ids)` takes *any* touched ids — active nodes are
   re-indexed via `langchain_core.indexing.index(cleanup="incremental",
   source_id_key="file_id")` (unchanged chunks skipped, never re-embedded), deleted /
@@ -548,13 +548,13 @@ Built from LangChain parts; only KB-specific glue is hand-written.
   --all` (should find nothing to do). Tests: `tests/test_write_sync.py`.
 - **Search** (`retrieval/semantic.py`): `service.semantic_search(session, manifest_id, query, *, k,
   tags, status)` → `SearchHit(file_id, path, title, heading, start_line, end_line,
-  snippet, score)`. Scope = manifest nodes (∩ `query_metadata` tags/status) as a
+  snippet, score)`. Scope = manifest nodes (∩ `find_nodes` tags/status) as a
   `file_id $in` filter — tags/status are never copied onto chunks. `score` is cosine
   **similarity** (higher = closer). Route: `GET /manifests/{id}/semantic?q=&k=`.
-  **Read-time validation**: a hit is dropped unless `chunk_text` is still inside lines
+  **Read-time validation**: a hit is dropped unless `strip_context_prefix` is still inside lines
   `start_line..end_line` of the file's current virtual file (hides chunks of an edit
   that is staged but not committed, or whose post-commit cleanup failed); fetches
-  `OVERFETCH` (2) × k rows to make up for drops.
+  `OVERFETCH_FACTOR` (2) × k rows to make up for drops.
 
 Tests: `tests/test_semantic_index.py` (indexer tests write through the DAL, which records
 nothing, so they drive the indexer on their own), `tests/test_semantic_search.py`.
@@ -569,7 +569,7 @@ commit point, the DB commit**. Everything else is written before it, where nothi
 reach it (search scopes to committed file ids; only a committed row points at an S3
 object), and settled after it:
 
-- `service.stage(session, files=, originals=)` (ingest, before its transaction does
+- `service.stage_before_commit(session, files=, originals=)` (ingest, before its transaction does
   anything): add-only index the transient `File`s, then upload originals (thread pool,
   `BLOB_UPLOAD_WORKERS`, default 8). On failure it undoes its own work and raises.
 - `before_commit` event (**every** commit, `service.commit` or a plain
@@ -586,11 +586,11 @@ object), and settled after it:
   failure; `indexed` is the staging `IndexResult`. No `index=`/`schedule=`, no
   `KB_AUTO_INDEX`, no background indexing (all removed; don't reintroduce without
   asking — they made the index eventually consistent).
-- Session keys: `_TOUCHED`, `_CREATED`, `_STAGED`, `_UPLOADED`, `_COMMITTED`,
-  `_LAST_STAGE` in `session.info`. A rolled-back SAVEPOINT keeps its ids (over-staging
+- Session keys: `_TOUCHED_KEY`, `_CREATED_KEY`, `_STAGED_KEY`, `_UPLOADED_KEY`, `_COMMITTED_KEY`,
+  `_LAST_STAGE_KEY` in `session.info`. A rolled-back SAVEPOINT keeps its ids (over-staging
   is harmless).
 - Crash backstop (kill -9 between staging and settling): `scripts/gc.py [--dry-run]` →
-  `kb.maintenance.collect`: originals under `originals/` older than 24 h with no `files`
+  `kb.maintenance.collect_garbage`: originals under `originals/` older than 24 h with no `files`
   row (soft-deleted rows count as referencing), and record-manager groups older than 24 h
   with no `files` row (24 h, not less: a long ingest's chunks wait that long for their rows, #21).
   Correctness never depends on it.

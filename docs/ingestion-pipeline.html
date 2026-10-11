@@ -195,7 +195,7 @@ so most failures happen before anything needs undoing.</p>
     PDFs and Office files run in a shared <strong>process pool</strong>, markdown/text in-process. Every file gets its
     <strong>UUID up front</strong>; converted files also get an <code>Original</code> (path, MIME, size, SHA-256, hashed locally).
     No DB, no network.</p>
-    <div class="where">kb/ingest/folder.py · plan_folder, kb/ingest/convert.py · convert_all</div>
+    <div class="where">kb/ingest/folder.py · plan_folder, kb/ingest/convert.py · convert_documents</div>
   </div></div>
   <div class="arrow">↓</div>
   <div class="stage"><div class="n">3</div><div>
@@ -209,13 +209,13 @@ so most failures happen before anything needs undoing.</p>
     <p>Build LangChain Documents from <strong>transient</strong> <code>File</code> objects (final ids and fields, not in the DB yet), split into
     chunks and run <code>index(cleanup=None, batch_size=128)</code>: add-only, embeds and inserts, deletes nothing. The ids are
     recorded as "touched/created" first, so even a half-done staging is undone by id.</p>
-    <div class="where">kb/service.py · stage → _stage_index → indexer.stage_documents · IndexingError 503</div>
+    <div class="where">kb/service.py · stage_before_commit → _stage_chunks → indexer.stage_documents · IndexingError 503</div>
   </div></div>
   <div class="arrow">↓</div>
   <div class="stage"><div class="n">5</div><div>
     <h4>Upload originals <span class="tag s3">s3</span></h4>
     <p>8 parallel <code>PutObject</code>s, streamed from the temp dir, with <code>ChecksumSHA256</code> so S3 rejects corrupted bytes.
-    Every key that made it is recorded for the undo. On failure, <code>stage</code> undoes its own chunks and uploads, then raises.</p>
+    Every key that made it is recorded for the undo. On failure, <code>stage_before_commit</code> undoes its own chunks and uploads, then raises.</p>
     <div class="where">service._upload_originals · BlobStore.put_original · BlobStoreError 502</div>
   </div></div>
   <div class="arrow">↓</div>
@@ -231,7 +231,7 @@ so most failures happen before anything needs undoing.</p>
     <p>Flush, load the active touched files and run the same add-only <code>index()</code>. For an ingest every chunk is already
     in the record manager, so all are <strong>skipped</strong> (no second embedding). For a <code>PATCH</code> this is where the embedding happens.
     Failure raises <code>IndexingError</code>, so the commit doesn't happen.</p>
-    <div class="where">service._stage_touched (SQLAlchemy Session event, fires on every commit)</div>
+    <div class="where">service._stage_touched_files (SQLAlchemy Session event, fires on every commit)</div>
   </div></div>
   <div class="arrow">↓</div>
   <div class="stage commit"><div class="n">8</div><div>
@@ -245,7 +245,7 @@ so most failures happen before anything needs undoing.</p>
     <p><strong>Committed:</strong> <code>reconcile</code> edited or deleted ids, dropping stale chunks. New files were staged exactly, so they are skipped.<br>
     <strong>Rolled back:</strong> <code>reconcile</code> every touched id (drops the staged chunks; no embedding) and delete uploaded originals no
     committed row references. Never raises; failures are logged.</p>
-    <div class="where">service._end_transaction → _settle → indexer.reconcile, _delete_unreferenced</div>
+    <div class="where">service._on_transaction_end → _reconcile_after_transaction → indexer.reconcile, _delete_orphaned_originals</div>
   </div></div>
 </div>
 
@@ -279,7 +279,7 @@ so most failures happen before anything needs undoing.</p>
   <tr><th>Fails at</th><th>Already written</th><th>Undo</th><th>API</th></tr>
   <tr><td>Path checks / limits</td><td>nothing</td><td>none needed</td><td class="num">422 / 413</td></tr>
   <tr><td>Conversion (any file)</td><td>nothing</td><td>none needed</td><td class="num">422 + list</td></tr>
-  <tr><td>Embedding / chunk insert</td><td>some chunks</td><td><code>stage</code> reconciles its ids → chunks removed</td><td class="num">503</td></tr>
+  <tr><td>Embedding / chunk insert</td><td>some chunks</td><td><code>stage_before_commit</code> reconciles its ids → chunks removed</td><td class="num">503</td></tr>
   <tr><td>S3 upload (any file)</td><td>all chunks, some originals</td><td>chunks reconciled away, uploaded keys deleted</td><td class="num">502</td></tr>
   <tr><td>Materialize (permission, constraint)</td><td>chunks + originals</td><td>rollback → settle removes both</td><td class="num">403 / 4xx / 500</td></tr>
   <tr><td><code>before_commit</code> indexing</td><td>chunks + originals + flushed rows</td><td>rollback → settle removes all</td><td class="num">503</td></tr>
@@ -433,7 +433,7 @@ record manager namespace includes the model name. A model that isn't 768-dimensi
   <tr><td>Route annotation <code>haproxy.router.openshift.io/timeout</code></td><td>10m</td><td>how long an ingest request may take</td></tr>
 </table></div>
 <p>Constants in code: staging batch size 128 (<code>indexer.STAGE_BATCH_SIZE</code>), 8 parallel S3 uploads (<code>service.UPLOAD_WORKERS</code>),
-search overfetch 2× (<code>semantic.OVERFETCH</code>), GC grace 24 h for originals and 1 h for chunks (<code>maintenance.py</code>).</p>
+search overfetch 2× (<code>semantic.OVERFETCH_FACTOR</code>), GC grace 24 h for originals and 1 h for chunks (<code>maintenance.py</code>).</p>
 
 <!-- ------------------------------------------------------------------ -->
 <h2 id="next">13. Limits and next steps</h2>

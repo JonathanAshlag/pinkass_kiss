@@ -45,7 +45,7 @@ Verified facts (langchain-postgres 0.0.18, langchain-classic 1.0.8, langchain-co
   raises NotImplementedError; plain equality `{"file_id": str(id)}` also works).
 - `similarity_search_with_score` returns cosine *distance* (lower = closer, 0..2).
 - `add_documents` inserts row by row (one connection round-trip per chunk).
-- Metadata keys in `METADATA_COLUMNS` go to their own columns; anything else lands in
+- Metadata keys in `CHUNK_METADATA_COLUMNS` go to their own columns; anything else lands in
   the `langchain_metadata` JSON column. Search results return both merged into
   `Document.metadata`, with `file_id` read back as a `uuid.UUID` from the column.
 - `kb_chunks.file_id` has no FK (migration 0003): chunks are staged before their file
@@ -73,7 +73,7 @@ from langchain_core.vectorstores import VectorStore
 from kb.settings import get_settings
 
 CHUNKS_TABLE = "kb_chunks"
-METADATA_COLUMNS = ["file_id", "heading", "start_line", "end_line"]
+CHUNK_METADATA_COLUMNS = ["file_id", "heading", "start_line", "end_line"]
 
 _CHUNK_ID_NAMESPACE = uuid.UUID("6f1d7c62-3a0e-4b8e-9a51-0b6c1f6a9e21")
 
@@ -97,7 +97,7 @@ class IndexStore:
     embeddings: Embeddings
 
 
-def _init_embeddings(model: str) -> Embeddings:
+def _build_embeddings(model: str) -> Embeddings:
     settings = get_settings()
     if model == "fake":
         from langchain_core.embeddings import DeterministicFakeEmbedding
@@ -154,7 +154,7 @@ def build_index_store(
         database_url = get_database_url()
     model = get_settings().embeddings_model
     if embeddings is None:
-        embeddings = _init_embeddings(model)
+        embeddings = _build_embeddings(model)
     if namespace is None:
         namespace = f"{CHUNKS_TABLE}/{model}"
 
@@ -163,7 +163,7 @@ def build_index_store(
         pg_engine,
         embeddings,
         CHUNKS_TABLE,
-        metadata_columns=METADATA_COLUMNS,
+        metadata_columns=CHUNK_METADATA_COLUMNS,
         index_query_options=_iterative_hnsw_options(),
     )
     # Table is owned by migration 0002 -- never call record_manager.create_schema().

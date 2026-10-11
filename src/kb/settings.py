@@ -30,7 +30,7 @@ def _bool(raw: str) -> bool:
     return raw.lower() in ("1", "true", "yes")
 
 
-def _cap(raw: str) -> int | None:
+def _optional_limit(raw: str) -> int | None:
     return int(raw) or None  # 0 = no cap
 
 
@@ -38,7 +38,7 @@ def _workers(raw: str) -> int:
     return max(1, int(raw))
 
 
-def _hours(raw: str) -> timedelta:
+def _parse_hours(raw: str) -> timedelta:
     return timedelta(hours=float(raw))
 
 
@@ -47,58 +47,58 @@ def _default_workers() -> int:
     return min(4, getattr(os, "process_cpu_count", os.cpu_count)() or 1)  # process_cpu_count: 3.13+
 
 
-def _masked(value: Any) -> str:
+def _mask_secret(value: Any) -> str:
     return "***" if value else repr(value)
 
 
-def _url_masked(value: Any) -> str:
+def _mask_url_password(value: Any) -> str:
     from sqlalchemy import make_url
 
     return make_url(value).render_as_string(hide_password=True) if value else repr(value)
 
 
-def _setting(env: str, default: Any, parse: Callable[[str], Any] = str, show: Callable[[Any], str] = repr):
+def _env_field(env: str, default: Any, parse: Callable[[str], Any] = str, show: Callable[[Any], str] = repr):
     return field(default=default, metadata={"env": env, "parse": parse, "show": show})
 
 
 @dataclass(frozen=True)
 class Settings:
     # --- Postgres (kb.storage.db) ---
-    database_url: str = _setting("DATABASE_URL", None, show=_url_masked)  # required
+    database_url: str = _env_field("DATABASE_URL", None, show=_mask_url_password)  # required
     # Server-side, Postgres duration syntax, "0" = none: a stuck write fails and is undone.
-    db_lock_timeout: str = _setting("KB_DB_LOCK_TIMEOUT", "10s")
-    db_statement_timeout: str = _setting("KB_DB_STATEMENT_TIMEOUT", "60s")
+    db_lock_timeout: str = _env_field("KB_DB_LOCK_TIMEOUT", "10s")
+    db_statement_timeout: str = _env_field("KB_DB_STATEMENT_TIMEOUT", "60s")
 
     # --- Embeddings / semantic index (kb.semantic_index) ---
     # init_embeddings spec; names the index namespace, so changing it means a full re-embed.
-    embeddings_model: str = _setting("EMBEDDINGS_MODEL", "ollama:nomic-embed-text")
-    embeddings_base_url: str | None = _setting("EMBEDDINGS_BASE_URL", None)  # OpenAI-compatible server
-    embeddings_api_key: str | None = _setting("EMBEDDINGS_API_KEY", None, show=_masked)
-    embeddings_batch_size: int = _setting("EMBEDDINGS_BATCH_SIZE", 32, int)  # TEI's default max
-    embedding_dim: int = _setting("EMBEDDING_DIM", 768, int)  # must match kb_chunks.embedding
-    stage_batch_size: int = _setting("KB_STAGE_BATCH_SIZE", 128, int)  # chunks per add-only index() batch
+    embeddings_model: str = _env_field("EMBEDDINGS_MODEL", "ollama:nomic-embed-text")
+    embeddings_base_url: str | None = _env_field("EMBEDDINGS_BASE_URL", None)  # OpenAI-compatible server
+    embeddings_api_key: str | None = _env_field("EMBEDDINGS_API_KEY", None, show=_mask_secret)
+    embeddings_batch_size: int = _env_field("EMBEDDINGS_BATCH_SIZE", 32, int)  # TEI's default max
+    embedding_dim: int = _env_field("EMBEDDING_DIM", 768, int)  # must match kb_chunks.embedding
+    stage_batch_size: int = _env_field("KB_STAGE_BATCH_SIZE", 128, int)  # chunks per add-only index() batch
 
     # --- S3 originals (kb.storage.blobs) ---
-    blob_bucket: str | None = _setting("BLOB_BUCKET", None)  # unset = originals not kept
-    blob_prefix: str = _setting("BLOB_PREFIX", "")
-    blob_endpoint_url: str | None = _setting("BLOB_ENDPOINT_URL", None)  # MinIO etc.
-    blob_required: bool = _setting("BLOB_REQUIRED", False, _bool)  # prod: no/broken store aborts startup
+    blob_bucket: str | None = _env_field("BLOB_BUCKET", None)  # unset = originals not kept
+    blob_prefix: str = _env_field("BLOB_PREFIX", "")
+    blob_endpoint_url: str | None = _env_field("BLOB_ENDPOINT_URL", None)  # MinIO etc.
+    blob_required: bool = _env_field("BLOB_REQUIRED", False, _bool)  # prod: no/broken store aborts startup
     # Worst case per call ~ attempts * (connect + read), instead of botocore's 60 s + 60 s.
-    blob_connect_timeout: float = _setting("BLOB_CONNECT_TIMEOUT", 5.0, float)
-    blob_read_timeout: float = _setting("BLOB_READ_TIMEOUT", 30.0, float)
-    blob_max_attempts: int = _setting("BLOB_MAX_ATTEMPTS", 3, int)  # including the first
-    blob_upload_workers: int = _setting("BLOB_UPLOAD_WORKERS", 8, int)  # parallel uploads per write
+    blob_connect_timeout: float = _env_field("BLOB_CONNECT_TIMEOUT", 5.0, float)
+    blob_read_timeout: float = _env_field("BLOB_READ_TIMEOUT", 30.0, float)
+    blob_max_attempts: int = _env_field("BLOB_MAX_ATTEMPTS", 3, int)  # including the first
+    blob_upload_workers: int = _env_field("BLOB_UPLOAD_WORKERS", 8, int)  # parallel uploads per write
 
     # --- Ingest (kb.ingest) ---
-    ingest_workers: int = _setting("KB_INGEST_WORKERS", _default_workers(), _workers)  # 1 = no pool
+    ingest_workers: int = _env_field("KB_INGEST_WORKERS", _default_workers(), _workers)  # 1 = no pool
     # 0 = no cap. Starlette refuses forms with >1000 files with a bare 400: stay under ~990.
-    upload_max_files: int | None = _setting("KB_UPLOAD_MAX_FILES", 500, _cap)
-    upload_max_file_bytes: int | None = _setting("KB_UPLOAD_MAX_FILE_BYTES", 100 * 1024**2, _cap)
-    upload_max_total_bytes: int | None = _setting("KB_UPLOAD_MAX_TOTAL_BYTES", 1024**3, _cap)
+    upload_max_files: int | None = _env_field("KB_UPLOAD_MAX_FILES", 500, _optional_limit)
+    upload_max_file_bytes: int | None = _env_field("KB_UPLOAD_MAX_FILE_BYTES", 100 * 1024**2, _optional_limit)
+    upload_max_total_bytes: int | None = _env_field("KB_UPLOAD_MAX_TOTAL_BYTES", 1024**3, _optional_limit)
 
     # --- Maintenance (kb.maintenance, scripts/gc.py) ---
     # Orphans younger than this are left alone; it must outlast the longest ingest (#21).
-    gc_grace: timedelta = _setting("KB_GC_GRACE_HOURS", timedelta(hours=24), _hours, str)
+    gc_grace: timedelta = _env_field("KB_GC_GRACE_HOURS", timedelta(hours=24), _parse_hours, str)
 
 
 def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
@@ -136,7 +136,7 @@ def set_settings(settings: Settings | None) -> None:
     _settings = settings
 
 
-def describe(settings: Settings, env: Mapping[str, str] = os.environ) -> list[str]:
+def describe_settings(settings: Settings, env: Mapping[str, str] = os.environ) -> list[str]:
     """One line per setting: env var, effective value (secrets masked), and its source."""
     lines = []
     for f in fields(Settings):
@@ -148,6 +148,6 @@ def describe(settings: Settings, env: Mapping[str, str] = os.environ) -> list[st
 
 if __name__ == "__main__":
     try:
-        print("\n".join(describe(get_settings())))
+        print("\n".join(describe_settings(get_settings())))
     except ValueError as exc:
         sys.exit(f"invalid settings: {exc}")

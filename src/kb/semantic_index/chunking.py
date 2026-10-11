@@ -1,6 +1,6 @@
 """Turns KB nodes into LangChain `Document`s and splits them into line-addressed chunks.
 
-`FileNodeLoader` yields one `Document` per active file (folders have no content and
+`FileLoader` yields one `Document` per active file (folders have no content and
 are never indexed); `split_documents`
 cuts those into chunks whose metadata (`file_id`, `heading`, `start_line`, `end_line`,
 `title`) matches the `kb_chunks` columns in `kb.semantic_index.vectorstore`.
@@ -22,7 +22,7 @@ Decisions:
 - **Context prefix: yes.** Each chunk's `page_content` is
   `"<title> > <heading>\\n\\n<chunk text>"` (`"<title>\\n\\n<chunk text>"` when there's
   no heading), which helps the embedding place short chunks. The prefix is not part
-  of the file and is not counted in `start_line`/`end_line`; `chunk_text(doc)` strips
+  of the file and is not counted in `start_line`/`end_line`; `strip_context_prefix(doc)` strips
   it. Consequence: renaming a node re-embeds its chunks.
 - **Sizes: 1500 / 200 characters.** ~1500 chars is ~350-400 tokens, comfortably under
   the 2048-token context Ollama gives `nomic-embed-text` by default, yet large enough
@@ -62,7 +62,7 @@ _HEADING_RE = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
 _FENCE_RE = re.compile(r"^ {0,3}(```|~~~)")
 
 
-class FileNodeLoader(BaseLoader):
+class FileLoader(BaseLoader):
     """One `Document` per active (non-deleted) file. `file_ids=None` loads every such
     file; otherwise only those ids (ids that are missing, deleted or folders are
     silently not yielded).
@@ -84,10 +84,10 @@ class FileNodeLoader(BaseLoader):
             stmt = stmt.where(File.id.in_(self.file_ids))
         with self.session_factory() as session:
             for node in session.scalars(stmt.order_by(File.id)):
-                yield node_document(node)
+                yield file_to_document(node)
 
 
-def node_document(node: File) -> Document:
+def file_to_document(node: File) -> Document:
     """The loader's `Document` for one file -- also for a file that isn't committed (or
     even flushed) yet, which is how writes stage their chunks before the commit."""
     return Document(
@@ -142,7 +142,7 @@ def annotate_chunk(chunk: Document, source_text: str, paths: list[str | None] | 
     return Document(page_content=chunk.page_content, metadata=meta)
 
 
-def _with_context(chunk: Document) -> Document:
+def _prefix_with_title(chunk: Document) -> Document:
     title = chunk.metadata.get("title")
     heading = chunk.metadata.get("heading")
     label = HEADING_SEPARATOR.join(p for p in (title, heading) if p)
@@ -151,7 +151,7 @@ def _with_context(chunk: Document) -> Document:
     return Document(page_content=f"{label}{CONTEXT_SEPARATOR}{chunk.page_content}", metadata=chunk.metadata)
 
 
-def chunk_text(doc: Document) -> str:
+def strip_context_prefix(doc: Document) -> str:
     """The original file text of a chunk produced by `split_documents` (context prefix
     removed) -- i.e. exactly lines `start_line..end_line` of the virtual file, modulo
     leading/trailing whitespace trimmed by the splitter."""
@@ -185,5 +185,5 @@ def split_documents(
         paths = heading_paths(doc.page_content)
         for chunk in splitter.split_documents([doc]):
             annotated = annotate_chunk(chunk, doc.page_content, paths)
-            out.append(_with_context(annotated))
+            out.append(_prefix_with_title(annotated))
     return out

@@ -31,10 +31,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from kb import service
-from kb.settings import describe, get_settings
+from kb.settings import describe_settings, get_settings
 from kb.storage import blobs
 from kb.storage.db import SessionLocal
-from kb.retrieval.dci import DEFAULT_MAX_CHARS, DEFAULT_READ_LIMIT, MAX_CHARS_LIMIT
+from kb.retrieval.dci import DEFAULT_MAX_CHARS, DEFAULT_READ_LINE_COUNT, MAX_CHARS_LIMIT
 from kb.ingest import IngestFailed, UploadError, UploadLimits, UploadTooLarge, default_registry, ingest_upload
 from kb.api.schemas import (
     IngestExtensionsRead,
@@ -65,7 +65,7 @@ async def lifespan(app: FastAPI):
     """Logs the effective settings, then checks the blob store once at startup: with
     BLOB_REQUIRED=1 a missing or broken store aborts startup; otherwise a broken one is
     only logged."""
-    log.info("settings:\n%s", "\n".join(describe(get_settings())))
+    log.info("settings:\n%s", "\n".join(describe_settings(get_settings())))
     try:
         status = blobs.check_blob_store()
         log.info("blob store: %s", status)
@@ -190,9 +190,9 @@ def health():
 # --------------------------------------------------------------------------
 
 
-def _read(session: Session, node) -> NodeRead:
+def _to_node_read(session: Session, node) -> NodeRead:
     data = NodeRead.model_validate(node)
-    data.warnings = service.get_warnings(session, node)
+    data.warnings = service.collect_advisory_warnings(session, node)
     return data
 
 
@@ -215,7 +215,7 @@ def create_node(
     else:
         node = service.create_file(session, **payload)
     service.commit(session)
-    return _read(session, node)
+    return _to_node_read(session, node)
 
 
 @app.get("/nodes/roots", response_model=list[NodeSummary])
@@ -233,7 +233,7 @@ def query_nodes(
     include_deleted: bool = False,
     session: Session = Depends(get_session),
 ):
-    return service.query_metadata(
+    return service.find_nodes(
         session,
         tags=tags,
         status=status,
@@ -249,7 +249,7 @@ def get_node(node_id: uuid.UUID, session: Session = Depends(get_session)):
     node = service.get_node(session, node_id)
     if node is None:
         raise HTTPException(404, f"no such node: {node_id}")
-    return _read(session, node)
+    return _to_node_read(session, node)
 
 
 @app.get("/nodes/{node_id}/raw", response_class=Response)
@@ -280,14 +280,14 @@ def update_node(
 ):
     node = service.update_node(session, node_id, **body.model_dump(exclude_unset=True))
     service.commit(session)
-    return _read(session, node)
+    return _to_node_read(session, node)
 
 
 @app.post("/nodes/{node_id}/move", response_model=NodeRead)
 def move_node(node_id: uuid.UUID, body: MoveRequest, session: Session = Depends(get_session)):
     node = service.move_node(session, node_id, body.new_parent_id)
     service.commit(session)
-    return _read(session, node)
+    return _to_node_read(session, node)
 
 
 @app.post("/nodes/{node_id}/restore", response_model=NodeRead)
@@ -296,7 +296,7 @@ def restore_node(
 ):
     node = service.restore_node(session, node_id)
     service.commit(session)
-    return _read(session, node)
+    return _to_node_read(session, node)
 
 
 @app.delete("/nodes/{node_id}", status_code=204, response_class=Response)
@@ -377,7 +377,7 @@ def resolve_manifest(manifest_id: uuid.UUID, session: Session = Depends(get_sess
 # Direct corpus interaction (agent-facing ls/grep/read over a manifest)
 # --------------------------------------------------------------------------
 
-MaxChars = Query(DEFAULT_MAX_CHARS, ge=1, le=MAX_CHARS_LIMIT)
+MAX_CHARS_QUERY = Query(DEFAULT_MAX_CHARS, ge=1, le=MAX_CHARS_LIMIT)
 
 
 @app.get("/manifests/{manifest_id}/paths", response_model=ToolOutputRead)
@@ -385,7 +385,7 @@ def list_paths(
     manifest_id: uuid.UUID,
     under: str | None = None,
     recursive: bool = False,
-    max_chars: int = MaxChars,
+    max_chars: int = MAX_CHARS_QUERY,
     session: Session = Depends(get_session),
 ):
     return service.list_paths(
@@ -401,7 +401,7 @@ def search_lines(
     ignore_case: bool = False,
     context: int = Query(0, ge=0),
     files_only: bool = False,
-    max_chars: int = MaxChars,
+    max_chars: int = MAX_CHARS_QUERY,
     session: Session = Depends(get_session),
 ):
     return service.search_lines(
@@ -421,8 +421,8 @@ def read_lines(
     manifest_id: uuid.UUID,
     path: str,
     offset: int = Query(1, ge=1),
-    limit: int = Query(DEFAULT_READ_LIMIT, ge=1),
-    max_chars: int = MaxChars,
+    limit: int = Query(DEFAULT_READ_LINE_COUNT, ge=1),
+    max_chars: int = MAX_CHARS_QUERY,
     session: Session = Depends(get_session),
 ):
     return service.read_lines(

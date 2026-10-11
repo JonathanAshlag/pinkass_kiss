@@ -33,7 +33,7 @@ _pool: ProcessPoolExecutor | None = None
 _pool_lock = threading.Lock()
 
 
-def max_workers() -> int:
+def ingest_worker_count() -> int:
     return get_settings().ingest_workers
 
 
@@ -43,7 +43,7 @@ def _get_pool() -> ProcessPoolExecutor:
         if _pool is None:
             # spawn, not fork: the parent has threads (uvicorn, boto3, torch), and forking
             # a threaded process can deadlock the child.
-            _pool = ProcessPoolExecutor(max_workers(), mp_context=multiprocessing.get_context("spawn"))
+            _pool = ProcessPoolExecutor(ingest_worker_count(), mp_context=multiprocessing.get_context("spawn"))
         return _pool
 
 
@@ -68,18 +68,18 @@ def _run(processor: Processor, path: Path) -> ProcessedDocument:
     return processor.process(path)
 
 
-def _describe(exc: BaseException) -> str:
+def _describe_exception(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def convert_all(items: list[tuple[Path, Processor]]) -> list[ProcessedDocument | str]:
+def convert_documents(items: list[tuple[Path, Processor]]) -> list[ProcessedDocument | str]:
     """`processor.process(path)` for each item, in order: the document, or the error
     message if it raised (never raises itself). CPU-bound, picklable processors run in
     the shared process pool when there are at least two such files and more than one
     worker; everything else runs here, while the pool works."""
     results: list[ProcessedDocument | str | None] = [None] * len(items)
     offload = {i for i, (_, proc) in enumerate(items) if getattr(proc, "cpu_bound", False)}
-    if len(offload) < 2 or max_workers() < 2:
+    if len(offload) < 2 or ingest_worker_count() < 2:
         offload = set()
     else:
         offload = {i for i in offload if _picklable(items[i][1])}
@@ -105,7 +105,7 @@ def convert_all(items: list[tuple[Path, Processor]]) -> list[ProcessedDocument |
             try:
                 results[i] = proc.process(path)
             except Exception as exc:  # noqa: BLE001 -- any processor error is per-file
-                results[i] = _describe(exc)
+                results[i] = _describe_exception(exc)
 
     for i, future in futures.items():
         try:
@@ -114,7 +114,7 @@ def convert_all(items: list[tuple[Path, Processor]]) -> list[ProcessedDocument |
             # A worker died mid-conversion; we can't tell which file did it, so every file
             # still pending on the pool is reported (the ingest fails as a whole anyway).
             _discard_pool(pool)
-            results[i] = f"converter process crashed: {_describe(exc)}"
+            results[i] = f"converter process crashed: {_describe_exception(exc)}"
         except Exception as exc:  # noqa: BLE001
-            results[i] = _describe(exc)
+            results[i] = _describe_exception(exc)
     return results  # type: ignore[return-value]

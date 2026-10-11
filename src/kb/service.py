@@ -3,7 +3,7 @@ KB service layer: the single chokepoint every consumer (REST API, agents, ingest
 jobs, future services) goes through instead of calling kb.storage.dal directly.
 
 Mostly a thin passthrough to kb.storage.dal, plus three pieces of real logic:
-`get_warnings` composes kb.okf's advisory checks into a single report for a node;
+`collect_advisory_warnings` composes kb.okf's advisory checks into a single report for a node;
 every mutation runs the kb.policy permission check (folder/file kinds, agent lock) for
 its `actor` (default "human"; there is no authn yet) before delegating; and every
 mutation records the node ids it touched on the session, so that every commit is
@@ -43,7 +43,7 @@ PermissionDenied = PermissionDenied
 log = logging.getLogger(__name__)
 
 
-def get_warnings(session: Session, node: Node) -> list[str]:
+def collect_advisory_warnings(session: Session, node: Node) -> list[str]:
     """
     Composes kb.okf's advisory checks into one report for `node` (always [] for a
     folder -- they're all about file content/frontmatter). Never raises -- every
@@ -75,7 +75,7 @@ def get_warnings(session: Session, node: Node) -> list[str]:
 # written *before* it, where nothing can reach it yet -- search scopes to committed file
 # ids, and only a committed row points at an S3 object -- and is settled after it:
 #
-#   stage(...)        ingest, before its transaction: embed + index the new files
+#   stage_before_commit(...)        ingest, before its transaction: embed + index the new files
 #                     (add-only), upload their originals (parallel)
 #   before_commit     every commit: stage the files its writes touched (add-only;
 #                     chunks staged earlier are skipped, never re-embedded). Raises
@@ -90,16 +90,16 @@ def get_warnings(session: Session, node: Node) -> list[str]:
 # correctly either way. Settling never raises (failures are logged); what it can't
 # undo is unreachable anyway, and scripts/gc.py sweeps it after a crash.
 #
-# Mutations record the ids they touch in `session.info[_TOUCHED]` (and creations in
-# `_CREATED`). These live as long as the session's outermost transaction. A rolled-back
+# Mutations record the ids they touch in `session.info[_TOUCHED_KEY]` (and creations in
+# `_CREATED_KEY`). These live as long as the session's outermost transaction. A rolled-back
 # SAVEPOINT keeps its ids -- over-staging is harmless.
 
-_TOUCHED = "kb.touched_node_ids"
-_CREATED = "kb.created_node_ids"
-_STAGED = "kb.staged"  # staging ran (or started): the transaction end must settle
-_UPLOADED = "kb.uploaded_originals"  # {key: BlobStore} uploaded by this transaction
-_COMMITTED = "kb.committed"
-_LAST_STAGE = "kb.last_stage_result"  # outlives the transaction; read by commit()
+_TOUCHED_KEY = "kb.touched_node_ids"
+_CREATED_KEY = "kb.created_node_ids"
+_STAGED_KEY = "kb.staged"  # staging ran (or started): the transaction end must settle
+_UPLOADED_KEY = "kb.uploaded_originals"  # {key: BlobStore} uploaded by this transaction
+_COMMITTED_KEY = "kb.committed"
+_LAST_STAGE_KEY = "kb.last_stage_result"  # outlives the transaction; read by commit()
 
 
 
@@ -108,27 +108,27 @@ class IndexingError(Exception):
     ValueError: the API maps it to 503 (the embeddings server is a dependency)."""
 
 
-def _touch(session: Session, *node_ids: uuid.UUID, created: bool = False) -> None:
-    session.info.setdefault(_TOUCHED, {}).update(dict.fromkeys(node_ids))  # ordered set
+def _mark_touched(session: Session, *node_ids: uuid.UUID, created: bool = False) -> None:
+    session.info.setdefault(_TOUCHED_KEY, {}).update(dict.fromkeys(node_ids))  # ordered set
     if created:
-        session.info.setdefault(_CREATED, set()).update(node_ids)
+        session.info.setdefault(_CREATED_KEY, set()).update(node_ids)
     else:  # edited/deleted after its creation: may have stale staged chunks, so reconcile it
-        session.info.get(_CREATED, set()).difference_update(node_ids)
+        session.info.get(_CREATED_KEY, set()).difference_update(node_ids)
 
 
 def touched_ids(session: Session) -> list[uuid.UUID]:
     """Node ids the session's uncommitted writes touched, in first-touch order."""
-    return list(session.info.get(_TOUCHED, ()))
+    return list(session.info.get(_TOUCHED_KEY, ()))
 
 
-def _stage_index(session: Session, files: list[File]):
+def _stage_chunks(session: Session, files: list[File]):
     """Add-only indexing of `files` (committed or not); IndexingError on failure."""
-    from kb.semantic_index.chunking import node_document
+    from kb.semantic_index.chunking import file_to_document
     from kb.semantic_index.indexer import stage_documents
 
-    session.info[_STAGED] = True  # even a half-done staging must be settled
+    session.info[_STAGED_KEY] = True  # even a half-done staging must be settled
     try:
-        return stage_documents([node_document(f) for f in files])
+        return stage_documents([file_to_document(f) for f in files])
     except Exception as exc:
         raise IndexingError(f"indexing failed: {type(exc).__name__}: {exc}") from exc
 
@@ -138,7 +138,7 @@ def _upload_originals(session: Session, uploads: list[tuple[Any, str, Any]]) -> 
     (for the undo) before re-raising the first failure."""
     if not uploads:
         return
-    uploaded = session.info.setdefault(_UPLOADED, {})
+    uploaded = session.info.setdefault(_UPLOADED_KEY, {})
     errors: list[BaseException] = []
 
     def put(upload) -> None:
@@ -155,7 +155,7 @@ def _upload_originals(session: Session, uploads: list[tuple[Any, str, Any]]) -> 
         raise errors[0]
 
 
-def stage(
+def stage_before_commit(
     session: Session,
     *,
     files: list[File] = (),
@@ -171,22 +171,22 @@ def stage(
     session.connection()  # begin the transaction whose end will settle this
     files = list(files)
     ids = [f.id for f in files]
-    before = set(session.info.get(_UPLOADED, {}))
+    before = set(session.info.get(_UPLOADED_KEY, {}))
     try:
         if files:
-            _touch(session, *ids, created=True)  # first: a half-done staging is undone by id
-            _stage_index(session, files)
+            _mark_touched(session, *ids, created=True)  # first: a half-done staging is undone by id
+            _stage_chunks(session, files)
         _upload_originals(session, list(originals))
     except BaseException:
-        mine = {k: s for k, s in session.info.get(_UPLOADED, {}).items() if k not in before}
+        mine = {k: s for k, s in session.info.get(_UPLOADED_KEY, {}).items() if k not in before}
         for key in mine:
-            session.info[_UPLOADED].pop(key)
-        _settle(ids, set(), mine, committed=False)
+            session.info[_UPLOADED_KEY].pop(key)
+        _reconcile_after_transaction(ids, set(), mine, committed=False)
         raise
 
 
 @event.listens_for(Session, "before_commit")
-def _stage_touched(session: Session) -> None:
+def _stage_touched_files(session: Session) -> None:
     ids = touched_ids(session)
     if not ids:
         return
@@ -198,29 +198,29 @@ def _stage_touched(session: Session) -> None:
             .options(undefer(File.content))
         )
     )
-    session.info[_LAST_STAGE] = _stage_index(session, files)
+    session.info[_LAST_STAGE_KEY] = _stage_chunks(session, files)
 
 
 @event.listens_for(Session, "after_commit")
 def _mark_committed(session: Session) -> None:
-    session.info[_COMMITTED] = True
+    session.info[_COMMITTED_KEY] = True
 
 
 @event.listens_for(Session, "after_transaction_end")
-def _end_transaction(session: Session, transaction: SessionTransaction) -> None:
+def _on_transaction_end(session: Session, transaction: SessionTransaction) -> None:
     if transaction.parent is not None:
         return
     ids = touched_ids(session)
-    created = session.info.pop(_CREATED, set())
-    staged = session.info.pop(_STAGED, False)
-    uploaded = session.info.pop(_UPLOADED, {})
-    committed = session.info.pop(_COMMITTED, False)
-    session.info.pop(_TOUCHED, None)
+    created = session.info.pop(_CREATED_KEY, set())
+    staged = session.info.pop(_STAGED_KEY, False)
+    uploaded = session.info.pop(_UPLOADED_KEY, {})
+    committed = session.info.pop(_COMMITTED_KEY, False)
+    session.info.pop(_TOUCHED_KEY, None)
     if staged or uploaded:
-        _settle(ids, created, uploaded, committed)
+        _reconcile_after_transaction(ids, created, uploaded, committed)
 
 
-def _settle(ids: list[uuid.UUID], created: set, uploaded: dict, committed: bool) -> None:
+def _reconcile_after_transaction(ids: list[uuid.UUID], created: set, uploaded: dict, committed: bool) -> None:
     """After the commit: drop stale chunks of edited/deleted nodes (created ones were
     staged exactly). After a rollback (or a COMMIT with unknown outcome): make the index
     match the DB again for every staged id, and delete the uploaded originals no
@@ -237,12 +237,12 @@ def _settle(ids: list[uuid.UUID], created: set, uploaded: dict, committed: bool)
             log.exception("reconciling the index for %d node(s) failed", len(reconcile_ids))
     if uploaded and not committed:
         try:
-            _delete_unreferenced(uploaded)
+            _delete_orphaned_originals(uploaded)
         except Exception:
             log.exception("deleting %d uploaded original(s) failed", len(uploaded))
 
 
-def _delete_unreferenced(uploaded: dict) -> None:
+def _delete_orphaned_originals(uploaded: dict) -> None:
     from kb.storage.db import SessionLocal
 
     with SessionLocal() as s:
@@ -269,13 +269,13 @@ def commit(session: Session) -> CommitResult:
     this adds the rollback on failure and reports what was touched and indexed. Raises
     IndexingError (nothing committed) if embedding/indexing failed."""
     ids = touched_ids(session)
-    session.info.pop(_LAST_STAGE, None)
+    session.info.pop(_LAST_STAGE_KEY, None)
     try:
         session.commit()
     except BaseException:
         session.rollback()
         raise
-    return CommitResult(touched=ids, indexed=session.info.pop(_LAST_STAGE, None))
+    return CommitResult(touched=ids, indexed=session.info.pop(_LAST_STAGE_KEY, None))
 
 
 # --------------------------------------------------------------------------
@@ -312,11 +312,11 @@ def list_descendants(
 # --- permission checks (kb.policy) -------------------------------------------
 
 
-def _check(session: Session, actor: Actor, action: Action, node: Node) -> None:
+def _check_permission(session: Session, actor: Actor, action: Action, node: Node) -> None:
     check(actor, action, node, dal.list_ancestors(session, node))
 
 
-def _existing(session: Session, node_id: uuid.UUID) -> Node:
+def _get_active_node(session: Session, node_id: uuid.UUID) -> Node:
     node = dal.get_node(session, node_id, include_deleted=True)
     if node is None:
         raise ValueError(f"no such node: {node_id}")
@@ -337,11 +337,11 @@ def _check_create(
     parent = dal.get_folder(session, parent_id, include_deleted=True) if parent_id is not None else None
     if parent is None:
         return  # a root folder, or a bad parent_id that dal reports
-    _check(session, actor, Action.CREATE_INSIDE, parent)
+    _check_permission(session, actor, Action.CREATE_INSIDE, parent)
     if columns.get("kind", "manual") != "manual":
-        _check(session, actor, Action.SET_KIND, parent)
+        _check_permission(session, actor, Action.SET_KIND, parent)
     if columns.get("agent_locked"):
-        _check(session, actor, Action.SET_AGENT_LOCK, parent)
+        _check_permission(session, actor, Action.SET_AGENT_LOCK, parent)
 
 
 def create_file(
@@ -357,7 +357,7 @@ def create_file(
     node = dal.create_file(
         session, parent_id=parent_id, title=title, content=content, **other_columns
     )
-    _touch(session, node.id, created=True)
+    _mark_touched(session, node.id, created=True)
     return node
 
 
@@ -371,24 +371,24 @@ def create_folder(
 ) -> Folder:
     _check_create(session, actor, parent_id, other_columns)
     node = dal.create_folder(session, parent_id=parent_id, title=title, **other_columns)
-    _touch(session, node.id, created=True)  # folders are never indexed; recorded so callers needn't care
+    _mark_touched(session, node.id, created=True)  # folders are never indexed; recorded so callers needn't care
     return node
 
 
-_FIELD_ACTIONS = {"title": Action.RENAME, "kind": Action.SET_KIND, "agent_locked": Action.SET_AGENT_LOCK}
+_ACTION_BY_FIELD = {"title": Action.RENAME, "kind": Action.SET_KIND, "agent_locked": Action.SET_AGENT_LOCK}
 
 
 def update_node(session: Session, node_id: uuid.UUID, *, actor: Actor = "human", **fields) -> Node:
     """Each field that actually changes needs its action: title -> RENAME, kind ->
     SET_KIND, agent_locked -> SET_AGENT_LOCK, anything else -> EDIT. Checked against the
     node's current state, so unlocking a skeleton and renaming it are two updates."""
-    node = _existing(session, node_id)
+    node = _get_active_node(session, node_id)
     _reject_auto_updated(fields.get("kind"))
     changed = [key for key, value in fields.items() if getattr(node, key, None) != value]
-    for action in dict.fromkeys(_FIELD_ACTIONS.get(key, Action.EDIT) for key in changed):
-        _check(session, actor, action, node)
+    for action in dict.fromkeys(_ACTION_BY_FIELD.get(key, Action.EDIT) for key in changed):
+        _check_permission(session, actor, action, node)
     node = dal.update_node(session, node_id, **fields)
-    _touch(session, node.id)
+    _mark_touched(session, node.id)
     return node
 
 
@@ -403,13 +403,13 @@ def move_node(
 
     Records nothing for the index: chunks don't store paths (dci renders them at read
     time), so a move leaves every chunk valid. Revisit if chunks ever embed the path."""
-    node = _existing(session, node_id)
+    node = _get_active_node(session, node_id)
     if node.parent_id == new_parent_id:
         return node
-    _check(session, actor, Action.MOVE, node)
+    _check_permission(session, actor, Action.MOVE, node)
     destination = dal.get_folder(session, new_parent_id, include_deleted=True) if new_parent_id is not None else None
     if destination is not None:
-        _check(session, actor, Action.CREATE_INSIDE, destination)
+        _check_permission(session, actor, Action.CREATE_INSIDE, destination)
     return dal.move_node(session, node_id, new_parent_id)
 
 
@@ -419,10 +419,10 @@ def delete_node(session: Session, node_id: uuid.UUID, *, actor: Actor = "human")
 
     Records the node plus exactly the descendants the cascade soft-deletes
     (dal.delete_node only touches still-active ones), so their chunks go."""
-    _check(session, actor, Action.DELETE, _existing(session, node_id))
+    _check_permission(session, actor, Action.DELETE, _get_active_node(session, node_id))
     touched = [node_id, *(d.id for d in dal.list_descendants(session, node_id))]
     dal.delete_node(session, node_id)
-    _touch(session, *touched)
+    _mark_touched(session, *touched)
 
 
 def restore_node(session: Session, node_id: uuid.UUID, *, actor: Actor = "human") -> Node:
@@ -430,19 +430,19 @@ def restore_node(session: Session, node_id: uuid.UUID, *, actor: Actor = "human"
     The parent must be active: restoring into a deleted folder would leave an active
     node nobody can reach (and used to skip the permission check), so restore the
     parent first -- FieldError otherwise."""
-    node = _existing(session, node_id)
+    node = _get_active_node(session, node_id)
     if node.parent_id is not None:
         parent = dal.get_folder(session, node.parent_id, include_deleted=True)
         if parent is not None and parent.deleted_at is not None:
             raise FieldError(f"cannot restore {node.title!r}: its folder {parent.title!r} is deleted (restore it first)")
         if parent is not None:
-            _check(session, actor, Action.CREATE_INSIDE, parent)
+            _check_permission(session, actor, Action.CREATE_INSIDE, parent)
     node = dal.restore_node(session, node_id)
-    _touch(session, node_id)  # single-node restore, so only this node comes back
+    _mark_touched(session, node_id)  # single-node restore, so only this node comes back
     return node
 
 
-def query_metadata(
+def find_nodes(
     session: Session,
     *,
     tags: list[str] | None = None,
@@ -452,7 +452,7 @@ def query_metadata(
     parent_id: uuid.UUID | None = None,
     include_deleted: bool = False,
 ) -> list[Node]:
-    return dal.query_metadata(
+    return dal.find_nodes(
         session,
         tags=tags,
         status=status,
@@ -486,11 +486,11 @@ def list_manifests(session: Session, *, include_deleted: bool = False) -> list[M
     return dal.list_manifests(session, include_deleted=include_deleted)
 
 
-def _member_target(session: Session, node_id: uuid.UUID | None) -> dict:
+def _member_column_for(session: Session, node_id: uuid.UUID | None) -> dict:
     """A node id as the dal's file_id=/folder_id= keyword."""
     if node_id is None:
         return {}
-    node = _existing(session, node_id)
+    node = _get_active_node(session, node_id)
     return {"folder_id" if isinstance(node, Folder) else "file_id": node_id}
 
 
@@ -505,7 +505,7 @@ def add_manifest_member(
     if (node_id is None) == (child_manifest_id is None):
         raise ValueError("exactly one of node_id or child_manifest_id must be set")
     return dal.add_manifest_member(
-        session, manifest_id, child_manifest_id=child_manifest_id, **_member_target(session, node_id)
+        session, manifest_id, child_manifest_id=child_manifest_id, **_member_column_for(session, node_id)
     )
 
 
@@ -519,7 +519,7 @@ def remove_manifest_member(
     if (node_id is None) == (child_manifest_id is None):  # else the DAL query has no filter and deletes every member (#31)
         raise FieldError("give exactly one of node_id / child_manifest_id")
     dal.remove_manifest_member(
-        session, manifest_id, child_manifest_id=child_manifest_id, **_member_target(session, node_id)
+        session, manifest_id, child_manifest_id=child_manifest_id, **_member_column_for(session, node_id)
     )
 
 
@@ -578,7 +578,7 @@ def read_lines(
     path: str,
     *,
     offset: int = 1,
-    limit: int = dci.DEFAULT_READ_LIMIT,
+    limit: int = dci.DEFAULT_READ_LINE_COUNT,
     max_chars: int = dci.DEFAULT_MAX_CHARS,
 ) -> dci.ToolOutput:
     return dci.read_lines(

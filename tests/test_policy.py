@@ -2,7 +2,7 @@
 
 import pytest
 
-from kb.policy import Action, PermissionDenied, allowed, check
+from kb.policy import Action, PermissionDenied, is_allowed, check
 from kb.storage.models import File, Folder
 
 A = Action
@@ -20,7 +20,7 @@ def file(kind="manual", agent_locked=False, title="doc"):
 
 
 def permitted(actor, node, ancestors=()):
-    return {a for a in ALL if allowed(actor, a, node, ancestors)}
+    return {a for a in ALL if is_allowed(actor, a, node, ancestors)}
 
 
 # --- folders ------------------------------------------------------------------
@@ -50,7 +50,7 @@ def test_skeleton_lock_covers_that_folder_only():
 
 
 def test_files_cannot_contain_nodes():
-    assert not allowed("human", A.CREATE_INSIDE, file(), [folder()])
+    assert not is_allowed("human", A.CREATE_INSIDE, file(), [folder()])
 
 
 @pytest.mark.parametrize(
@@ -89,9 +89,9 @@ def test_agent_lock_is_not_recursive():
 
 
 def test_agent_locked_folder_blocks_creating_inside():
-    assert not allowed("agent", A.CREATE_INSIDE, folder(agent_locked=True))
-    assert allowed("agent", A.CREATE_INSIDE, folder(), [folder(agent_locked=True)])
-    assert allowed("agent", A.CREATE_INSIDE, folder())
+    assert not is_allowed("agent", A.CREATE_INSIDE, folder(agent_locked=True))
+    assert is_allowed("agent", A.CREATE_INSIDE, folder(), [folder(agent_locked=True)])
+    assert is_allowed("agent", A.CREATE_INSIDE, folder())
 
 
 def test_denial_message_names_the_reason():
